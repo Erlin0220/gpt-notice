@@ -112,8 +112,17 @@
     }
   }
 
+  function getNotifierTaskState() {
+    try {
+      const snapshot = globalThis.ChatGPTTaskNotifierBridge?.getTaskState?.();
+      return snapshot && typeof snapshot === "object" ? snapshot : {};
+    } catch {
+      return {};
+    }
+  }
   function collectSnapshot(now = Date.now()) {
     const assistant = getLatestAssistant();
+    const taskState = getNotifierTaskState();
     const composerText = getComposerText();
     return {
       assistant,
@@ -122,6 +131,8 @@
       assistantCount: assistant.count,
       stopVisible: hasStopControl(),
       waitingAction: hasApprovalControl(),
+      taskRunning: Boolean(taskState.running || ["running", "waiting_action"].includes(taskState.status)),
+      taskStatus: String(taskState.status || ""),
       busy: hasBusyIndicator(),
       visibleError: findVisibleError(),
       composerReady: isComposerReady(),
@@ -148,6 +159,10 @@
   }
 
   function isManualHoldActive(snapshot, now) {
+    if (snapshot.taskRunning) {
+      runtime.manualTaskObserved = true;
+      return true;
+    }
     if (runtime.manualSubmissionPendingUntil > now) {
       if (snapshot.stopVisible || snapshot.busy || snapshot.waitingAction || snapshot.userCount > 0) {
         runtime.manualTaskObserved = true;
@@ -239,7 +254,7 @@
 
     const snapshot = collectSnapshot();
     const latestUserText = getLatestUserText();
-    const wasSubmitted = snapshot.stopVisible || snapshot.busy || snapshot.waitingAction || samePrompt(latestUserText, activeItem.text);
+    const wasSubmitted = snapshot.stopVisible || snapshot.busy || snapshot.waitingAction || snapshot.taskRunning || samePrompt(latestUserText, activeItem.text);
     if (wasSubmitted) {
       await mutateCurrentQueue((queue) => {
         const item = queue.items.find((candidate) => candidate.id === activeItem.id);
@@ -447,9 +462,14 @@
 
   function ensureUi() {
     let root = document.getElementById(UI_ID);
+    if (root && root.dataset.gptqOwner !== runtime.instanceId) {
+      root.remove();
+      root = null;
+    }
     if (!root) {
       root = document.createElement("div");
       root.id = UI_ID;
+      root.dataset.gptqOwner = runtime.instanceId;
       root.innerHTML = buildUiMarkup();
       (document.body || document.documentElement).appendChild(root);
       bindUiEvents(root);
@@ -481,29 +501,39 @@
 
   function bindUiEvents(root) {
     root.addEventListener("click", async (event) => {
-      const button = event.target.closest("button");
-      if (!button) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const button = target?.closest?.("button");
+      if (!button || !root.contains(button)) return;
       const action = button.dataset.action;
-      if (button.classList.contains("gptq-trigger")) {
-        const panel = root.querySelector(".gptq-panel");
-        panel.hidden = !panel.hidden;
-        return;
+      if (!action && !button.classList.contains("gptq-trigger")) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        if (button.classList.contains("gptq-trigger")) {
+          const panel = root.querySelector(".gptq-panel");
+          panel.hidden = !panel.hidden;
+          return;
+        }
+        if (action === "close") root.querySelector(".gptq-panel").hidden = true;
+        else if (action === "enqueue") await enqueueComposerText();
+        else if (action === "pause") await mutateCurrentQueue((queue) => ({ ...queue, paused: !queue.paused }));
+        else if (action === "clear-completed") {
+          await mutateCurrentQueue((queue) => {
+            queue.items = queue.items.filter((item) => item.status !== "completed");
+            return queue;
+          });
+        } else if (action === "delete") await deleteItem(button.dataset.id);
+        else if (action === "up" || action === "down") await moveItem(button.dataset.id, action);
+        else if (action === "edit") await editItem(button.dataset.id);
+        else if (action === "retry") await retryItem(button.dataset.id);
+        renderUi(root);
+        void inspect();
+      } catch (error) {
+        console.warn("[ChatGPT Message Queue] UI action failed", action, error);
+        showUiNotice(`队列操作失败：${error?.message || "未知错误"}`);
       }
-      if (action === "close") root.querySelector(".gptq-panel").hidden = true;
-      else if (action === "enqueue") await enqueueComposerText();
-      else if (action === "pause") await mutateCurrentQueue((queue) => ({ ...queue, paused: !queue.paused }));
-      else if (action === "clear-completed") {
-        await mutateCurrentQueue((queue) => {
-          queue.items = queue.items.filter((item) => item.status !== "completed");
-          return queue;
-        });
-      } else if (action === "delete") await deleteItem(button.dataset.id);
-      else if (action === "up" || action === "down") await moveItem(button.dataset.id, action);
-      else if (action === "edit") await editItem(button.dataset.id);
-      else if (action === "retry") await retryItem(button.dataset.id);
-      renderUi(root);
-      void inspect();
-    });
+    }, true);
   }
 
   function renderUi(root = document.getElementById(UI_ID)) {

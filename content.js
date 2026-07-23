@@ -28,6 +28,18 @@
     inspectionScheduled: false
   };
 
+  globalThis.ChatGPTTaskNotifierBridge = {
+    getTaskState() {
+      return {
+        taskId: state.taskId,
+        running: state.running,
+        status: state.remoteStatus,
+        startedAt: state.startedAt,
+        isMonitor: state.isMonitor
+      };
+    }
+  };
+
   boot().catch((error) => console.debug("[ChatGPT Task Notifier] boot failed", error));
 
   async function boot() {

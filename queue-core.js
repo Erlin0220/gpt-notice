@@ -141,6 +141,7 @@
       snapshot?.stopVisible ||
       snapshot?.busy ||
       snapshot?.waitingAction ||
+      snapshot?.taskRunning ||
       snapshot?.manualHold
     );
   }
@@ -149,7 +150,7 @@
     const normalized = normalizeQueue(queue);
     if (normalized.paused || normalized.activeItemId || !getNextPendingItem(normalized)) return false;
     if (normalized.nextDispatchAt > now) return false;
-    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.visibleError) return false;
+    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.visibleError) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
     if (snapshot.busy && stableForMs < 8_000) return false;
     if (snapshot.manualHold || snapshot.composerEmpty === false) return false;
@@ -158,7 +159,7 @@
 
   function isItemCompleted(item, snapshot, now = Date.now()) {
     if (!item || !["dispatching", "running"].includes(item.status)) return false;
-    if (snapshot?.stopVisible || snapshot?.waitingAction || snapshot?.visibleError || !snapshot?.composerReady) return false;
+    if (snapshot?.stopVisible || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.visibleError || !snapshot?.composerReady) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
     if (stableForMs < 4_000) return false;
     if (item.startedAt && now - item.startedAt < 1_800) return false;

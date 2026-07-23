@@ -47,8 +47,10 @@ const idleSnapshot = {
 assert.equal(core.canAdmit(queue, idleSnapshot), false, "idle conversation must reject queue admission");
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, busy: true }), true);
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, waitingAction: true }), true);
+assert.equal(core.canAdmit(queue, { ...idleSnapshot, taskRunning: true }), true, "a refreshed background task must keep queue admission enabled");
 
 assert.equal(core.canDispatch(queue, idleSnapshot), true);
+assert.equal(core.canDispatch(queue, { ...idleSnapshot, taskRunning: true }), false, "a refreshed running task must block the next queued prompt");
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, busy: true, stableForMs: 5_000 }), false);
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, busy: true, stableForMs: 8_500 }), true, "stale busy indicator must not block next dispatch");
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }), false, "draft must block auto dispatch");
@@ -88,6 +90,19 @@ assert.equal(core.isItemCompleted(active, {
   stableForMs: 8_500
 }), true, "stale busy indicator must not block completion forever");
 
+assert.equal(core.isItemCompleted(active, {
+  assistantHash: "new",
+  assistantText: "still running",
+  assistantCount: 3,
+  composerReady: true,
+  stopVisible: false,
+  waitingAction: false,
+  taskRunning: true,
+  busy: false,
+  visibleError: false,
+  stableForMs: 8_500
+}), false, "background task state must prevent false completion after refresh");
+
 const moved = core.moveItem(queue.items, itemB.id, "up");
 assert.equal(moved[0].id, itemB.id);
 
@@ -118,4 +133,4 @@ const manyPending = Array.from({ length: 130 }, (_, index) => ({
 const pendingQueue = core.normalizeQueue({ items: manyPending }, "c:pending");
 assert.equal(pendingQueue.items.length, 130, "history pruning must never discard unfinished queue items");
 
-console.log("queue v0.5.2 tests passed");
+console.log("queue v0.5.3 tests passed");

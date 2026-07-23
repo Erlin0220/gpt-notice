@@ -29,6 +29,9 @@ assert.ok(queueCore.includes("shouldMigrateQueue"), "queue migration must be con
 assert.ok(queue.includes("当前没有正在进行的会话，不能加入队列"));
 assert.ok(queue.includes("acquireLease"), "queue must prevent duplicate dispatch across tabs");
 assert.ok(queue.includes("acquireWriteLock"), "queue writes must be serialized across tabs");
+assert.ok(queue.includes("dataset.gptqOwner"), "stale queue UI must be replaced after script reload");
+assert.ok(queue.includes("ChatGPTTaskNotifierBridge"), "queue must read restored task state after refresh");
+assert.ok(content.includes("ChatGPTTaskNotifierBridge"), "task notifier must expose restored running state to the queue");
 assert.ok(queue.includes("MAX_AUTO_RETRY = 1"));
 
 console.log(`static v${manifest.version} tests passed`);
