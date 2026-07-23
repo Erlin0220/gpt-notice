@@ -49,10 +49,15 @@ function reconcileQueueObservers() {
 
 async function reconcileQueueObserversNow() {
   const stored = await chrome.storage.local.get([QUEUE_STORAGE_KEY_V051, QUEUE_OBSERVER_STORAGE_KEY]);
-  const queues = stored[QUEUE_STORAGE_KEY_V051] || {};
+  const queues = Object.fromEntries(
+    Object.entries(stored[QUEUE_STORAGE_KEY_V051] || {}).map(([key, queue]) => [key, normalizeBackgroundQueue(queue, key)])
+  );
   const observers = { ...(stored[QUEUE_OBSERVER_STORAGE_KEY] || {}) };
   const tabs = await queryQueueChatTabs();
   const now = Date.now();
+  const activeEntries = Object.entries(queues).filter(([, queue]) => isBackgroundQueueActive(queue));
+  const activeKeys = new Set(activeEntries.map(([key]) => key));
+  const staleObservers = [];
   let changed = false;
 
   for (const [key, observer] of Object.entries(observers)) {
@@ -66,35 +71,67 @@ async function reconcileQueueObserversNow() {
     observer.windowId = tab.windowId;
   }
 
-  for (const [key, rawQueue] of Object.entries(queues)) {
-    const queue = normalizeBackgroundQueue(rawQueue, key);
-    const active = isBackgroundQueueActive(queue);
-    const observer = observers[key];
-    const matchingTabs = tabs.filter((tab) => queueTabMatches(tab, key, queue.conversationUrl));
-
-    if (active) {
-      if (observer) {
+  for (const [key, queue] of activeEntries) {
+    let observer = observers[key];
+    if (observer) {
+      const observerTab = tabs.find((tab) => tab.id === observer.tabId);
+      if (observerTab && queueTabMatches(observerTab, key, queue.conversationUrl)) {
         if (observer.cleanupAt) changed = true;
         observer.cleanupAt = 0;
+        observer.url = observerTab.url || queue.conversationUrl;
         observers[key] = observer;
-        try {
-          await chrome.tabs.update(observer.tabId, { muted: true, autoDiscardable: false });
-        } catch {}
+        await makeQueueObserverDurable(observer.tabId);
         continue;
       }
-      if (matchingTabs.length) continue;
-      const created = await createQueueObserverTab(key, queue.conversationUrl);
-      if (created) {
-        const createdTab = created.tab;
-        delete created.tab;
-        observers[key] = created;
+      staleObservers.push(observer);
+      delete observers[key];
+      changed = true;
+      observer = null;
+    }
+
+    const matchingTabs = tabs.filter((tab) => queueTabMatches(tab, key, queue.conversationUrl));
+    if (matchingTabs.length) {
+      const preferred = [...matchingTabs].sort((a, b) => Number(b.active) - Number(a.active))[0];
+      const donor = Object.entries(observers).find(([, candidate]) => candidate?.tabId === preferred.id);
+      if (donor) {
+        const [donorKey, donorObserver] = donor;
+        delete observers[donorKey];
+        observers[key] = {
+          ...donorObserver,
+          url: preferred.url || queue.conversationUrl,
+          windowId: preferred.windowId,
+          cleanupAt: 0
+        };
         changed = true;
-        tabs.push(createdTab);
+        await makeQueueObserverDurable(preferred.id);
       }
       continue;
     }
 
-    if (!observer) continue;
+    const created = await createQueueObserverTab(key, queue.conversationUrl);
+    if (created) {
+      const createdTab = created.tab;
+      delete created.tab;
+      observers[key] = created;
+      changed = true;
+      tabs.push(createdTab);
+    }
+  }
+
+  for (const [key, observer] of Object.entries(observers)) {
+    if (activeKeys.has(key)) continue;
+    const tab = tabs.find((candidate) => candidate.id === observer.tabId);
+    const neededByActiveQueue = tab && activeEntries.some(([activeKey, queue]) => {
+      return queueTabMatches(tab, activeKey, queue.conversationUrl);
+    });
+    const mappedElsewhere = Object.entries(observers).some(([otherKey, other]) => {
+      return otherKey !== key && activeKeys.has(otherKey) && other?.tabId === observer.tabId;
+    });
+    if (neededByActiveQueue || mappedElsewhere) {
+      delete observers[key];
+      changed = true;
+      continue;
+    }
     if (!observer.cleanupAt) {
       observer.cleanupAt = now + QUEUE_CLEANUP_GRACE_MS;
       observers[key] = observer;
@@ -107,14 +144,24 @@ async function reconcileQueueObserversNow() {
     try { await chrome.tabs.remove(observer.tabId); } catch {}
   }
 
-  for (const [key, observer] of Object.entries(observers)) {
-    if (queues[key]) continue;
-    delete observers[key];
-    changed = true;
+  for (const observer of staleObservers) {
+    const tab = tabs.find((candidate) => candidate.id === observer.tabId);
+    if (!tab) continue;
+    const stillMapped = Object.values(observers).some((candidate) => candidate?.tabId === observer.tabId);
+    const neededByActiveQueue = activeEntries.some(([activeKey, queue]) => {
+      return queueTabMatches(tab, activeKey, queue.conversationUrl);
+    });
+    if (stillMapped || neededByActiveQueue) continue;
     try { await chrome.tabs.remove(observer.tabId); } catch {}
   }
 
   if (changed) await chrome.storage.local.set({ [QUEUE_OBSERVER_STORAGE_KEY]: observers });
+}
+
+async function makeQueueObserverDurable(tabId) {
+  try {
+    await chrome.tabs.update(tabId, { muted: true, autoDiscardable: false });
+  } catch {}
 }
 
 function normalizeBackgroundQueue(queue = {}, key = "") {
