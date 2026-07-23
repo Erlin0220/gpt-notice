@@ -3,7 +3,16 @@ const STATUS_TEXT = {
   waiting_action: "等待操作",
   completed: "已完成",
   failed: "失败",
-  cancelled: "已停止"
+  cancelled: "已停止",
+  observer_lost: "连接丢失",
+  monitor_stopped: "监控已停止"
+};
+
+const OBSERVER_TEXT = {
+  normal_tab: "前台标签监控",
+  group_tab: "GPT 后台标签组",
+  lost: "未连接",
+  none: "无监控页面"
 };
 
 let popupState = null;
@@ -18,10 +27,11 @@ async function init() {
 function bindEvents() {
   document.querySelectorAll("[data-setting]").forEach((input) => {
     input.addEventListener("change", async () => {
-      await chrome.runtime.sendMessage({
-        type: "UPDATE_SETTINGS",
-        settings: { [input.dataset.setting]: input.checked }
-      });
+      const key = input.dataset.setting;
+      const value = input.type === "checkbox" ? input.checked : Number(input.value);
+      const settings = { [key]: value };
+      if (key === "autoKeepAlive") settings.backgroundMonitorMode = value ? "tab_group" : "disabled";
+      await chrome.runtime.sendMessage({ type: "UPDATE_SETTINGS", settings });
       await refresh();
     });
   });
@@ -29,12 +39,10 @@ function bindEvents() {
   document.getElementById("testButton").addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "TEST_NOTIFICATION" });
   });
-
   document.getElementById("openChatButton").addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "OPEN_CHAT" });
     window.close();
   });
-
   document.getElementById("clearButton").addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "CLEAR_HISTORY" });
     await refresh();
@@ -47,26 +55,27 @@ async function refresh() {
 
   for (const [key, value] of Object.entries(popupState.settings)) {
     const input = document.querySelector(`[data-setting="${key}"]`);
-    if (input) input.checked = Boolean(value);
+    if (!input) continue;
+    if (input.type === "checkbox") input.checked = Boolean(value);
+    else input.value = String(value);
   }
 
   const activeCount = popupState.tasks.filter((task) => ["running", "waiting_action"].includes(task.status)).length;
+  const backgroundCount = popupState.tasks.filter((task) => task.observerMode === "group_tab").length;
   document.getElementById("summary").textContent = activeCount
-    ? `正在监控 ${activeCount} 个任务`
+    ? `正在监控 ${activeCount} 个任务${backgroundCount ? `，其中 ${backgroundCount} 个在后台组` : ""}`
     : "当前没有运行中的任务";
 
   document.getElementById("permissionWarning").classList.toggle(
     "hidden",
     popupState.permissionLevel === "granted"
   );
-
   renderTasks(popupState.tasks);
 }
 
 function renderTasks(tasks) {
   const list = document.getElementById("taskList");
   list.replaceChildren();
-
   if (!tasks.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
@@ -81,45 +90,65 @@ function renderTasks(tasks) {
 
     const head = document.createElement("div");
     head.className = "task-head";
-
-    const prompt = document.createElement("div");
-    prompt.className = "task-prompt";
-    prompt.title = task.prompt || "ChatGPT 任务";
-    prompt.textContent = task.prompt || "ChatGPT 任务";
-
+    const title = document.createElement("div");
+    title.className = "task-title";
+    title.title = task.title || task.prompt || "ChatGPT 任务";
+    title.textContent = task.title || task.prompt || "ChatGPT 任务";
     const badge = document.createElement("span");
     badge.className = `badge ${task.status}`;
     badge.textContent = STATUS_TEXT[task.status] || task.status;
+    head.append(title, badge);
 
     const meta = document.createElement("div");
     meta.className = "task-meta";
-    meta.textContent = `${task.hasMonitor ? "后台监控 · " : ""}${formatTime(task.updatedAt)}`;
+    const cleanup = task.cleanupAt && task.cleanupAt > Date.now()
+      ? ` · ${Math.max(0, Math.ceil((task.cleanupAt - Date.now()) / 1000))} 秒后清理`
+      : "";
+    meta.textContent = `${OBSERVER_TEXT[task.observerMode] || task.observerMode} · ${formatTime(task.updatedAt)}${cleanup}`;
+
+    card.append(head, meta);
+    if (task.observerLostReason) {
+      const error = document.createElement("div");
+      error.className = "task-error";
+      error.textContent = task.observerLostReason;
+      card.append(error);
+    }
 
     const actions = document.createElement("div");
     actions.className = "task-actions";
-
-    const open = document.createElement("button");
-    open.textContent = "打开";
-    open.addEventListener("click", async () => {
+    actions.append(makeButton("打开", async () => {
       await chrome.runtime.sendMessage({ type: "OPEN_TASK", taskId: task.id });
       window.close();
-    });
-    actions.append(open);
+    }));
 
+    if (task.hasMonitor) {
+      actions.append(makeButton("提升为普通标签", async () => {
+        await chrome.runtime.sendMessage({ type: "PROMOTE_TASK", taskId: task.id });
+        window.close();
+      }));
+    }
     if (["running", "waiting_action"].includes(task.status)) {
-      const stop = document.createElement("button");
-      stop.textContent = "停止监控";
-      stop.addEventListener("click", async () => {
+      actions.append(makeButton("停止监控", async () => {
         await chrome.runtime.sendMessage({ type: "STOP_TASK", taskId: task.id });
         await refresh();
-      });
-      actions.append(stop);
+      }));
     }
-
-    head.append(prompt, badge);
-    card.append(head, meta, actions);
+    if (["observer_lost", "monitor_stopped"].includes(task.status)) {
+      actions.append(makeButton("恢复监控", async () => {
+        await chrome.runtime.sendMessage({ type: "RESUME_TASK", taskId: task.id });
+        await refresh();
+      }));
+    }
+    card.append(actions);
     list.append(card);
   }
+}
+
+function makeButton(label, onClick) {
+  const button = document.createElement("button");
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 function formatTime(timestamp) {

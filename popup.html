@@ -9,10 +9,10 @@
   <body>
     <main>
       <header>
-        <div class="logo">✓</div>
+        <img class="logo" src="icons/chatgpt.png" alt="ChatGPT" />
         <div>
           <h1>ChatGPT 任务提醒</h1>
-          <p id="summary">正在读取状态…</p>
+          <p id="summary">正在读取任务状态…</p>
         </div>
       </header>
 
@@ -26,6 +26,24 @@
           <input type="checkbox" data-setting="autoKeepAlive" />
         </label>
         <label>
+          <span>后台标签异常时自动恢复</span>
+          <input type="checkbox" data-setting="autoRecoverDiscardedTab" />
+        </label>
+        <label>
+          <span>任务完成后清理后台标签</span>
+          <input type="checkbox" data-setting="closeMonitorWhenDone" />
+        </label>
+        <label>
+          <span>完成后保留时间</span>
+          <select data-setting="completedTabGraceSeconds">
+            <option value="0">立即关闭</option>
+            <option value="15">15 秒</option>
+            <option value="30">30 秒</option>
+            <option value="60">60 秒</option>
+            <option value="120">2 分钟</option>
+          </select>
+        </label>
+        <label>
           <span>任务完成提醒</span>
           <input type="checkbox" data-setting="notifyCompleted" />
         </label>
@@ -34,7 +52,7 @@
           <input type="checkbox" data-setting="notifyAttention" />
         </label>
         <label>
-          <span>任务失败提醒</span>
+          <span>失败或断开提醒</span>
           <input type="checkbox" data-setting="notifyFailed" />
         </label>
         <label>
@@ -57,7 +75,7 @@
       </section>
 
       <footer>
-        关闭原标签后会创建一个最小化 Chrome 监控窗口。退出整个 Chrome 后无法继续提醒。
+        关闭任务标签后，扩展会在现有 Chrome 窗口的折叠“GPT 后台”标签组中继续监控，不再创建独立任务栏窗口。完全退出 Chrome 后无法继续监控。
       </footer>
     </main>
     <script src="popup.js"></script>
