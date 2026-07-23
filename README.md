@@ -77,8 +77,8 @@ node tests/background.test.js
 
 ## 文件说明
 
-- `background.js`：任务存储、会话级去重、标签关闭接管、Windows 通知和窗口复用。
+- `background.js`：后台入口；`background-events.js`、`background-actions.js`、`background-utils.js` 分别负责事件、窗口操作和状态工具。
 - `content.js`：监听页面生成状态和后台监控刷新。
 - `popup.*`：扩展弹窗和设置。
-- `icons/`：扩展图标。
+- 扩展图标以内嵌 PNG 生成，不依赖额外二进制资源。
 - `tests/`：无依赖的后台逻辑测试。
