@@ -10,7 +10,8 @@ function event() {
 const calls = {
   tabsCreate: 0,
   tabsUpdate: [],
-  windowsUpdate: []
+  windowsUpdate: [],
+  notifications: []
 };
 
 const storage = { settings: {}, tasks: {} };
@@ -21,7 +22,8 @@ const chrome = {
   runtime: {
     onInstalled: event(),
     onStartup: event(),
-    onMessage: event()
+    onMessage: event(),
+    getURL(path) { return `chrome-extension://test/${path}`; }
   },
   tabs: {
     onRemoved: event(),
@@ -69,7 +71,7 @@ const chrome = {
   notifications: {
     onClicked: event(),
     onButtonClicked: event(),
-    async create() {},
+    async create(id, options) { calls.notifications.push({ id, options }); },
     async getPermissionLevel() { return "granted"; }
   },
   storage: {
@@ -135,7 +137,25 @@ assert.equal(preferred.id, 1, "normal tab should be preferred over monitor tab")
   assert.equal(calls.tabsCreate, 0, "opening a task must reuse an existing conversation tab");
   assert.equal(calls.tabsUpdate.at(-1).id, 101);
   assert.equal(calls.windowsUpdate.at(-1).id, 10);
-  console.log("background tests passed");
+
+    await context.maybeNotify({
+      ...storage.tasks.reuse,
+      id: "notice",
+      status: "completed",
+      title: "生成 Releases",
+      thinkingTimeText: "思考了 37m 51s",
+      assistantFirstLine: "计划已执行完成，v3.0.0 已推送到 GitHub。"
+    }, {
+      notifyCompleted: true,
+      notifyAttention: true,
+      notifyFailed: true,
+      notifyWhenFocused: true
+    });
+    const notice = calls.notifications.at(-1).options;
+    assert.equal(notice.title, "生成 Releases");
+    assert.equal(notice.message, "思考了 37m 51s，计划已执行完成，v3.0.0 已推送到 GitHub。");
+    assert.equal(notice.iconUrl, "chrome-extension://test/icons/chatgpt.png");
+    console.log("background tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

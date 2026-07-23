@@ -16,7 +16,7 @@ const ACTIVE_STATUSES = new Set(["running", "waiting_action"]);
 const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const MAX_TASK_HISTORY = 30;
 const CHAT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
-const NOTIFICATION_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAEPUlEQVR4nO2cS3LbMBBER6rs45PGu/gM9s4+qXUCZ5Gii6JFEv/pQffb2SVREPphABKkLtaB33//fPU4Lju3t49L62M2OaAC96GFEFUHUPAY1IhQ9EYFj0mJCFlvUPAxyBHhmvpChR+HnKySBFD48UjN7FQAhR+XlOwOBVD48TnLcFcAhT8PR1k+FEDhz8depj8EUPjz8ijb5NNAMSd3Amj0z882Y1UAcr4F0OjnYZ21KgA5VzONfkaWzFUByJEA5EgAci6a/7lRBSDnl3cDRvH5+p71+qeX504twWLaKSA38DNmFWIqAVqHvsdMMkwhwKjgt8wgQmgBvILfElmEsGcBKOGbYbUll3AVAL2zo1WDUBUAPXyzGG1cE0aASB0bqa0hpoBWHZpankd/nifwAtSGURuC9+f3BlqA0s7v1elo7WkBrAAlnT2qo5HblgvkIhC9g0s+C3VhGH430GtkLZ+LGmwqcBUgp0MRympOGxBlgRIgWvgLkSWAEiAVpPAXENuUAowAaCOjJ0jfFUaAVJBHGnLb9oAQIHVEIHbwtu2jLzfXAiFAVJYQUcIswV2AqKN/2+7135GqgLsAEdkLDiHQXEIIgDb6j/h8fbfP1/cwbXYVIOKISW1z69f1Ar4CII0k77B6AC8ACug7lKVIgARmDd/MeTs4wpZqr/BRBIG9IwiBGW8B26IpoDGRwjeTALvMPO+vkQAPYAnfTAL8gCl8MwlwB1v4ZhMKULpyZwzfbDIBSvfnka9D9Ga4AL06+2h/vgdoj5+V4nIlsPQ2qtTjrf9/dmzv0u9dfSCeDKoR4qwDjyTwCN878C1Dp4DWX75mz9175KMQdhFYs9BDD39klYCYAtakdPTIUz2zOUf+QsgKEDkQtLaHFMBsXEeiBdaasAKY9Q9n9vDNBgrQa2HTKySG8M2CV4CF1mGxhG8GJkBNx7cKjSl8MzABaqkNDyn8UdcCphLADCvECEwngFmZBOg/M9eLIQJ4bIDkdDJSIKOZsgIsRHpAwwsYAXqfz2+P//TyTB++GeBmUA/2JBBAFUD4MOTZQLS7YCLRu2p1rwAKHxtNAeRIAHIkADkSgBwJQE53AXTxpZwRfTekAkiCfEb1mX4kihytAcih2Azasnd1knGqoqsAR5emGS9bUwmQEjCbBDQC5ATLJAGFACWBskhAIYDYRwKQIwHIkQDkUAiA/qSQJxQCmOlJoT1oBDDTk0KPoBLA7DhgtvDNtB1MD10FEPdcb28fF+9GCB9ubx8XVQByJAA5EoCcq9n/ucC7IWIsS+aqAOR8C6AqwMM6a1UAcu4EUBWYn23GqgDk/BBAVWBeHmX7sAJIgvnYy3R3CpAE83CU5eEaQBLE5yzD00WgJIhLSnZJZwGSIB6pmSWfBkqCOORkVRSqbiPDpGSQVo1qiYBBTXVuUtYlgg8tpuUu87qE6EOPddg/sMW+V/bxT20AAAAASUVORK5CYII=";
+const NOTIFICATION_ICON = "icons/chatgpt.png";
 let mutationQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -25,15 +25,12 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
   }
   await migrateStoredTasks();
-  await applyActionIcon();
 });
 
 chrome.runtime.onStartup?.addListener(() => {
   void migrateStoredTasks();
-  void applyActionIcon();
 });
 
-void applyActionIcon();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender)
@@ -181,6 +178,7 @@ async function handleTaskStarted(message, sender) {
     const now = Date.now();
     const url = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
     const prompt = cleanText(message.prompt || "ChatGPT 任务", 100);
+    const questionTitle = cleanText(message.questionTitle || prompt || "ChatGPT 任务", 80);
     let task = message.taskId ? state.tasks[message.taskId] : null;
 
     if (!task) task = findTaskByTab(state.tasks, tab.id, true);
@@ -206,7 +204,7 @@ async function handleTaskStarted(message, sender) {
     bindTaskToTab(task, tab, { isMonitor: task.monitorTabId === tab.id });
     task.url = url;
     task.conversationKey = getConversationKey(url);
-    task.title = cleanText(message.title || tab.title || "ChatGPT 会话", 80);
+    task.title = questionTitle || task.title || "ChatGPT 任务";
     task.prompt = prompt || task.prompt || "ChatGPT 任务";
     task.baselineAssistantHash = message.baselineAssistantHash || task.baselineAssistantHash || "";
     task.latestAssistantHash = message.latestAssistantHash || task.latestAssistantHash || "";
@@ -233,6 +231,9 @@ async function handleTaskState(message, sender) {
     task.url = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
     task.conversationKey = getConversationKey(task.url);
     task.prompt = cleanText(message.prompt || task.prompt || "ChatGPT 任务", 100);
+    task.title = cleanText(message.questionTitle || task.title || task.prompt || "ChatGPT 任务", 80);
+    task.assistantFirstLine = cleanText(message.assistantFirstLine || task.assistantFirstLine || "", 240);
+    task.thinkingTimeText = cleanText(message.thinkingTimeText || task.thinkingTimeText || "", 60);
     task.latestAssistantHash = message.latestAssistantHash || task.latestAssistantHash || "";
     task.updatedAt = Date.now();
     if (sender.tab?.id) bindTaskToTab(task, sender.tab, { isMonitor: task.monitorTabId === sender.tab.id });
@@ -275,23 +276,25 @@ async function handleHeartbeat(message, sender) {
 }
 
 async function maybeNotify(task, settings) {
+  const title = cleanText(task.title || task.prompt || "ChatGPT 任务", 80);
+  const completedMessage = [task.thinkingTimeText, task.assistantFirstLine]
+    .filter(Boolean)
+    .join("，") || "任务已完成。";
+
   const config = {
     completed: {
       enabled: settings.notifyCompleted,
-      title: "ChatGPT 任务已完成",
-      message: `${task.prompt || "当前任务"} 已生成结果。`,
+      message: completedMessage,
       priority: 1
     },
     waiting_action: {
       enabled: settings.notifyAttention,
-      title: "ChatGPT 等待你的操作",
-      message: `${task.prompt || "当前任务"} 需要确认、授权或继续操作。`,
+      message: "等待确认、授权或继续操作。",
       priority: 2
     },
     failed: {
       enabled: settings.notifyFailed,
-      title: "ChatGPT 任务中断",
-      message: `${task.prompt || "当前任务"} 可能失败或遇到错误。`,
+      message: "任务可能失败或遇到错误。",
       priority: 2
     }
   }[task.status];
@@ -302,43 +305,22 @@ async function maybeNotify(task, settings) {
   const notificationId = `chatgpt-task:${task.id}:${task.status}`;
   await chrome.notifications.create(notificationId, {
     type: "basic",
-    iconUrl: NOTIFICATION_ICON,
-    title: config.title,
+    iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
+    title,
     message: config.message,
-    contextMessage: "点击打开对应会话",
+    contextMessage: task.status === "completed" ? "点击查看完整回复" : "点击打开对应会话",
     priority: config.priority,
     requireInteraction: task.status !== "completed",
     buttons: [{ title: "打开会话" }]
   });
 }
 
-async function applyActionIcon() {
-  if (!chrome.action?.setIcon || typeof fetch !== "function" || typeof OffscreenCanvas === "undefined") {
-    return;
-  }
-
-  try {
-    const response = await fetch(NOTIFICATION_ICON);
-    const bitmap = await createImageBitmap(await response.blob());
-    const imageData = {};
-    for (const size of [16, 32, 48, 128]) {
-      const canvas = new OffscreenCanvas(size, size);
-      const context = canvas.getContext("2d");
-      context.drawImage(bitmap, 0, 0, size, size);
-      imageData[size] = context.getImageData(0, 0, size, size);
-    }
-    await chrome.action.setIcon({ imageData });
-  } catch (error) {
-    console.debug("[ChatGPT Task Notifier] unable to apply generated action icon", error);
-  }
-}
-
 async function showTestNotification() {
   await chrome.notifications.create(`chatgpt-test:${Date.now()}`, {
     type: "basic",
-    iconUrl: NOTIFICATION_ICON,
-    title: "ChatGPT 提醒测试成功",
-    message: "Windows 通知能够正常显示。",
+    iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
+    title: "测试问题标题",
+    message: "思考了 1m 23s，Windows 通知能够正常显示。",
     priority: 1
   });
 }

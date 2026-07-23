@@ -190,7 +190,7 @@
       ranLongEnough &&
       composerReady
     ) {
-      await reportStatus("completed", assistant.hash);
+      await reportStatus("completed", assistant.hash, assistant);
       state.lastSettledAssistantHash = assistant.hash;
       finishLocalTask();
       return;
@@ -212,7 +212,8 @@
       type: "TASK_STARTED",
       taskId: state.taskId,
       url: location.href,
-      title: document.title,
+      title: getQuestionTitle(prompt || getLatestUserText() || "ChatGPT 任务"),
+      questionTitle: getQuestionTitle(prompt || getLatestUserText() || "ChatGPT 任务"),
       prompt: cleanText(prompt || getLatestUserText() || "ChatGPT 任务", 100),
       baselineAssistantHash: state.baselineAssistantHash,
       latestAssistantHash: getLatestAssistant().hash
@@ -224,7 +225,7 @@
     }
   }
 
-  async function reportStatus(status, latestAssistantHash) {
+  async function reportStatus(status, latestAssistantHash, assistant = getLatestAssistant()) {
     if (!state.taskId || state.lastReportedStatus === status) {
       state.remoteStatus = status;
       return;
@@ -238,6 +239,9 @@
       status,
       url: location.href,
       prompt: getLatestUserText(),
+      questionTitle: getQuestionTitle(getLatestUserText()),
+      assistantFirstLine: assistant.firstLine || "",
+      thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),
       latestAssistantHash
     });
   }
@@ -282,8 +286,15 @@
     const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')]
       .filter(isVisibleOrHasContent);
     const node = nodes.at(-1);
-    const text = cleanText(node?.innerText || node?.textContent || "", 20000);
-    return { node, text, hash: text ? hashText(text) : "" };
+    const rawText = String(node?.innerText || node?.textContent || "");
+    const text = cleanText(rawText, 20000);
+    return {
+      node,
+      text,
+      hash: text ? hashText(text) : "",
+      firstLine: getAssistantFirstLine(node, rawText),
+      thinkingTimeText: getThinkingTimeText(node)
+    };
   }
 
   function getUserMessages() {
@@ -469,6 +480,73 @@
   function isVisibleOrHasContent(element) {
     return Boolean(element && (isVisible(element) || element.textContent?.trim()));
   }
+
+  function getQuestionTitle(value) {
+  const raw = String(value || "").replace(/\r/g, "").trim();
+  let title = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || "ChatGPT 任务";
+  const punctuationIndexes = ["。", "！", "？", "!", "?"]
+    .map((mark) => title.indexOf(mark))
+    .filter((index) => index >= 6);
+  if (punctuationIndexes.length) {
+    title = title.slice(0, Math.min(...punctuationIndexes) + 1);
+  }
+  return cleanText(title.replace(/^#+\s*/, ""), 80) || "ChatGPT 任务";
+}
+
+function getAssistantFirstLine(node, rawText) {
+  const roots = [
+    node?.querySelector?.('[data-message-content]'),
+    node?.querySelector?.('.markdown'),
+    node?.querySelector?.('[class*="prose"]'),
+    node
+  ].filter(Boolean);
+
+  for (const root of roots) {
+    const blocks = root.matches?.("h1,h2,h3,h4,p,li,blockquote,pre")
+      ? [root]
+      : [...root.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || []];
+    for (const block of blocks) {
+      const lines = String(block.innerText || block.textContent || "").split(/\n+/);
+      const line = lines.map((item) => item.trim()).find((item) => item && !isAssistantUiLine(item));
+      if (line) return cleanText(line, 240);
+    }
+  }
+
+  const fallback = String(rawText || "")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .find((line) => line && !isAssistantUiLine(line));
+  return cleanText(fallback || "", 240);
+}
+
+function isAssistantUiLine(line) {
+  const normalized = cleanText(line, 160).toLowerCase();
+  return /^(思考了\s*\d|thought for\s*\d|复制$|copy$|分享$|share$|重新生成$|regenerate$|good response$|bad response$)/i.test(normalized);
+}
+
+function getThinkingTimeText(node) {
+  const turn = node?.closest?.('[data-testid^="conversation-turn-"]') || node?.closest?.("article") || node?.parentElement;
+  const text = String(turn?.innerText || node?.innerText || node?.textContent || "");
+  const match = text.match(/(?:思考了|thought for)\s*((?:\d+\s*(?:h|小时|hours?|hrs?)\s*)?(?:\d+\s*(?:m|分钟|minutes?|mins?)\s*)?(?:\d+\s*(?:s|秒|seconds?|secs?))?)/i);
+  if (!match?.[1] || !/\d/.test(match[1])) return "";
+
+  const duration = match[1];
+  const hours = Number(duration.match(/(\d+)\s*(?:h|小时|hours?|hrs?)/i)?.[1] || 0);
+  const minutes = Number(duration.match(/(\d+)\s*(?:m|分钟|minutes?|mins?)/i)?.[1] || 0);
+  const seconds = Number(duration.match(/(\d+)\s*(?:s|秒|seconds?|secs?)/i)?.[1] || 0);
+  const totalMinutes = hours * 60 + minutes;
+  const parts = [];
+  if (totalMinutes) parts.push(`${totalMinutes}m`);
+  if (seconds || !totalMinutes) parts.push(`${seconds}s`);
+  return `思考了 ${parts.join(" ")}`;
+}
+
+function formatThinkingTime(elapsedMs) {
+  const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
+}
 
   function cleanText(value, maxLength) {
     return String(value || "")
