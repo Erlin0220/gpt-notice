@@ -22,54 +22,23 @@ jobs:
       - name: Check whether implementation is already applied
         id: pending
         run: |
-          if [[ -f .github/workflows/apply-v0.4.0.yml ]]; then
+          if [[ -d .v040-chunks ]]; then
             echo 'needed=true' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Extract embedded source archive
+      - name: Reconstruct source archive
         if: steps.pending.outputs.needed == 'true'
         run: |
-          set +e
-          python3 <<'PY' > .v040-diagnostic.txt 2>&1
-          from pathlib import Path
-          import base64, gzip, hashlib, io, tarfile, traceback
-          try:
-              lines = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8').splitlines()
-              start = next(i for i, line in enumerate(lines) if "<<'ARCHIVE'" in line) + 1
-              end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'ARCHIVE')
-              payload = ''.join(line.strip() for line in lines[start:end] if line.strip())
-              print('payload_length=', len(payload))
-              print('payload_prefix=', repr(payload[:40]))
-              print('payload_suffix=', repr(payload[-40:]))
-              print('payload_sha256=', hashlib.sha256(payload.encode('ascii', 'replace')).hexdigest())
-              raw = base64.b64decode(payload, validate=True)
-              print('decoded_length=', len(raw))
-              print('decoded_sha256=', hashlib.sha256(raw).hexdigest())
-              gzip.decompress(raw)
-              print('gzip_test=ok')
-              with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
-                  names = archive.getnames()
-                  print('tar_entries=', len(names))
-                  print('\n'.join(names[:20]))
-                  archive.extractall('.')
-              print('extract=ok')
-          except Exception:
-              traceback.print_exc()
-              raise
-          PY
-          STATUS=$?
-          cat .v040-diagnostic.txt
-          if [[ "$STATUS" -ne 0 ]]; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add .v040-diagnostic.txt
-            git commit -m 'test: capture v0.4.0 archive diagnostic' || true
-            git push origin feat/v0.4-background-tab-group || true
-            exit "$STATUS"
-          fi
-          rm -f .v040-diagnostic.txt
+          set -euo pipefail
+          cat .v040-chunks/part* > /tmp/gpt-notice-v040.tar.gz.b64
+          test "$(wc -c < /tmp/gpt-notice-v040.tar.gz.b64)" = "38020"
+          echo '446e77d208c0816afcc5d3cc3af7f2dea90c3e6d29e7ce14d26307900530fca0  /tmp/gpt-notice-v040.tar.gz.b64' | sha256sum -c -
+          base64 --decode /tmp/gpt-notice-v040.tar.gz.b64 > /tmp/gpt-notice-v040.tar.gz
+          echo 'c707fd679cf7dc3fe8dfced933753e08e2827c8c0c77c2c32ab3457464e3daa5  /tmp/gpt-notice-v040.tar.gz' | sha256sum -c -
+          gzip -t /tmp/gpt-notice-v040.tar.gz
+          tar -xzf /tmp/gpt-notice-v040.tar.gz -C .
 
       - name: Validate v0.4.0
         if: steps.pending.outputs.needed == 'true'
@@ -93,6 +62,7 @@ jobs:
         if: steps.pending.outputs.needed == 'true'
         run: |
           set -euo pipefail
+          rm -rf .v040-chunks
           rm -f .github/workflows/apply-v0.4.0.yml .github/workflows/kick-v0.4.0.yml .v040-trigger .v040-diagnostic.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
