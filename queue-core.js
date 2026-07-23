@@ -49,12 +49,13 @@
   function pruneItems(items) {
     const normalized = (Array.isArray(items) ? items : []).map(normalizeItem).filter((item) => item.text);
     const protectedItems = normalized.filter((item) => item.status !== "completed");
+    const completedLimit = Math.max(0, Math.min(MAX_COMPLETED_ITEMS, MAX_HISTORY_ITEMS - protectedItems.length));
     const completed = normalized
       .filter((item) => item.status === "completed")
       .sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt))
-      .slice(0, MAX_COMPLETED_ITEMS);
+      .slice(0, completedLimit);
     const keepIds = new Set([...protectedItems, ...completed].map((item) => item.id));
-    return normalized.filter((item) => keepIds.has(item.id)).slice(-MAX_HISTORY_ITEMS);
+    return normalized.filter((item) => keepIds.has(item.id));
   }
 
   function normalizeQueue(queue = {}, conversationKey = "") {
@@ -148,8 +149,10 @@
     if (normalized.paused || normalized.activeItemId || !getNextPendingItem(normalized)) return false;
     if (normalized.nextDispatchAt > now) return false;
     if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.visibleError) return false;
-    if (snapshot.busy || snapshot.manualHold || snapshot.composerEmpty === false) return false;
-    return Number(snapshot.stableForMs || 0) >= 4_000;
+    const stableForMs = Number(snapshot.stableForMs || 0);
+    if (snapshot.busy && stableForMs < 8_000) return false;
+    if (snapshot.manualHold || snapshot.composerEmpty === false) return false;
+    return stableForMs >= 4_000;
   }
 
   function isItemCompleted(item, snapshot, now = Date.now()) {
