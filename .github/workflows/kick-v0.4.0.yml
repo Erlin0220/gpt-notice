@@ -1,0 +1,59 @@
+name: Kick v0.4.0 apply
+
+on:
+  push:
+    branches:
+      - feat/v0.4-background-tab-group
+    paths:
+      - .v040-trigger
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.4-background-tab-group
+          fetch-depth: 0
+
+      - name: Extract embedded source archive
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8')
+          start = text.index("<<'ARCHIVE'\n") + len("<<'ARCHIVE'\n")
+          end = text.index("\nARCHIVE", start)
+          Path('/tmp/gpt-notice-v040.tar.gz.b64').write_text(text[start:end].strip(), encoding='ascii')
+          PY
+          base64 -d /tmp/gpt-notice-v040.tar.gz.b64 > /tmp/gpt-notice-v040.tar.gz
+          tar -xzf /tmp/gpt-notice-v040.tar.gz -C .
+
+      - name: Validate v0.4.0
+        run: |
+          set -euo pipefail
+          node --check background.js
+          node --check background-utils.js
+          node --check background-tab-groups.js
+          node --check background-monitor-tabs.js
+          node --check background-watchdog.js
+          node --check background-actions.js
+          node --check background-events.js
+          node --check content.js
+          node --check popup.js
+          node tests/static.test.js
+          node tests/background.test.js
+          python3 -m json.tool manifest.json >/dev/null
+          test -s icons/chatgpt.png
+
+      - name: Commit implementation
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-v0.4.0.yml .github/workflows/kick-v0.4.0.yml .v040-trigger
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: replace popup monitor window with background tab group'
+          git push origin feat/v0.4-background-tab-group
