@@ -1,39 +1,13 @@
-const STORAGE_KEYS = {
-  SETTINGS: "settings",
-  TASKS: "tasks"
-};
-
-const DEFAULT_SETTINGS = {
-  autoKeepAlive: true,
-  notifyCompleted: true,
-  notifyAttention: true,
-  notifyFailed: true,
-  notifyWhenFocused: false,
-  closeMonitorWhenDone: true
-};
-
-const ACTIVE_STATUSES = new Set(["running", "waiting_action"]);
-const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled"]);
-const MAX_TASK_HISTORY = 30;
-const CHAT_URL_PATTERNS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
-const NOTIFICATION_ICON = "icons/chatgpt.png";
-let mutationQueue = Promise.resolve();
-
-chrome.runtime.onInstalled.addListener(async () => {
-  const { settings } = await chrome.storage.local.get(STORAGE_KEYS.SETTINGS);
-  if (!settings) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: DEFAULT_SETTINGS });
-  }
-  await migrateStoredTasks();
+chrome.runtime.onInstalled.addListener(() => {
+  void initializeExtension({ migrateLegacy: true });
 });
 
 chrome.runtime.onStartup?.addListener(() => {
-  void migrateStoredTasks();
+  void initializeExtension({ migrateLegacy: true });
 });
 
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  handleMessage(message, sender)
+  handleRuntimeMessage(message, sender)
     .then((response) => sendResponse(response))
     .catch((error) => {
       console.error("[ChatGPT Task Notifier] message error", error);
@@ -42,45 +16,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  void enqueueMutation(async () => {
-    const state = await readState();
-    const affected = Object.values(state.tasks).filter((task) => getTaskTabIds(task).includes(tabId));
-    if (!affected.length) return;
-
-    for (const task of affected) {
-      unbindTaskFromTab(task, tabId);
-      task.updatedAt = Date.now();
-      state.tasks[task.id] = task;
-    }
-    await writeTasks(state.tasks);
-
-    for (const task of affected) {
-      if (!ACTIVE_STATUSES.has(task.status)) continue;
-      const suppressed = task.suppressRespawnUntil && task.suppressRespawnUntil > Date.now();
-      if (suppressed || !state.settings.autoKeepAlive) continue;
-      await ensureTaskHasObserver(task.id);
-    }
-  });
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  void handleTabRemoved(tabId, removeInfo);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!changeInfo.url) return;
-  void enqueueMutation(async () => {
-    const state = await readState();
-    const tasks = Object.values(state.tasks).filter((item) => getTaskTabIds(item).includes(tabId));
-    if (!tasks.length) return;
+  void handleTabUpdated(tabId, changeInfo, tab);
+});
 
-    const url = sanitizeChatUrl(changeInfo.url);
-    for (const task of tasks) {
-      task.url = url;
-      task.conversationKey = getConversationKey(url);
-      task.updatedAt = Date.now();
-      if (tab?.windowId != null) task.tabWindows[String(tabId)] = tab.windowId;
-      state.tasks[task.id] = task;
-    }
-    await writeTasks(state.tasks);
-  });
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  void handleTabActivated(activeInfo.tabId);
+});
+
+chrome.windows.onRemoved.addListener(() => {
+  setTimeout(() => void reconcileAllObservers(), 300);
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === WATCHDOG_ALARM) void runWatchdog();
 });
 
 chrome.notifications.onClicked.addListener((notificationId) => {
@@ -93,7 +46,16 @@ chrome.notifications.onButtonClicked.addListener((notificationId) => {
   if (taskId) void openTask(taskId);
 });
 
-async function handleMessage(message, sender) {
+void initializeExtension({ migrateLegacy: false });
+
+async function initializeExtension({ migrateLegacy }) {
+  await migrateStoredState();
+  await ensureWatchdogAlarm();
+  if (migrateLegacy) await migrateLegacyObservers();
+  await reconcileAllObservers();
+}
+
+async function handleRuntimeMessage(message, sender) {
   switch (message?.type) {
     case "PAGE_READY":
       return handlePageReady(message, sender);
@@ -116,8 +78,14 @@ async function handleMessage(message, sender) {
     case "OPEN_CHAT":
       await openChat();
       return { ok: true };
+    case "PROMOTE_TASK":
+      await promoteMonitorTab(message.taskId, { focus: true });
+      return { ok: true };
     case "STOP_TASK":
       await stopTask(message.taskId);
+      return { ok: true };
+    case "RESUME_TASK":
+      await resumeTask(message.taskId);
       return { ok: true };
     case "CLEAR_HISTORY":
       await clearHistory();
@@ -137,28 +105,35 @@ async function handlePageReady(message, sender) {
     let task = findTaskByTab(state.tasks, tab.id);
 
     if (!task) {
-      const candidates = Object.values(state.tasks)
+      task = Object.values(state.tasks)
         .filter((item) => ACTIVE_STATUSES.has(item.status))
-        .filter((item) =>
-          sameConversation(item.url, url) ||
-          (item.monitorExpected && !item.monitorTabId && samePageUrl(item.url, url))
-        )
-        .sort((a, b) => b.updatedAt - a.updatedAt);
-      task = candidates[0] || null;
+        .filter((item) => {
+          return sameConversation(item.url, url) ||
+            (item.monitorExpected && !item.monitorTabId && samePageUrl(item.url, url));
+        })
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
     }
 
     if (task) {
-      const pageIsMonitor = task.monitorTabId === tab.id || Boolean(task.monitorExpected && !task.monitorTabId);
-      bindTaskToTab(task, tab, { isMonitor: pageIsMonitor });
+      const isExpectedMonitor = task.monitorTabId === tab.id || Boolean(task.monitorExpected && !task.monitorTabId);
+      if (isExpectedMonitor) {
+        let groupId = Number.isInteger(tab.groupId) && tab.groupId >= 0 ? tab.groupId : null;
+        if (!groupId && Number.isInteger(tab.windowId)) {
+          try { groupId = await getOrCreateMonitorGroup(tab.windowId, tab.id, task.monitorGroupId); } catch {}
+        }
+        bindMonitorTab(task, tab, groupId);
+        await makeMonitorTabDurable(tab.id);
+        await collapseMonitorGroup(groupId);
+      } else {
+        bindNormalTab(task, tab);
+      }
       task.url = url || task.url;
       task.conversationKey = getConversationKey(task.url);
-      task.monitorCreating = false;
-      task.monitorExpected = false;
+      task.lastHeartbeatAt = Date.now();
       task.updatedAt = Date.now();
+      resetRecovery(task);
       state.tasks[task.id] = task;
       await writeTasks(state.tasks);
-
-      if (pageIsMonitor) await makeMonitorTabDurable(tab.id);
     }
 
     return {
@@ -177,44 +152,51 @@ async function handleTaskStarted(message, sender) {
     const state = await readState();
     const now = Date.now();
     const url = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
-    const prompt = cleanText(message.prompt || "ChatGPT 任务", 100);
+    const prompt = cleanText(message.prompt || "ChatGPT 任务", 160);
     const questionTitle = cleanText(message.questionTitle || prompt || "ChatGPT 任务", 80);
     let task = message.taskId ? state.tasks[message.taskId] : null;
 
     if (!task) task = findTaskByTab(state.tasks, tab.id, true);
-
     if (!task) {
       task = Object.values(state.tasks)
         .filter((item) => ACTIVE_STATUSES.has(item.status))
         .filter((item) => sameConversation(item.url, url))
-        .filter((item) => !prompt || !item.prompt || item.prompt === prompt || now - item.startedAt < 15000)
+        .filter((item) => !prompt || !item.prompt || item.prompt === prompt || now - item.startedAt < 15_000)
         .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
     }
 
     if (!task) {
-      const id = createTaskId();
       task = normalizeTask({
-        id,
+        id: createTaskId(),
+        status: "running",
         createdAt: now,
-        notifications: {}
+        startedAt: now,
+        url,
+        prompt,
+        title: questionTitle
       });
     }
 
     task.status = "running";
-    bindTaskToTab(task, tab, { isMonitor: task.monitorTabId === tab.id });
+    bindNormalTab(task, tab);
     task.url = url;
     task.conversationKey = getConversationKey(url);
-    task.title = questionTitle || task.title || "ChatGPT 任务";
-    task.prompt = prompt || task.prompt || "ChatGPT 任务";
+    task.title = questionTitle;
+    task.prompt = prompt;
     task.baselineAssistantHash = message.baselineAssistantHash || task.baselineAssistantHash || "";
     task.latestAssistantHash = message.latestAssistantHash || task.latestAssistantHash || "";
-    task.updatedAt = now;
-    task.startedAt = task.startedAt || now;
+    task.startedAt = task.finishedAt ? now : task.startedAt || now;
     task.finishedAt = null;
-    task.suppressRespawnUntil = 0;
+    task.cleanupAt = 0;
+    task.manualMonitorClosed = false;
+    task.lastHeartbeatAt = now;
+    task.lastContentChangeAt = now;
+    task.updatedAt = now;
+    resetRecovery(task);
 
     state.tasks[task.id] = task;
-    await writeTasks(pruneTasks(state.tasks));
+    state.tasks = pruneTasks(state.tasks);
+    await writeTasks(state.tasks);
     return { ok: true, task: publicTask(task, tab.id) };
   });
 }
@@ -227,32 +209,40 @@ async function handleTaskState(message, sender) {
     if (!task) return { ok: false, error: "Task not found" };
 
     const previousStatus = task.status;
+    const now = Date.now();
     task.status = message.status || task.status;
     task.url = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
     task.conversationKey = getConversationKey(task.url);
-    task.prompt = cleanText(message.prompt || task.prompt || "ChatGPT 任务", 100);
+    task.prompt = cleanText(message.prompt || task.prompt || "ChatGPT 任务", 160);
     task.title = cleanText(message.questionTitle || task.title || task.prompt || "ChatGPT 任务", 80);
     task.assistantFirstLine = cleanText(message.assistantFirstLine || task.assistantFirstLine || "", 240);
     task.thinkingTimeText = cleanText(message.thinkingTimeText || task.thinkingTimeText || "", 60);
     task.latestAssistantHash = message.latestAssistantHash || task.latestAssistantHash || "";
-    task.updatedAt = Date.now();
-    if (sender.tab?.id) bindTaskToTab(task, sender.tab, { isMonitor: task.monitorTabId === sender.tab.id });
-
-    if (FINISHED_STATUSES.has(task.status)) task.finishedAt = Date.now();
-
-    state.tasks[task.id] = task;
-    await writeTasks(pruneTasks(state.tasks));
-
-    if (previousStatus !== task.status) await maybeNotify(task, state.settings);
-
-    if (
-      ["completed", "failed"].includes(task.status) &&
-      task.monitorTabId &&
-      state.settings.closeMonitorWhenDone
-    ) {
-      await closeMonitorTask(task.id);
+    task.lastHeartbeatAt = now;
+    task.lastContentChangeAt = Number(message.lastContentChangeAt || now);
+    task.updatedAt = now;
+    if (sender.tab?.id) {
+      if (task.monitorTabId === sender.tab.id) bindMonitorTab(task, sender.tab, task.monitorGroupId);
+      else bindNormalTab(task, sender.tab);
     }
 
+    if (FINISHED_STATUSES.has(task.status)) {
+      task.finishedAt = now;
+      if (!task.thinkingTimeText) task.thinkingTimeText = formatElapsed(now - task.startedAt);
+    }
+    resetRecovery(task);
+    state.tasks[task.id] = task;
+    await writeTasks(state.tasks);
+
+    if (previousStatus !== task.status) await maybeNotify(task, state.settings);
+    if (task.status === "completed") {
+      await scheduleMonitorCleanup(state, task, state.settings.completedTabGraceSeconds * 1000);
+    } else if (task.status === "failed") {
+      await scheduleMonitorCleanup(state, task, 5_000);
+    }
+
+    state.tasks = pruneTasks(state.tasks);
+    await writeTasks(state.tasks);
     return { ok: true, task: publicTask(task, sender.tab?.id) };
   });
 }
@@ -264,97 +254,88 @@ async function handleHeartbeat(message, sender) {
     if (!task && sender.tab?.id) task = findTaskByTab(state.tasks, sender.tab.id, true);
     if (!task) return { ok: true, task: null };
 
+    const now = Date.now();
     task.url = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
     task.conversationKey = getConversationKey(task.url);
-    task.latestAssistantHash = message.latestAssistantHash || task.latestAssistantHash || "";
-    task.updatedAt = Date.now();
-    if (sender.tab?.id) bindTaskToTab(task, sender.tab, { isMonitor: task.monitorTabId === sender.tab.id });
+    if (message.latestAssistantHash && message.latestAssistantHash !== task.latestAssistantHash) {
+      task.latestAssistantHash = message.latestAssistantHash;
+      task.lastContentChangeAt = now;
+    }
+    task.lastHeartbeatAt = now;
+    task.updatedAt = now;
+    if (sender.tab?.id) {
+      if (task.monitorTabId === sender.tab.id) bindMonitorTab(task, sender.tab, task.monitorGroupId);
+      else bindNormalTab(task, sender.tab);
+    }
+    resetRecovery(task);
     state.tasks[task.id] = task;
     await writeTasks(state.tasks);
     return { ok: true, task: publicTask(task, sender.tab?.id) };
   });
 }
 
-async function maybeNotify(task, settings) {
-  const title = cleanText(task.title || task.prompt || "ChatGPT 任务", 80);
-  const completedMessage = [task.thinkingTimeText, task.assistantFirstLine]
-    .filter(Boolean)
-    .join("，") || "任务已完成。";
+async function handleTabRemoved(tabId, removeInfo) {
+  let recovery = null;
+  await enqueueMutation(async () => {
+    const state = await readState();
+    const affected = Object.values(state.tasks).filter((task) => getTaskTabIds(task).includes(tabId));
+    if (!affected.length) return;
 
-  const config = {
-    completed: {
-      enabled: settings.notifyCompleted,
-      message: completedMessage,
-      priority: 1
-    },
-    waiting_action: {
-      enabled: settings.notifyAttention,
-      message: "等待确认、授权或继续操作。",
-      priority: 2
-    },
-    failed: {
-      enabled: settings.notifyFailed,
-      message: "任务可能失败或遇到错误。",
-      priority: 2
+    for (const task of affected) {
+      const wasMonitor = task.monitorTabId === tabId;
+      const suppressed = task.suppressRemovalUntil > Date.now();
+      unbindTab(task, tabId);
+      task.lastKnownWindowId = Number.isInteger(removeInfo?.windowId) ? removeInfo.windowId : task.lastKnownWindowId;
+      task.updatedAt = Date.now();
+
+      if (wasMonitor && ACTIVE_STATUSES.has(task.status) && !suppressed) {
+        if (task.normalTabIds.length) {
+          task.observerMode = "normal_tab";
+        } else {
+          task.manualMonitorClosed = true;
+          task.status = "monitor_stopped";
+          task.observerMode = "lost";
+          task.observerLostReason = "后台标签已被手动关闭";
+        }
+      } else if (!wasMonitor && ACTIVE_STATUSES.has(task.status) && !task.normalTabIds.length && !task.monitorTabId) {
+        recovery = { taskId: task.id, windowId: removeInfo?.windowId ?? task.lastKnownWindowId };
+      }
+      state.tasks[task.id] = task;
     }
-  }[task.status];
-
-  if (!config?.enabled) return;
-  if (!settings.notifyWhenFocused && (await isAnyTaskTabFocused(task))) return;
-
-  const notificationId = `chatgpt-task:${task.id}:${task.status}`;
-  await chrome.notifications.create(notificationId, {
-    type: "basic",
-    iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
-    title,
-    message: config.message,
-    contextMessage: task.status === "completed" ? "点击查看完整回复" : "点击打开对应会话",
-    priority: config.priority,
-    requireInteraction: task.status !== "completed",
-    buttons: [{ title: "打开会话" }]
-  });
-}
-
-async function showTestNotification() {
-  await chrome.notifications.create(`chatgpt-test:${Date.now()}`, {
-    type: "basic",
-    iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
-    title: "测试问题标题",
-    message: "思考了 1m 23s，Windows 通知能够正常显示。",
-    priority: 1
-  });
-}
-
-async function isAnyTaskTabFocused(task) {
-  const ids = getTaskTabIds(task);
-  for (const tabId of ids) {
-    try {
-      const tab = await chrome.tabs.get(tabId);
-      const win = await chrome.windows.get(tab.windowId);
-      if (tab.active && win.focused) return true;
-    } catch {
-      // Stale tab bindings are cleaned when the task changes again.
-    }
-  }
-  return false;
-}
-
-async function ensureTaskHasObserver(taskId) {
-  const state = await readState();
-  const task = state.tasks[taskId];
-  if (!task || !ACTIVE_STATUSES.has(task.status) || !state.settings.autoKeepAlive) return;
-
-  const boundTabs = await getValidBoundTabs(task);
-  const matchingTabs = mergeTabs(boundTabs, await findConversationTabs(task.url));
-  if (matchingTabs.length) {
-    const preferred = choosePreferredTab(matchingTabs, task);
-    bindTaskToTab(task, preferred, { isMonitor: preferred.id === task.monitorTabId });
-    task.updatedAt = Date.now();
-    state.tasks[task.id] = task;
     await writeTasks(state.tasks);
-    return;
-  }
+  });
 
-  await createMonitorWindow(taskId);
+  if (recovery) await ensureTaskObserver(recovery.taskId, recovery.windowId);
 }
 
+async function handleTabUpdated(tabId, changeInfo, tab) {
+  if (!changeInfo.url && typeof changeInfo.discarded === "undefined") return;
+  await enqueueMutation(async () => {
+    const state = await readState();
+    const tasks = Object.values(state.tasks).filter((task) => getTaskTabIds(task).includes(tabId));
+    for (const task of tasks) {
+      if (changeInfo.url) {
+        task.url = sanitizeChatUrl(changeInfo.url);
+        task.conversationKey = getConversationKey(task.url);
+      }
+      if (changeInfo.discarded === true && task.monitorTabId === tabId) {
+        task.lastHeartbeatAt = 0;
+      }
+      if (Number.isInteger(tab?.windowId)) task.lastKnownWindowId = tab.windowId;
+      task.updatedAt = Date.now();
+      state.tasks[task.id] = task;
+    }
+    if (tasks.length) await writeTasks(state.tasks);
+  });
+}
+
+async function handleTabActivated(tabId) {
+  const state = await readState();
+  const task = Object.values(state.tasks).find((item) => item.monitorTabId === tabId);
+  if (task) await promoteMonitorTab(task.id, { focus: false });
+}
+
+function parseTaskIdFromNotification(notificationId) {
+  const match = /^chatgpt-task:([^:]+):/.exec(notificationId || "");
+  return match?.[1] || null;
+}

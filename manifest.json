@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 任务完成提醒",
-  "version": "0.3.0",
-  "description": "在 ChatGPT 任务完成、等待操作或失败时发送 Windows 通知；通知显示问题标题、思考时长和回复第一行。",
+  "version": "0.4.0",
+  "description": "使用折叠后台标签组继续监控 ChatGPT 任务；完成通知显示问题标题、思考时长和回复第一行。",
   "minimum_chrome_version": "120",
   "permissions": [
+    "alarms",
     "notifications",
     "storage",
+    "tabGroups",
     "tabs",
     "windows"
   ],
@@ -33,9 +35,7 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": [
-        "content.js"
-      ],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ],

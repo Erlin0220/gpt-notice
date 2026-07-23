@@ -64,11 +64,15 @@ jobs:
         run: |
           set -euo pipefail
           node --check background.js
-          node --check background-events.js
-          node --check background-actions.js
           node --check background-utils.js
+          node --check background-tab-groups.js
+          node --check background-monitor-tabs.js
+          node --check background-watchdog.js
+          node --check background-actions.js
+          node --check background-events.js
           node --check content.js
           node --check popup.js
+          node tests/static.test.js
           node tests/background.test.js
           python3 -m json.tool manifest.json >/dev/null
           test -s icons/chatgpt.png
@@ -113,12 +117,19 @@ jobs:
             CHANGES="- 发布 ${TAG}"
           fi
 
-          cat > dist/RELEASE_NOTES.md <<EOF
+          cat > dist/RELEASE_NOTES.md <<NOTES
           ## ChatGPT 任务完成提醒 ${TAG}
 
           ### 更新内容
 
           ${CHANGES}
+
+          ### v0.4 后台监控
+
+          - 使用现有 Chrome 窗口中的非活动标签，不再创建独立任务栏窗口。
+          - 后台任务收纳到折叠的“GPT 后台”标签组。
+          - 加入 Alarm 看门狗、异常恢复和完成后延迟清理。
+          - 点击通知会复用或提升已有标签，不重复打开会话。
 
           ### 安装
 
@@ -127,8 +138,8 @@ jobs:
           3. 开启“开发者模式”。
           4. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
 
-          > 整个 Chrome 完全退出后，扩展无法继续监控。
-          EOF
+          > 完全退出 Chrome 后，扩展无法继续监控。
+          NOTES
 
       - name: Create GitHub Release
         if: steps.existing.outputs.exists != 'true'
@@ -144,7 +155,6 @@ jobs:
             "dist/chatgpt-task-notifier-v${VERSION}.zip"
             "dist/SHA256SUMS.txt"
           )
-
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             gh release create "$TAG" "${ASSETS[@]}" \
               --verify-tag \

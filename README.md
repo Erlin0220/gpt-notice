@@ -1,94 +1,112 @@
-# ChatGPT 任务完成提醒 v0.2.0
+# ChatGPT 任务完成提醒
 
-一个纯本地 Chrome Manifest V3 扩展，用于在 ChatGPT 网页任务完成、等待确认或失败时发送 Windows 系统通知。
+Chrome Manifest V3 扩展。在 ChatGPT 网页任务完成、等待确认、失败或后台监控断开时发送 Windows 系统通知。
 
-## 功能
+## v0.4.0 核心变化
 
-- 切换到其他标签页后，任务完成仍发送 Windows 通知。
-- 关闭正在执行任务的 ChatGPT 标签后，自动创建一个最小化 Chrome 监控窗口继续观察。
-- 后台监控页定时刷新会话，拉取服务端最新结果。
-- 同一会话只保留一个运行中任务，避免重新打开页面后重复记录。
-- 一个任务可同时绑定正常标签和后台监控标签，互不覆盖。
-- 点击通知或面板“打开”时，优先跳转到已经存在的对应标签，不重复打开新标签。
-- 提醒状态：任务完成、等待确认/授权、任务失败。
-- 后台监控标签自动静音，并尽量禁止 Chrome 自动丢弃该标签。
-- 扩展弹窗可查看任务、停止监控、测试通知和调整提醒开关。
-- 不上传聊天内容，不调用 ChatGPT 私有接口。
+v0.4.0 删除了最小化 Popup 窗口方案，改为在现有 Chrome 普通窗口中创建 `active: false` 的后台标签，并放入折叠的 **GPT 后台** 标签组。
 
-## 安装方法
+- 不再产生额外 Windows 任务栏窗口。
+- 创建后台监控页时不抢焦点、不切换当前标签。
+- 同一 Chrome 窗口中的多个任务复用一个折叠标签组。
+- 后台标签自动静音，并设置 `autoDiscardable: false`。
+- 用户手动点击后台标签时，自动将其提升为普通标签。
+- 点击通知优先复用已有正常标签；只有后台标签时直接提升，不重复打开。
+- 任务完成后默认保留后台标签 30 秒，方便点击通知后直接查看，再自动清理。
+- 使用 30 秒 Alarm 看门狗检查心跳、丢弃状态和 Content Script 连接。
+- 删除后台页面每 15 秒固定刷新的旧逻辑，只有监控异常时才刷新标签。
+- 10 分钟内最多自动恢复 3 次，超过后显示“连接丢失”，避免无限刷新。
+- 用户手动关闭后台标签或标签组后，不会立刻重新创建。
 
-1. 下载并解压 `chatgpt-task-notifier-v0.2.0.zip`。
-2. Chrome 地址栏打开 `chrome://extensions/`。
-3. 打开右上角“开发者模式”。
-4. 点击“加载已解压的扩展程序”。
-5. 选择解压后的 `chatgpt-task-notifier` 文件夹。
-6. 点击扩展图标，执行一次“测试 Windows 通知”。
+## 通知格式
 
-从旧版本升级时，在 `chrome://extensions/` 点击该扩展的“重新加载”即可。v0.2.0 会自动迁移旧任务记录。
+完成通知：
 
-## Windows 通知检查
+```text
+标题：用户问题的第一行或首句
+正文：思考了 37m 51s，回复正文第一行
+```
 
-若测试通知没有出现：
+扩展优先读取 ChatGPT 页面显示的实际思考时间；读取不到时使用任务运行时间兜底。
 
-1. Windows 设置 → 系统 → 通知。
-2. 确认 Google Chrome 通知已开启。
-3. 检查“请勿打扰”或“专注助手”。
-4. 在扩展弹窗确认没有显示通知权限警告。
+## 安装
 
-## 使用方式
+1. 从 GitHub Releases 下载最新 `chatgpt-task-notifier-vX.Y.Z.zip`。
+2. 解压 ZIP。
+3. Chrome 打开 `chrome://extensions/`。
+4. 开启右上角“开发者模式”。
+5. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
+6. 打开扩展面板，点击“测试 Windows 通知”。
 
-正常在 `chatgpt.com` 中发送消息即可。扩展会在检测到生成开始时自动建立任务记录。
+## 使用行为
 
-- 只切换到其他标签页：原 ChatGPT 页面直接继续监控。
-- 关闭 ChatGPT 标签：扩展创建一个最小化 Chrome 窗口接管。
-- 点击 Windows 通知或面板“打开”：跳转到已经存在的对应会话标签；没有对应标签时才新建。
-- 不想继续监控：点击扩展图标，在任务列表选择“停止监控”。
+### 切换到其他标签
 
-## v0.2.0 修复
+原 ChatGPT 标签继续实时监控，不创建额外标签。
 
-1. 修复最小化监控窗口中，输入框被判定为不可见而导致任务永久显示“执行中”的问题。
-2. 修复正常页和监控页互相覆盖 `tabId`，导致任务绑定丢失的问题。
-3. 修复打开已有会话时，历史消息延迟加载被误判为新任务的问题。
-4. 修复面板“打开”或点击通知时，即使对应标签已存在仍新建标签的问题。
-5. 增加后台监控页周期刷新，避免监控页未实时收到原页面生成状态。
+### 关闭正在执行任务的 ChatGPT 标签
 
-## 已知限制
+扩展会在现有普通 Chrome 窗口末尾创建非活动标签，并收纳进折叠的“GPT 后台”组。当前活动页面不会被切换。
 
-1. **整个 Chrome 退出后无法继续监控。** Chrome 扩展和最小化监控页面都会停止；要覆盖这种情况，需要额外开发 Windows 托盘程序。
-2. 扩展通过 ChatGPT 页面 DOM 和可访问性文本判断状态。ChatGPT 网页改版后，部分识别规则可能需要更新。
-3. 在新建空白会话中，若发送消息后立刻关闭标签，早于 ChatGPT 分配 `/c/...` 会话地址，扩展无法可靠定位该新会话。建议等地址栏出现 `/c/` 后再关闭。
-4. 最小化监控窗口仍是一个真实 Chrome 窗口，可能在 Windows 任务栏中显示。
-5. “等待操作”基于确认按钮文字识别，可能存在少量漏报或误报。
+### 点击完成通知
+
+1. 有正常会话标签：直接切换过去。
+2. 只有后台标签：移出后台组、取消静音并切换过去。
+3. 页面已经清理：根据会话地址打开新标签。
+
+### 手动关闭 GPT 后台标签或标签组
+
+视为用户主动停止后台监控，不自动重建。扩展面板会显示“监控已停止”，可点击“恢复监控”。
+
+## 看门狗与恢复
+
+Chrome Alarm 每 30 秒扫描任务：
+
+- 检查绑定标签是否仍存在。
+- 检查后台标签是否被 Chrome 丢弃。
+- 发送 `PROBE_TASK_STATE` 检查 Content Script。
+- 后台标签无响应时执行有限次数刷新恢复。
+- 任务完成后按设置清理后台标签。
+- 连续恢复失败后转为 `observer_lost`，并发送提醒。
+
+## 已知边界
+
+- 完全退出 Chrome 后无法继续监控。
+- 关闭最后一个 Chrome 普通窗口后，网页监控无法保留；重新打开 Chrome 后会显示连接丢失。
+- ChatGPT 网页 DOM 改版后，状态识别规则可能需要更新。
+- Alarm 可能因系统繁忙或电脑睡眠延迟触发。
 
 ## 隐私
 
-扩展只在本机读取 ChatGPT 页面中用于判断状态的文本和按钮。任务标题会截取最近一条用户消息的前 100 个字符并存入 `chrome.storage.local`，用于通知内容和任务列表。数据不会发送到任何外部服务器。
+扩展不调用 ChatGPT 私有接口，不读取登录 Cookie，也不向第三方服务器上传聊天内容。任务标题、状态和会话地址仅保存在本机 `chrome.storage.local`。
 
-## 开发检查
-
-无需安装依赖：
+## 开发与测试
 
 ```bash
 node --check background.js
+node --check background-utils.js
+node --check background-tab-groups.js
+node --check background-monitor-tabs.js
+node --check background-watchdog.js
+node --check background-actions.js
+node --check background-events.js
 node --check content.js
 node --check popup.js
+node tests/static.test.js
 node tests/background.test.js
 ```
 
-## 文件说明
+## 项目结构
 
-- `background.js`：后台入口；`background-events.js`、`background-actions.js`、`background-utils.js` 分别负责事件、窗口操作和状态工具。
-- `content.js`：监听页面生成状态和后台监控刷新。
-- `popup.*`：扩展弹窗和设置。
-- 扩展图标以内嵌 PNG 生成，不依赖额外二进制资源。
-- `tests/`：无依赖的后台逻辑测试。
-
-
-## v0.3.0 通知展示
-
-- 扩展图标和 Windows 通知图标统一使用 ChatGPT 官方图标。
-- 通知标题取用户问题的第一行或首句。
-- 完成通知正文为“思考时长 + 回复第一行”，例如：`思考了 37m 51s，计划已执行完成，v3.0.0 已推送到 GitHub。`
-- 优先读取 ChatGPT 页面显示的思考时长；读取不到时使用任务运行时长兜底。
+- `background.js`：Service Worker 加载入口。
+- `background-utils.js`：任务状态、存储迁移和会话工具。
+- `background-tab-groups.js`：GPT 后台标签组管理。
+- `background-monitor-tabs.js`：后台标签创建、复用、提升和旧窗口迁移。
+- `background-watchdog.js`：Alarm 探测、恢复和延迟清理。
+- `background-actions.js`：通知、打开任务、设置和面板操作。
+- `background-events.js`：Chrome 事件和消息路由。
+- `content.js`：ChatGPT 页面状态识别和探测响应。
+- `popup.*`：扩展面板。
+- `tests/`：无依赖单元测试和静态架构测试。
 
 > ChatGPT 和相关图标归 OpenAI 所有。本项目为非官方浏览器扩展，与 OpenAI 不存在隶属或背书关系。
