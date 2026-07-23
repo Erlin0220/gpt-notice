@@ -1,0 +1,62 @@
+name: Trigger v0.3.0 notification update
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download official ChatGPT icon
+        run: |
+          mkdir -p icons
+          curl --fail --location --retry 3 \
+            'https://images.ctfassets.net/j22is2dtoxu1/intercom-img-d177d076c9a5453052925143/49d5d812b0a6fcc20a14faa8c629d9fb/icon-ios-1024_401x.png' \
+            --output icons/chatgpt.png
+          test -s icons/chatgpt.png
+
+      - name: Extract and run update script
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/apply-v0.3.0.yml').read_text(encoding='utf-8')
+          marker = "python3 <<'PY'\n"
+          if marker not in workflow:
+              raise RuntimeError('embedded update script not found')
+          script = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
+          Path('/tmp/apply-v0.3.0.py').write_text(textwrap.dedent(script), encoding='utf-8')
+          PY
+          python3 /tmp/apply-v0.3.0.py
+
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check background-events.js
+          node --check background-actions.js
+          node --check background-utils.js
+          node --check content.js
+          node --check popup.js
+          node tests/background.test.js
+          python3 -m json.tool manifest.json >/dev/null
+          file icons/chatgpt.png
+
+      - name: Commit changes to main
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manifest.json background-events.js content.js tests/background.test.js README.md icons/chatgpt.png
+          git commit -m 'feat: show question title and response summary in notifications'
+          git push origin main
