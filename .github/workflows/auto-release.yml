@@ -7,9 +7,7 @@ on:
   pull_request:
     branches:
       - main
-    types: [opened, synchronize, reopened]
-    paths:
-      - ".release-trigger-*"
+    types: [closed]
   workflow_dispatch:
 
 permissions:
@@ -21,10 +19,10 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main
+      - name: Checkout latest main
         uses: actions/checkout@v4
         with:
           ref: main
@@ -36,8 +34,8 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(node -p "require('./manifest.json').version")"
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid manifest version: $VERSION" >&2
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Invalid Chrome extension version: $VERSION" >&2
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -54,26 +52,24 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "$TAG already exists; no new release is needed."
+            echo "$TAG already exists; skipping duplicate publication."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate extension
         if: steps.existing.outputs.exists != 'true'
+        shell: bash
         run: |
           set -euo pipefail
-          node --check background.js
-          node --check background-utils.js
-          node --check background-tab-groups.js
-          node --check background-monitor-tabs.js
-          node --check background-watchdog.js
-          node --check background-actions.js
-          node --check background-events.js
-          node --check content.js
-          node --check popup.js
-          node tests/static.test.js
-          node tests/background.test.js
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(find . -maxdepth 1 -type f -name '*.js' -print0 | sort -z)
+
+          for test_file in tests/*.test.js; do
+            node "$test_file"
+          done
+
           python3 -m json.tool manifest.json >/dev/null
           test -s icons/chatgpt.png
 
@@ -93,6 +89,7 @@ jobs:
             --exclude='.release-trigger-*' \
             --exclude='dist/' \
             --exclude='package/' \
+            --exclude='node_modules/' \
             --exclude='tests/'
           cd package
           zip -qr "../dist/chatgpt-task-notifier-v${VERSION}.zip" chatgpt-task-notifier
@@ -124,13 +121,6 @@ jobs:
 
           ${CHANGES}
 
-          ### v0.4 后台监控
-
-          - 使用现有 Chrome 窗口中的非活动标签，不再创建独立任务栏窗口。
-          - 后台任务收纳到折叠的“GPT 后台”标签组。
-          - 加入 Alarm 看门狗、异常恢复和完成后延迟清理。
-          - 点击通知会复用或提升已有标签，不重复打开会话。
-
           ### 安装
 
           1. 下载 \`chatgpt-task-notifier-v${VERSION}.zip\` 并解压。
@@ -138,7 +128,7 @@ jobs:
           3. 开启“开发者模式”。
           4. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
 
-          > 完全退出 Chrome 后，扩展无法继续监控。
+          > 完全退出 Chrome 后，扩展无法继续监控或执行消息队列。
           NOTES
 
       - name: Create GitHub Release
@@ -158,12 +148,14 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             gh release create "$TAG" "${ASSETS[@]}" \
               --verify-tag \
-              --title "ChatGPT Task Notifier ${TAG}" \
+              --latest \
+              --title "ChatGPT 任务完成提醒 ${TAG}" \
               --notes-file dist/RELEASE_NOTES.md
           else
             gh release create "$TAG" "${ASSETS[@]}" \
               --target "$TARGET_SHA" \
-              --title "ChatGPT Task Notifier ${TAG}" \
+              --latest \
+              --title "ChatGPT 任务完成提醒 ${TAG}" \
               --notes-file dist/RELEASE_NOTES.md
           fi
 
