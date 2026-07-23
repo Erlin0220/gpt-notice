@@ -26,7 +26,7 @@ jobs:
             --output icons/chatgpt.png
           test -s icons/chatgpt.png
 
-      - name: Extract and run update script
+      - name: Extract update script
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -39,7 +39,25 @@ jobs:
           script = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
           Path('/tmp/apply-v0.3.0.py').write_text(textwrap.dedent(script), encoding='utf-8')
           PY
-          python3 /tmp/apply-v0.3.0.py
+
+      - name: Run update script
+        id: apply
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 /tmp/apply-v0.3.0.py 2>&1 | tee /tmp/apply-v0.3.0.log
+
+      - name: Upload update log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-v0.3.0-log
+          path: /tmp/apply-v0.3.0.log
+          if-no-files-found: warn
+
+      - name: Stop after update failure
+        if: steps.apply.outcome == 'failure'
+        run: exit 1
 
       - name: Validate
         run: |
