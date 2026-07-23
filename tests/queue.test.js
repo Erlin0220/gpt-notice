@@ -133,4 +133,4 @@ const manyPending = Array.from({ length: 130 }, (_, index) => ({
 const pendingQueue = core.normalizeQueue({ items: manyPending }, "c:pending");
 assert.equal(pendingQueue.items.length, 130, "history pruning must never discard unfinished queue items");
 
-console.log("queue v0.5.3 tests passed");
+console.log("queue v0.5.4 tests passed");
