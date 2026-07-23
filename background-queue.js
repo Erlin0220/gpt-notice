@@ -85,9 +85,11 @@ async function reconcileQueueObserversNow() {
       if (matchingTabs.length) continue;
       const created = await createQueueObserverTab(key, queue.conversationUrl);
       if (created) {
+        const createdTab = created.tab;
+        delete created.tab;
         observers[key] = created;
         changed = true;
-        tabs.push(created.tab);
+        tabs.push(createdTab);
       }
       continue;
     }
