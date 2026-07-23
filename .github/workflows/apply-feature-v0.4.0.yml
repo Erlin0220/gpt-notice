@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: apply-v0.4.0-feature
+  cancel-in-progress: true
+
 jobs:
   apply:
     if: github.event.pull_request.head.ref == 'feat/v0.4-background-tab-group'
@@ -68,4 +72,6 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git commit -m 'feat: replace popup monitor window with background tab group'
-          git push origin feat/v0.4-background-tab-group
+          git fetch origin feat/v0.4-background-tab-group
+          git rebase origin/feat/v0.4-background-tab-group
+          git push origin HEAD:feat/v0.4-background-tab-group
