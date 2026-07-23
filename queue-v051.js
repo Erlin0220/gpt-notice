@@ -663,6 +663,7 @@
   async function refreshLease() {
     const queue = runtime.queue;
     if (!queue?.items?.some((item) => ["pending", "dispatching", "running"].includes(item.status))) return;
+    if (queue.lease?.ownerId !== runtime.instanceId) return;
     if (Date.now() - runtime.lastLeaseRefreshAt < LEASE_REFRESH_MS - 250) return;
     runtime.lastLeaseRefreshAt = Date.now();
     await mutateCurrentQueue((current) => {
@@ -718,7 +719,9 @@
     await mutateQueuesLocked(key, (queues) => {
       const current = core.normalizeQueue(queues[key], key);
       const next = core.normalizeQueue(mutator(current) || current, key);
-      next.conversationUrl = key === runtime.conversationKey ? location.href : (next.conversationUrl || runtime.lastUrl);
+      if (!next.conversationUrl) {
+        next.conversationUrl = key === runtime.conversationKey ? location.href : runtime.lastUrl;
+      }
       next.revision = current.revision + 1;
       next.updatedAt = Date.now();
       queues[key] = next;
@@ -728,9 +731,10 @@
     return updated || loadQueue(key);
   }
 
-  async function mutateQueuesLocked(lockKey, mutator) {
+  async function mutateQueuesLocked(_lockKey, mutator) {
+    const globalLockKey = `global:${core.QUEUE_STORAGE_KEY}`;
     const run = runtime.storageWrite.then(async () => {
-      const acquired = await acquireWriteLock(lockKey);
+      const acquired = await acquireWriteLock(globalLockKey);
       if (!acquired) throw new Error("消息队列写入锁获取失败");
       try {
         const { [core.QUEUE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(core.QUEUE_STORAGE_KEY);
@@ -739,7 +743,7 @@
         await chrome.storage.local.set({ [core.QUEUE_STORAGE_KEY]: next });
         return next;
       } finally {
-        await releaseWriteLock(lockKey);
+        await releaseWriteLock(globalLockKey);
       }
     });
     runtime.storageWrite = run.catch(() => {});
