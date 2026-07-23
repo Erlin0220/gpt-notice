@@ -34,6 +34,8 @@ assert.equal(core.canAdmit(queue, { ...idleSnapshot, busy: true }), true);
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, waitingAction: true }), true);
 
 assert.equal(core.canDispatch(queue, idleSnapshot), true);
+assert.equal(core.canDispatch(queue, { ...idleSnapshot, busy: true, stableForMs: 5_000 }), false);
+assert.equal(core.canDispatch(queue, { ...idleSnapshot, busy: true, stableForMs: 8_500 }), true, "stale busy indicator must not block next dispatch");
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }), false, "draft must block auto dispatch");
 
 const runningQueue = core.normalizeQueue({
@@ -92,5 +94,13 @@ const history = Array.from({ length: 150 }, (_, index) => ({
 const pruned = core.normalizeQueue({ items: history }, "c:history");
 assert.ok(pruned.items.length <= core.MAX_HISTORY_ITEMS);
 assert.ok(pruned.items.length <= 60);
+
+const manyPending = Array.from({ length: 130 }, (_, index) => ({
+  id: `pending-${index}`,
+  text: `pending ${index}`,
+  status: "pending"
+}));
+const pendingQueue = core.normalizeQueue({ items: manyPending }, "c:pending");
+assert.equal(pendingQueue.items.length, 130, "history pruning must never discard unfinished queue items");
 
 console.log("queue v0.5.1 tests passed");
