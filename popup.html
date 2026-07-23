@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChatGPT 任务提醒</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="logo">✓</div>
+        <div>
+          <h1>ChatGPT 任务提醒</h1>
+          <p id="summary">正在读取状态…</p>
+        </div>
+      </header>
+
+      <section id="permissionWarning" class="warning hidden">
+        Chrome 或 Windows 已关闭扩展通知，请在系统通知设置中允许 Chrome 通知。
+      </section>
+
+      <section class="panel settings">
+        <label>
+          <span>关闭标签后继续监控</span>
+          <input type="checkbox" data-setting="autoKeepAlive" />
+        </label>
+        <label>
+          <span>任务完成提醒</span>
+          <input type="checkbox" data-setting="notifyCompleted" />
+        </label>
+        <label>
+          <span>等待操作提醒</span>
+          <input type="checkbox" data-setting="notifyAttention" />
+        </label>
+        <label>
+          <span>任务失败提醒</span>
+          <input type="checkbox" data-setting="notifyFailed" />
+        </label>
+        <label>
+          <span>ChatGPT 在前台时也提醒</span>
+          <input type="checkbox" data-setting="notifyWhenFocused" />
+        </label>
+      </section>
+
+      <div class="actions">
+        <button id="testButton" class="primary">测试 Windows 通知</button>
+        <button id="openChatButton">打开 ChatGPT</button>
+      </div>
+
+      <section class="task-section">
+        <div class="section-title">
+          <h2>最近任务</h2>
+          <button id="clearButton" class="text-button">清理记录</button>
+        </div>
+        <div id="taskList" class="task-list"></div>
+      </section>
+
+      <footer>
+        关闭原标签后会创建一个最小化 Chrome 监控窗口。退出整个 Chrome 后无法继续提醒。
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
