@@ -4,5 +4,6 @@ importScripts(
   "background-monitor-tabs.js",
   "background-watchdog.js",
   "background-actions.js",
+  "background-queue.js",
   "background-events.js"
 );
