@@ -4,7 +4,7 @@ const path = require("node:path");
 
 const root = path.join(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
-assert.equal(manifest.version, "0.5.0");
+assert.match(manifest.version, /^\d+\.\d+\.\d+(?:\.\d+)?$/, "manifest version must be a Chrome-compatible numeric version");
 assert.ok(manifest.permissions.includes("tabGroups"));
 assert.ok(manifest.permissions.includes("alarms"));
 assert.deepEqual(manifest.content_scripts[0].js, ["queue-core.js", "content.js", "queue.js"]);
@@ -25,4 +25,4 @@ assert.ok(queue.includes("加入队列"));
 assert.ok(queue.includes("acquireLease"), "queue must prevent duplicate dispatch across tabs");
 assert.ok(queue.includes("MAX_AUTO_RETRY = 1"));
 
-console.log("static v0.5.0 tests passed");
+console.log(`static v${manifest.version} tests passed`);
