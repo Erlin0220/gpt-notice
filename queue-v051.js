@@ -36,7 +36,9 @@
     inspectRunning: false,
     uiScheduled: false,
     lastLeaseRefreshAt: 0,
-    uiNotice: ""
+    uiNotice: "",
+    uiActionInFlight: false,
+    deferredAutoItemId: ""
   };
 
   boot().catch((error) => console.warn("[ChatGPT Message Queue] boot failed", error));
@@ -59,7 +61,10 @@
       scheduleUiRender();
     });
 
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((mutations) => {
+      const root = document.getElementById(UI_ID);
+      const hasExternalMutation = mutations.some((mutation) => !root || !root.contains(mutation.target));
+      if (!hasExternalMutation) return;
       scheduleUiRender();
       void inspect();
     });
@@ -100,7 +105,7 @@
         } else if (core.isItemCompleted(activeItem, snapshot, now)) {
           await completeActiveItem(activeItem, now);
         }
-      } else if (core.canDispatch(runtime.queue, snapshot, now)) {
+      } else if (core.getNextPendingItem(runtime.queue)) {
         await dispatchNextItem(snapshot);
       }
 
@@ -293,49 +298,110 @@
     void inspect();
   }
 
-  async function dispatchNextItem(snapshot) {
+  async function dispatchNextItem() {
     if (runtime.dispatching || runtime.sendConfirmation) return;
-    if (!(await acquireLease())) return;
 
     runtime.queue = await loadQueue(runtime.conversationKey);
-    const freshSnapshot = collectSnapshot();
-    freshSnapshot.manualHold = isManualHoldActive(freshSnapshot, Date.now());
-    freshSnapshot.stableForMs = Date.now() - runtime.assistantChangedAt;
-    if (!core.canDispatch(runtime.queue, freshSnapshot, Date.now())) return;
+    const now = Date.now();
+    const freshSnapshot = collectSnapshot(now);
+    freshSnapshot.manualHold = isManualHoldActive(freshSnapshot, now);
+    freshSnapshot.stableForMs = now - runtime.assistantChangedAt;
     const nextItem = core.getNextPendingItem(runtime.queue);
-    if (!nextItem) return;
+    if (!nextItem || !canPrepareQueueDispatch(runtime.queue, freshSnapshot, now)) return;
+
+    if (freshSnapshot.composerEmpty === false) {
+      if (runtime.deferredAutoItemId === nextItem.id) return;
+      const root = document.getElementById(UI_ID);
+      if (root) {
+        openQueueConfirmation(root, "auto-execute", nextItem.id, "\u5f53\u524d\u8f93\u5165\u6846\u5185\u5b58\u5728\u5185\u5bb9\uff0c\u662f\u5426\u8986\u76d6\u5e76\u6267\u884c\u4e0b\u4e00\u6761\u961f\u5217\u4efb\u52a1\uff1f");
+      }
+      return;
+    }
+
+    runtime.deferredAutoItemId = "";
+    closeQueueConfirmation(document.getElementById(UI_ID), "auto-execute");
+    await dispatchQueueItem(nextItem.id, { allowOverwrite: false, source: "auto" });
+  }
+
+  function canPrepareQueueDispatch(queue, snapshot, now = Date.now()) {
+    const normalized = core.normalizeQueue(queue, runtime.conversationKey);
+    if (normalized.paused || normalized.activeItemId || !core.getNextPendingItem(normalized)) return false;
+    if (normalized.nextDispatchAt > now) return false;
+    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.visibleError) return false;
+    const stableForMs = Number(snapshot.stableForMs || 0);
+    if (snapshot.busy && stableForMs < 8_000) return false;
+    if (snapshot.manualHold) return false;
+    return stableForMs >= 4_000;
+  }
+
+  function canStartManualDispatch(snapshot) {
+    return Boolean(snapshot?.composerReady && !snapshot.stopVisible && !snapshot.waitingAction && !snapshot.taskRunning && !snapshot.visibleError && !snapshot.busy && !snapshot.manualHold);
+  }
+
+  async function dispatchQueueItem(itemId, { allowOverwrite = false, source = "auto" } = {}) {
+    if (!itemId || runtime.dispatching || runtime.sendConfirmation) return false;
+    const queue = await loadQueue(runtime.conversationKey);
+    const candidate = queue.items.find((item) => item.id === itemId);
+    if (!candidate || !["pending", "failed"].includes(candidate.status) || queue.activeItemId) {
+      if (source !== "auto") showUiNotice("\u8be5\u6d88\u606f\u5f53\u524d\u65e0\u6cd5\u6267\u884c");
+      return false;
+    }
+
+    const now = Date.now();
+    const snapshot = collectSnapshot(now);
+    snapshot.manualHold = isManualHoldActive(snapshot, now);
+    snapshot.stableForMs = now - runtime.assistantChangedAt;
+    const pageReady = source === "auto" ? canPrepareQueueDispatch(queue, snapshot, now) : canStartManualDispatch(snapshot);
+    if (!pageReady) {
+      if (source !== "auto") showUiNotice("\u5f53\u524d\u4efb\u52a1\u4ecd\u5728\u6267\u884c\uff0c\u6682\u65f6\u65e0\u6cd5\u7acb\u5373\u53d1\u9001");
+      return false;
+    }
+
+    const previousComposerText = getComposerText();
+    if (previousComposerText && !allowOverwrite) return false;
+    if (!(await acquireLease())) {
+      if (source !== "auto") showUiNotice("\u5176\u4ed6\u6807\u7b7e\u9875\u6b63\u5728\u5904\u7406\u961f\u5217\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5");
+      return false;
+    }
 
     runtime.dispatching = true;
-    const baselineUserCount = freshSnapshot.userCount;
-    const baselineAssistantHash = freshSnapshot.assistantHash;
-    const baselineAssistantCount = freshSnapshot.assistantCount;
+    const baselineUserCount = snapshot.userCount;
+    const baselineAssistantHash = snapshot.assistantHash;
+    const baselineAssistantCount = snapshot.assistantCount;
     const startedAt = Date.now();
-
-    await mutateCurrentQueue((queue) => {
-      const item = queue.items.find((candidate) => candidate.id === nextItem.id);
-      if (!item || item.status !== "pending") return queue;
-      item.status = "dispatching";
-      item.startedAt = startedAt;
-      item.finishedAt = null;
-      item.baselineAssistantHash = baselineAssistantHash;
-      item.baselineAssistantCount = baselineAssistantCount;
-      item.baselineUserCount = baselineUserCount;
-      item.error = "";
-      queue.activeItemId = item.id;
-      queue.conversationUrl = location.href;
-      return queue;
-    });
-
+    let claimed = false;
     try {
-      const sent = await submitPrompt(nextItem.text);
-      if (!sent) throw new Error(getComposerText() ? "输入框中存在未发送草稿" : "未找到可用的发送按钮");
-      runtime.sendConfirmation = {
-        itemId: nextItem.id,
-        baselineUserCount,
-        expiresAt: Date.now() + SEND_CONFIRM_TIMEOUT_MS
-      };
+      await mutateCurrentQueue((currentQueue) => {
+        const item = currentQueue.items.find((current) => current.id === itemId);
+        if (!item || !["pending", "failed"].includes(item.status) || currentQueue.activeItemId) return currentQueue;
+        if (item.status === "failed") item.retryCount = 0;
+        item.status = "dispatching";
+        item.startedAt = startedAt;
+        item.finishedAt = null;
+        item.baselineAssistantHash = baselineAssistantHash;
+        item.baselineAssistantCount = baselineAssistantCount;
+        item.baselineUserCount = baselineUserCount;
+        item.error = "";
+        currentQueue.activeItemId = item.id;
+        currentQueue.paused = false;
+        currentQueue.conversationUrl = location.href;
+        claimed = true;
+        return currentQueue;
+      });
+      if (!claimed) return false;
+      const sent = await submitPrompt(candidate.text, { allowOverwrite });
+      if (!sent) throw new Error("\u672a\u627e\u5230\u53ef\u7528\u7684\u53d1\u9001\u6309\u94ae");
+      runtime.sendConfirmation = { itemId, baselineUserCount, expiresAt: Date.now() + SEND_CONFIRM_TIMEOUT_MS };
+      runtime.deferredAutoItemId = "";
+      return true;
     } catch (error) {
-      await handleDispatchFailure(nextItem.id, error?.message || "消息发送失败");
+      if (previousComposerText && allowOverwrite && !runtime.sendConfirmation) {
+        const composer = findComposer();
+        if (composer) setComposerText(composer, previousComposerText);
+      }
+      if (claimed) await handleDispatchFailure(itemId, error?.message || "\u6d88\u606f\u53d1\u9001\u5931\u8d25");
+      if (source !== "auto") showUiNotice(`\u7acb\u5373\u6267\u884c\u5931\u8d25\uff1a${error?.message || "\u672a\u77e5\u9519\u8bef"}`);
+      return false;
     } finally {
       runtime.dispatching = false;
     }
@@ -418,14 +484,16 @@
     });
   }
 
-  async function submitPrompt(text) {
+  async function submitPrompt(text, { allowOverwrite = false } = {}) {
     const composer = findComposer();
-    if (!composer || !isVisible(composer) || getComposerText()) return false;
+    if (!composer || !isVisible(composer)) return false;
+    const previousText = getComposerText();
+    if (previousText && !allowOverwrite) return false;
     setComposerText(composer, text);
     await delay(220);
     const button = findSendButton();
     if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
-      setComposerText(composer, "");
+      setComposerText(composer, previousText);
       return false;
     }
     button.click();
@@ -493,6 +561,13 @@
           <button type="button" data-action="pause">暂停</button>
           <button type="button" data-action="clear-completed">清除已完成</button>
         </div>
+        <div class="gptq-confirm" hidden>
+          <p class="gptq-confirm-message"></p>
+          <div class="gptq-confirm-actions">
+            <button type="button" data-action="cancel-confirm">\u5426</button>
+            <button type="button" data-action="confirm-action">\u662f</button>
+          </div>
+        </div>
         <div class="gptq-status"></div>
         <ol class="gptq-list"></ol>
       </section>
@@ -506,9 +581,11 @@
       if (!button || !root.contains(button)) return;
       const action = button.dataset.action;
       if (!action && !button.classList.contains("gptq-trigger")) return;
-
       event.preventDefault();
       event.stopPropagation();
+      event.stopImmediatePropagation();
+      if (runtime.uiActionInFlight) return;
+      runtime.uiActionInFlight = true;
       try {
         if (button.classList.contains("gptq-trigger")) {
           const panel = root.querySelector(".gptq-panel");
@@ -525,13 +602,18 @@
           });
         } else if (action === "delete") await deleteItem(button.dataset.id);
         else if (action === "up" || action === "down") await moveItem(button.dataset.id, action);
-        else if (action === "edit") await editItem(button.dataset.id);
+        else if (action === "edit") await requestRestoreToComposer(root, button.dataset.id);
+        else if (action === "execute-now") await requestImmediateExecution(root, button.dataset.id);
+        else if (action === "cancel-confirm") cancelQueueConfirmation(root);
+        else if (action === "confirm-action") await confirmQueueAction(root);
         else if (action === "retry") await retryItem(button.dataset.id);
         renderUi(root);
         void inspect();
       } catch (error) {
         console.warn("[ChatGPT Message Queue] UI action failed", action, error);
-        showUiNotice(`队列操作失败：${error?.message || "未知错误"}`);
+        showUiNotice(`\u961f\u5217\u64cd\u4f5c\u5931\u8d25\uff1a${error?.message || "\u672a\u77e5\u9519\u8bef"}`);
+      } finally {
+        runtime.uiActionInFlight = false;
       }
     }, true);
   }
@@ -563,9 +645,10 @@
     else status.textContent = "暂无等待消息";
 
     const list = root.querySelector(".gptq-list");
-    list.innerHTML = queue.items.length
+    const listMarkup = queue.items.length
       ? queue.items.map((item, index) => renderItem(item, index)).join("")
       : '<li class="gptq-empty">任务执行中输入下一条消息后加入队列</li>';
+    if (list.innerHTML !== listMarkup) list.innerHTML = listMarkup;
   }
 
   function showUiNotice(message) {
@@ -593,6 +676,7 @@
         </div></div>
         <div class="gptq-item-actions">
           ${canModify ? `<button type="button" data-action="edit" data-id="${item.id}">编辑</button>` : ""}
+          ${canModify ? `<button type="button" data-action="execute-now" data-id="${item.id}">\u7acb\u5373\u6267\u884c</button>` : ""}
           ${item.status === "failed" ? `<button type="button" data-action="retry" data-id="${item.id}">重试</button>` : ""}
           ${item.status === "pending" ? `<button type="button" data-action="up" data-id="${item.id}">↑</button><button type="button" data-action="down" data-id="${item.id}">↓</button>` : ""}
           ${!["running", "dispatching"].includes(item.status) ? `<button type="button" data-action="delete" data-id="${item.id}">删除</button>` : ""}
@@ -601,35 +685,155 @@
   }
 
   async function deleteItem(itemId) {
+    let removed = false;
     await mutateCurrentQueue((queue) => {
+      const before = queue.items.length;
       queue.items = queue.items.filter((item) => item.id !== itemId);
+      removed = queue.items.length !== before;
       if (queue.activeItemId === itemId) queue.activeItemId = null;
       return queue;
     });
+    if (removed) showUiNotice("\u961f\u5217\u6d88\u606f\u5df2\u5220\u9664");
   }
 
   async function moveItem(itemId, direction) {
+    let changed = false;
     await mutateCurrentQueue((queue) => {
+      const before = queue.items.map((item) => item.id).join("|");
       queue.items = core.moveItem(queue.items, itemId, direction);
+      changed = queue.items.map((item) => item.id).join("|") !== before;
       return queue;
     });
+    if (changed) showUiNotice(direction === "up" ? "\u5df2\u4e0a\u79fb" : "\u5df2\u4e0b\u79fb");
   }
 
-  async function editItem(itemId) {
-    const item = runtime.queue?.items?.find((candidate) => candidate.id === itemId);
-    if (!item) return;
-    const nextText = window.prompt("编辑队列消息", item.text);
-    if (nextText == null || !core.cleanText(nextText)) return;
-    await mutateCurrentQueue((queue) => {
-      const current = queue.items.find((candidate) => candidate.id === itemId);
-      if (current && ["pending", "failed"].includes(current.status)) {
-        current.text = core.cleanText(nextText);
-        current.status = "pending";
-        current.error = "";
-        current.retryCount = 0;
-      }
-      return queue;
-    });
+  function openQueueConfirmation(root, mode, itemId, message) {
+    const confirmBox = root?.querySelector(".gptq-confirm");
+    const panel = root?.querySelector(".gptq-panel");
+    const messageNode = confirmBox?.querySelector(".gptq-confirm-message");
+    if (!confirmBox || !messageNode || !itemId) return;
+    if (!confirmBox.hidden && confirmBox.dataset.mode && confirmBox.dataset.mode !== "auto-execute" && mode === "auto-execute") return;
+    confirmBox.dataset.mode = mode;
+    confirmBox.dataset.itemId = itemId;
+    messageNode.textContent = message;
+    confirmBox.hidden = false;
+    if (panel) panel.hidden = false;
+  }
+
+  function closeQueueConfirmation(root, onlyMode = "") {
+    const confirmBox = root?.querySelector(".gptq-confirm");
+    if (!confirmBox || (onlyMode && confirmBox.dataset.mode !== onlyMode)) return;
+    confirmBox.hidden = true;
+    delete confirmBox.dataset.mode;
+    delete confirmBox.dataset.itemId;
+    const messageNode = confirmBox.querySelector(".gptq-confirm-message");
+    if (messageNode) messageNode.textContent = "";
+  }
+
+  function cancelQueueConfirmation(root) {
+    const confirmBox = root?.querySelector(".gptq-confirm");
+    const mode = confirmBox?.dataset.mode || "";
+    const itemId = confirmBox?.dataset.itemId || "";
+    if (mode === "auto-execute" && itemId) {
+      runtime.deferredAutoItemId = itemId;
+      showUiNotice("\u5df2\u4fdd\u7559\u5f53\u524d\u8f93\u5165\uff0c\u8f93\u5165\u6846\u6e05\u7a7a\u540e\u961f\u5217\u4f1a\u7ee7\u7eed\u6267\u884c");
+    }
+    closeQueueConfirmation(root);
+  }
+
+  async function confirmQueueAction(root) {
+    const confirmBox = root?.querySelector(".gptq-confirm");
+    const mode = confirmBox?.dataset.mode || "";
+    const itemId = confirmBox?.dataset.itemId || "";
+    if (!mode || !itemId) return;
+    closeQueueConfirmation(root);
+    if (mode === "restore") await restoreItemToComposer(root, itemId);
+    else if (mode === "execute-now") await dispatchQueueItem(itemId, { allowOverwrite: true, source: "manual" });
+    else if (mode === "auto-execute") {
+      runtime.deferredAutoItemId = "";
+      await dispatchQueueItem(itemId, { allowOverwrite: true, source: "manual" });
+    }
+  }
+
+  async function requestRestoreToComposer(root, itemId) {
+    const queue = await loadQueue(runtime.conversationKey);
+    const item = queue.items.find((candidate) => candidate.id === itemId);
+    if (!item || !["pending", "failed"].includes(item.status)) {
+      showUiNotice("\u8be5\u6d88\u606f\u5f53\u524d\u4e0d\u53ef\u7f16\u8f91");
+      return;
+    }
+    if (!findComposer()) {
+      showUiNotice("\u672a\u627e\u5230\u5f53\u524d\u8f93\u5165\u6846");
+      return;
+    }
+    if (getComposerText()) {
+      openQueueConfirmation(root, "restore", item.id, "\u5f53\u524d\u8f93\u5165\u6846\u5185\u5b58\u5728\u5185\u5bb9\uff0c\u662f\u5426\u8986\u76d6\uff1f");
+      return;
+    }
+    await restoreItemToComposer(root, item.id);
+  }
+
+  async function requestImmediateExecution(root, itemId) {
+    const queue = await loadQueue(runtime.conversationKey);
+    const item = queue.items.find((candidate) => candidate.id === itemId);
+    if (!item || !["pending", "failed"].includes(item.status)) {
+      showUiNotice("\u8be5\u6d88\u606f\u5f53\u524d\u65e0\u6cd5\u7acb\u5373\u6267\u884c");
+      return;
+    }
+    const now = Date.now();
+    const snapshot = collectSnapshot(now);
+    snapshot.manualHold = isManualHoldActive(snapshot, now);
+    if (!canStartManualDispatch(snapshot) || queue.activeItemId) {
+      showUiNotice("\u5f53\u524d\u4efb\u52a1\u4ecd\u5728\u6267\u884c\uff0c\u6682\u65f6\u65e0\u6cd5\u7acb\u5373\u53d1\u9001");
+      return;
+    }
+    if (getComposerText()) {
+      openQueueConfirmation(root, "execute-now", item.id, "\u5f53\u524d\u8f93\u5165\u6846\u5185\u5b58\u5728\u5185\u5bb9\uff0c\u662f\u5426\u8986\u76d6\u5e76\u7acb\u5373\u6267\u884c\uff1f");
+      return;
+    }
+    await dispatchQueueItem(item.id, { allowOverwrite: false, source: "manual" });
+  }
+
+  async function restoreItemToComposer(root, itemId) {
+    const queue = await loadQueue(runtime.conversationKey);
+    const item = queue.items.find((candidate) => candidate.id === itemId);
+    if (!item || !["pending", "failed"].includes(item.status)) {
+      showUiNotice("\u8be5\u6d88\u606f\u72b6\u6001\u5df2\u53d8\u5316\uff0c\u65e0\u6cd5\u53d6\u56de");
+      return;
+    }
+    const composer = findComposer();
+    if (!composer) {
+      showUiNotice("\u672a\u627e\u5230\u5f53\u524d\u8f93\u5165\u6846");
+      return;
+    }
+    const previousComposerText = getComposerText();
+    setComposerText(composer, item.text);
+    await delay(50);
+    if (getComposerText() !== core.cleanText(item.text)) {
+      setComposerText(composer, previousComposerText);
+      showUiNotice("\u5185\u5bb9\u5199\u5165\u8f93\u5165\u6846\u5931\u8d25\uff0c\u961f\u5217\u6d88\u606f\u5df2\u4fdd\u7559");
+      return;
+    }
+    let removed = false;
+    try {
+      await mutateCurrentQueue((currentQueue) => {
+        const current = currentQueue.items.find((candidate) => candidate.id === itemId);
+        if (!current || !["pending", "failed"].includes(current.status)) return currentQueue;
+        currentQueue.items = currentQueue.items.filter((candidate) => candidate.id !== itemId);
+        removed = true;
+        return currentQueue;
+      });
+    } catch (error) {
+      setComposerText(composer, previousComposerText);
+      throw error;
+    }
+    if (!removed) {
+      setComposerText(composer, previousComposerText);
+      showUiNotice("\u8be5\u6d88\u606f\u72b6\u6001\u5df2\u53d8\u5316\uff0c\u5df2\u6062\u590d\u539f\u8f93\u5165\u5185\u5bb9");
+      return;
+    }
+    composer.focus();
+    showUiNotice("\u961f\u5217\u6d88\u606f\u5df2\u53d6\u56de\u8f93\u5165\u6846");
   }
 
   async function retryItem(itemId) {
@@ -671,14 +875,15 @@
       #${UI_ID} .gptq-panel{position:absolute;right:0;bottom:46px;width:min(380px,calc(100vw - 28px));max-height:min(520px,70vh);overflow:hidden;border:1px solid rgba(0,0,0,.15);border-radius:14px;background:#fff;box-shadow:0 18px 54px rgba(0,0,0,.22)}
       #${UI_ID} .gptq-panel[hidden]{display:none}#${UI_ID} header{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid rgba(0,0,0,.09)}
       #${UI_ID} header button{border:0;background:transparent;font-size:21px;line-height:1}#${UI_ID} .gptq-actions{display:flex;gap:7px;padding:10px 12px}
-      #${UI_ID} .gptq-actions button,#${UI_ID} .gptq-item-actions button{border:1px solid rgba(0,0,0,.14);border-radius:8px;background:#fff;padding:5px 8px}
+      #${UI_ID} .gptq-actions button,#${UI_ID} .gptq-item-actions button,#${UI_ID} .gptq-confirm-actions button{border:1px solid rgba(0,0,0,.14);border-radius:8px;background:#fff;padding:5px 8px}
+      #${UI_ID} .gptq-confirm{margin:0 12px 10px;padding:10px;border:1px solid rgba(0,0,0,.12);border-radius:10px;background:rgba(0,0,0,.025)}#${UI_ID} .gptq-confirm[hidden]{display:none}#${UI_ID} .gptq-confirm p{margin:0 0 8px}#${UI_ID} .gptq-confirm-actions{display:flex;justify-content:flex-end;gap:6px}
       #${UI_ID} .gptq-status{padding:0 12px 8px;color:#666}#${UI_ID} .gptq-list{max-height:390px;overflow:auto;margin:0;padding:0 10px 10px;list-style:none}
       #${UI_ID} .gptq-item{padding:10px 4px;border-top:1px solid rgba(0,0,0,.08)}#${UI_ID} .gptq-item-main{display:flex;gap:8px;align-items:flex-start}
       #${UI_ID} .gptq-index{flex:none;display:grid;place-items:center;width:21px;height:21px;border-radius:50%;background:rgba(0,0,0,.08);font-size:11px}
       #${UI_ID} .gptq-item-main>div{min-width:0;flex:1}#${UI_ID} .gptq-item p{margin:0;white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
       #${UI_ID} .gptq-item small{display:block;margin-top:4px;color:#777}#${UI_ID} .gptq-item[data-status="running"] small,#${UI_ID} .gptq-item[data-status="dispatching"] small{font-weight:600}
       #${UI_ID} .gptq-item[data-status="failed"] small{color:#b42318}#${UI_ID} .gptq-item-actions{display:flex;justify-content:flex-end;gap:5px;margin-top:7px}#${UI_ID} .gptq-empty{padding:22px 8px;text-align:center;color:#777}
-      @media (prefers-color-scheme:dark){#${UI_ID}{color:#ececec}#${UI_ID} .gptq-trigger,#${UI_ID} .gptq-panel,#${UI_ID} .gptq-actions button,#${UI_ID} .gptq-item-actions button{background:#2f2f2f;color:#ececec;border-color:rgba(255,255,255,.15)}#${UI_ID} .gptq-quick-add{background:#ececec;color:#202123;border-color:#ececec}#${UI_ID} .gptq-count{background:#ececec;color:#202123}#${UI_ID} header,#${UI_ID} .gptq-item{border-color:rgba(255,255,255,.1)}#${UI_ID} .gptq-status,#${UI_ID} .gptq-item small,#${UI_ID} .gptq-empty{color:#aaa}}
+      @media (prefers-color-scheme:dark){#${UI_ID}{color:#ececec}#${UI_ID} .gptq-trigger,#${UI_ID} .gptq-panel,#${UI_ID} .gptq-actions button,#${UI_ID} .gptq-item-actions button,#${UI_ID} .gptq-confirm-actions button{background:#2f2f2f;color:#ececec;border-color:rgba(255,255,255,.15)}#${UI_ID} .gptq-confirm{background:rgba(255,255,255,.04);border-color:rgba(255,255,255,.12)}#${UI_ID} .gptq-quick-add{background:#ececec;color:#202123;border-color:#ececec}#${UI_ID} .gptq-count{background:#ececec;color:#202123}#${UI_ID} header,#${UI_ID} .gptq-item{border-color:rgba(255,255,255,.1)}#${UI_ID} .gptq-status,#${UI_ID} .gptq-item small,#${UI_ID} .gptq-empty{color:#aaa}}
     `;
     (document.head || document.documentElement).appendChild(style);
   }
