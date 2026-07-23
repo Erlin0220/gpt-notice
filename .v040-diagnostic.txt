@@ -1,0 +1,16 @@
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+  File "/usr/lib/python3.12/base64.py", line 88, in b64decode
+    return binascii.a2b_base64(s, strict_mode=validate)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+binascii.Error: Only base64 data is allowed
+payload_length= 20023
+payload_prefix= 'H4sIAAAAAAAAA+29eXtb1bU43L/9KQ4it0hgyfKY'
+payload_suffix= 'fHY+O5+dz85n57Pz2fnsfP5nff5/MT451QAIAgA='
+payload_sha256= 2c271a7f52b8f1e50f253640fa0d0080d31aedf4b3923090df048071fefb05b9
+Traceback (most recent call last):
+  File "<stdin>", line 12, in <module>
+  File "/usr/lib/python3.12/base64.py", line 88, in b64decode
+    return binascii.a2b_base64(s, strict_mode=validate)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+binascii.Error: Only base64 data is allowed
