@@ -1,0 +1,355 @@
+name: Apply v0.3.0 notification design
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-v0.3.0.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download official ChatGPT icon
+        run: |
+          mkdir -p icons
+          curl --fail --location --retry 3 \
+            'https://images.ctfassets.net/j22is2dtoxu1/intercom-img-d177d076c9a5453052925143/49d5d812b0a6fcc20a14faa8c629d9fb/icon-ios-1024_401x.png' \
+            --output icons/chatgpt.png
+          test -s icons/chatgpt.png
+
+      - name: Update notification content and icon
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import json
+          import re
+
+          def replace_once(text, old, new, label):
+              if old not in text:
+                  raise RuntimeError(f"missing replacement target: {label}")
+              return text.replace(old, new, 1)
+
+          manifest_path = Path("manifest.json")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          manifest["version"] = "0.3.0"
+          manifest["description"] = "在 ChatGPT 任务完成、等待操作或失败时发送 Windows 通知；通知显示问题标题、思考时长和回复第一行。"
+          icon_map = {"16": "icons/chatgpt.png", "32": "icons/chatgpt.png", "48": "icons/chatgpt.png", "128": "icons/chatgpt.png"}
+          manifest["icons"] = icon_map
+          manifest.setdefault("action", {})["default_icon"] = icon_map
+          manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+          bg_path = Path("background-events.js")
+          bg = bg_path.read_text(encoding="utf-8")
+          bg, count = re.subn(
+              r'const NOTIFICATION_ICON = "data:image/png;base64,[^"]+";',
+              'const NOTIFICATION_ICON = "icons/chatgpt.png";',
+              bg,
+              count=1,
+          )
+          if count != 1:
+              raise RuntimeError("unable to replace notification icon")
+
+          bg = bg.replace("  await applyActionIcon();\n", "")
+          bg = bg.replace("  void applyActionIcon();\n", "")
+          bg = bg.replace("\nvoid applyActionIcon();\n", "\n")
+          bg, count = re.subn(
+              r'\nasync function applyActionIcon\(\) \{.*?\n\}\n',
+              "\n",
+              bg,
+              count=1,
+              flags=re.S,
+          )
+          if count != 1:
+              raise RuntimeError("unable to remove generated action icon code")
+
+          old = '    const prompt = cleanText(message.prompt || "ChatGPT 任务", 100);\n'
+          new = old + '    const questionTitle = cleanText(message.questionTitle || prompt || "ChatGPT 任务", 80);\n'
+          bg = replace_once(bg, old, new, "question title declaration")
+          bg = replace_once(
+              bg,
+              '    task.title = cleanText(message.title || tab.title || "ChatGPT 会话", 80);',
+              '    task.title = questionTitle || task.title || "ChatGPT 任务";',
+              "task title assignment",
+          )
+
+          old = '    task.prompt = cleanText(message.prompt || task.prompt || "ChatGPT 任务", 100);\n'
+          new = (
+              old
+              + '    task.title = cleanText(message.questionTitle || task.title || task.prompt || "ChatGPT 任务", 80);\n'
+              + '    task.assistantFirstLine = cleanText(message.assistantFirstLine || task.assistantFirstLine || "", 240);\n'
+              + '    task.thinkingTimeText = cleanText(message.thinkingTimeText || task.thinkingTimeText || "", 60);\n'
+          )
+          bg = replace_once(bg, old, new, "completed response metadata")
+
+          notification_functions = '''async function maybeNotify(task, settings) {
+            const title = cleanText(task.title || task.prompt || "ChatGPT 任务", 80);
+            const completedMessage = [task.thinkingTimeText, task.assistantFirstLine]
+              .filter(Boolean)
+              .join("，") || "任务已完成。";
+
+            const config = {
+              completed: {
+                enabled: settings.notifyCompleted,
+                message: completedMessage,
+                priority: 1
+              },
+              waiting_action: {
+                enabled: settings.notifyAttention,
+                message: "等待确认、授权或继续操作。",
+                priority: 2
+              },
+              failed: {
+                enabled: settings.notifyFailed,
+                message: "任务可能失败或遇到错误。",
+                priority: 2
+              }
+            }[task.status];
+
+            if (!config?.enabled) return;
+            if (!settings.notifyWhenFocused && (await isAnyTaskTabFocused(task))) return;
+
+            const notificationId = `chatgpt-task:${task.id}:${task.status}`;
+            await chrome.notifications.create(notificationId, {
+              type: "basic",
+              iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
+              title,
+              message: config.message,
+              contextMessage: task.status === "completed" ? "点击查看完整回复" : "点击打开对应会话",
+              priority: config.priority,
+              requireInteraction: task.status !== "completed",
+              buttons: [{ title: "打开会话" }]
+            });
+          }
+
+          async function showTestNotification() {
+            await chrome.notifications.create(`chatgpt-test:${Date.now()}`, {
+              type: "basic",
+              iconUrl: chrome.runtime.getURL(NOTIFICATION_ICON),
+              title: "测试问题标题",
+              message: "思考了 1m 23s，Windows 通知能够正常显示。",
+              priority: 1
+            });
+          }
+          '''
+          bg, count = re.subn(
+              r'async function maybeNotify\(task, settings\) \{.*?\n\}\n\nasync function showTestNotification\(\) \{.*?\n\}\n',
+              notification_functions,
+              bg,
+              count=1,
+              flags=re.S,
+          )
+          if count != 1:
+              raise RuntimeError("unable to replace notification functions")
+          bg_path.write_text(bg, encoding="utf-8")
+
+          content_path = Path("content.js")
+          content = content_path.read_text(encoding="utf-8")
+          content = replace_once(
+              content,
+              '      await reportStatus("completed", assistant.hash);',
+              '      await reportStatus("completed", assistant.hash, assistant);',
+              "completed report metadata",
+          )
+          content = replace_once(
+              content,
+              '      title: document.title,\n      prompt: cleanText(prompt || getLatestUserText() || "ChatGPT 任务", 100),',
+              '      title: getQuestionTitle(prompt || getLatestUserText() || "ChatGPT 任务"),\n      questionTitle: getQuestionTitle(prompt || getLatestUserText() || "ChatGPT 任务"),\n      prompt: cleanText(prompt || getLatestUserText() || "ChatGPT 任务", 100),',
+              "task start title",
+          )
+          content = replace_once(
+              content,
+              '  async function reportStatus(status, latestAssistantHash) {',
+              '  async function reportStatus(status, latestAssistantHash, assistant = getLatestAssistant()) {',
+              "reportStatus signature",
+          )
+          content = replace_once(
+              content,
+              '      prompt: getLatestUserText(),\n      latestAssistantHash',
+              '      prompt: getLatestUserText(),\n      questionTitle: getQuestionTitle(getLatestUserText()),\n      assistantFirstLine: assistant.firstLine || "",\n      thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),\n      latestAssistantHash',
+              "status payload",
+          )
+          content = replace_once(
+              content,
+              '''    const node = nodes.at(-1);
+              const text = cleanText(node?.innerText || node?.textContent || "", 20000);
+              return { node, text, hash: text ? hashText(text) : "" };'''.replace("              ", ""),
+              '''    const node = nodes.at(-1);
+              const rawText = String(node?.innerText || node?.textContent || "");
+              const text = cleanText(rawText, 20000);
+              return {
+                node,
+                text,
+                hash: text ? hashText(text) : "",
+                firstLine: getAssistantFirstLine(node, rawText),
+                thinkingTimeText: getThinkingTimeText(node)
+              };'''.replace("              ", ""),
+              "assistant metadata extraction",
+          )
+
+          helpers = r'''  function getQuestionTitle(value) {
+            const raw = String(value || "").replace(/\r/g, "").trim();
+            let title = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || "ChatGPT 任务";
+            const punctuationIndexes = ["。", "！", "？", "!", "?"]
+              .map((mark) => title.indexOf(mark))
+              .filter((index) => index >= 6);
+            if (punctuationIndexes.length) {
+              title = title.slice(0, Math.min(...punctuationIndexes) + 1);
+            }
+            return cleanText(title.replace(/^#+\s*/, ""), 80) || "ChatGPT 任务";
+          }
+
+          function getAssistantFirstLine(node, rawText) {
+            const roots = [
+              node?.querySelector?.('[data-message-content]'),
+              node?.querySelector?.('.markdown'),
+              node?.querySelector?.('[class*="prose"]'),
+              node
+            ].filter(Boolean);
+
+            for (const root of roots) {
+              const blocks = root.matches?.("h1,h2,h3,h4,p,li,blockquote,pre")
+                ? [root]
+                : [...root.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || []];
+              for (const block of blocks) {
+                const lines = String(block.innerText || block.textContent || "").split(/\n+/);
+                const line = lines.map((item) => item.trim()).find((item) => item && !isAssistantUiLine(item));
+                if (line) return cleanText(line, 240);
+              }
+            }
+
+            const fallback = String(rawText || "")
+              .split(/\n+/)
+              .map((line) => line.trim())
+              .find((line) => line && !isAssistantUiLine(line));
+            return cleanText(fallback || "", 240);
+          }
+
+          function isAssistantUiLine(line) {
+            const normalized = cleanText(line, 160).toLowerCase();
+            return /^(思考了\s*\d|thought for\s*\d|复制$|copy$|分享$|share$|重新生成$|regenerate$|good response$|bad response$)/i.test(normalized);
+          }
+
+          function getThinkingTimeText(node) {
+            const turn = node?.closest?.('[data-testid^="conversation-turn-"]') || node?.closest?.("article") || node?.parentElement;
+            const text = String(turn?.innerText || node?.innerText || node?.textContent || "");
+            const match = text.match(/(?:思考了|thought for)\s*((?:\d+\s*(?:h|小时|hours?|hrs?)\s*)?(?:\d+\s*(?:m|分钟|minutes?|mins?)\s*)?(?:\d+\s*(?:s|秒|seconds?|secs?))?)/i);
+            if (!match?.[1] || !/\d/.test(match[1])) return "";
+
+            const duration = match[1];
+            const hours = Number(duration.match(/(\d+)\s*(?:h|小时|hours?|hrs?)/i)?.[1] || 0);
+            const minutes = Number(duration.match(/(\d+)\s*(?:m|分钟|minutes?|mins?)/i)?.[1] || 0);
+            const seconds = Number(duration.match(/(\d+)\s*(?:s|秒|seconds?|secs?)/i)?.[1] || 0);
+            const totalMinutes = hours * 60 + minutes;
+            const parts = [];
+            if (totalMinutes) parts.push(`${totalMinutes}m`);
+            if (seconds || !totalMinutes) parts.push(`${seconds}s`);
+            return `思考了 ${parts.join(" ")}`;
+          }
+
+          function formatThinkingTime(elapsedMs) {
+            const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
+          }
+
+          '''
+          content = replace_once(
+              content,
+              '  function cleanText(value, maxLength) {',
+              helpers + '  function cleanText(value, maxLength) {',
+              "notification extraction helpers",
+          )
+          content_path.write_text(content, encoding="utf-8")
+
+          test_path = Path("tests/background.test.js")
+          test = test_path.read_text(encoding="utf-8")
+          test = replace_once(
+              test,
+              '  windowsUpdate: []\n};',
+              '  windowsUpdate: [],\n  notifications: []\n};',
+              "notification test calls",
+          )
+          test = replace_once(
+              test,
+              '    onMessage: event()\n  },',
+              '    onMessage: event(),\n    getURL(path) { return `chrome-extension://test/${path}`; }\n  },',
+              "runtime getURL mock",
+          )
+          test = replace_once(
+              test,
+              '    async create() {},',
+              '    async create(id, options) { calls.notifications.push({ id, options }); },',
+              "notification create mock",
+          )
+          test = replace_once(
+              test,
+              '  assert.equal(calls.windowsUpdate.at(-1).id, 10);\n  console.log("background tests passed");',
+              '''  assert.equal(calls.windowsUpdate.at(-1).id, 10);
+
+              await context.maybeNotify({
+                ...storage.tasks.reuse,
+                id: "notice",
+                status: "completed",
+                title: "生成 Releases",
+                thinkingTimeText: "思考了 37m 51s",
+                assistantFirstLine: "计划已执行完成，v3.0.0 已推送到 GitHub。"
+              }, {
+                notifyCompleted: true,
+                notifyAttention: true,
+                notifyFailed: true,
+                notifyWhenFocused: true
+              });
+              const notice = calls.notifications.at(-1).options;
+              assert.equal(notice.title, "生成 Releases");
+              assert.equal(notice.message, "思考了 37m 51s，计划已执行完成，v3.0.0 已推送到 GitHub。");
+              assert.equal(notice.iconUrl, "chrome-extension://test/icons/chatgpt.png");
+              console.log("background tests passed");'''.replace("              ", ""),
+              "notification assertions",
+          )
+          test_path.write_text(test, encoding="utf-8")
+
+          readme_path = Path("README.md")
+          readme = readme_path.read_text(encoding="utf-8")
+          addition = '''
+
+          ## v0.3.0 通知展示
+
+          - 扩展图标和 Windows 通知图标统一使用 ChatGPT 官方图标。
+          - 通知标题取用户问题的第一行或首句。
+          - 完成通知正文为“思考时长 + 回复第一行”，例如：`思考了 37m 51s，计划已执行完成，v3.0.0 已推送到 GitHub。`
+          - 优先读取 ChatGPT 页面显示的思考时长；读取不到时使用任务运行时长兜底。
+
+          > ChatGPT 和相关图标归 OpenAI 所有。本项目为非官方浏览器扩展，与 OpenAI 不存在隶属或背书关系。
+          '''.replace("          ", "")
+          if "## v0.3.0 通知展示" not in readme:
+              readme += addition
+          readme_path.write_text(readme, encoding="utf-8")
+          PY
+
+      - name: Validate
+        run: |
+          node --check background.js
+          node --check background-events.js
+          node --check background-actions.js
+          node --check background-utils.js
+          node --check content.js
+          node --check popup.js
+          node tests/background.test.js
+          python3 -m json.tool manifest.json >/dev/null
+          file icons/chatgpt.png
+
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manifest.json background-events.js content.js tests/background.test.js README.md icons/chatgpt.png
+          git commit -m 'feat: show question title and response summary in notifications'
+          git push origin main
