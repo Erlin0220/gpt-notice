@@ -22,6 +22,7 @@ jobs:
         with:
           ref: feat/v0.4-background-tab-group
           fetch-depth: 0
+          show-progress: false
 
       - name: Check whether implementation is already applied
         id: pending
@@ -36,6 +37,7 @@ jobs:
         if: steps.pending.outputs.needed == 'true'
         run: |
           set -euo pipefail
+          cp .github/workflows/auto-release.yml /tmp/auto-release.yml
           cat .v040-chunks/part* > /tmp/gpt-notice-v040.tar.gz.b64
           test "$(wc -c < /tmp/gpt-notice-v040.tar.gz.b64)" = "38020"
           echo '446e77d208c0816afcc5d3cc3af7f2dea90c3e6d29e7ce14d26307900530fca0  /tmp/gpt-notice-v040.tar.gz.b64' | sha256sum -c -
@@ -43,6 +45,7 @@ jobs:
           echo 'c707fd679cf7dc3fe8dfced933753e08e2827c8c0c77c2c32ab3457464e3daa5  /tmp/gpt-notice-v040.tar.gz' | sha256sum -c -
           gzip -t /tmp/gpt-notice-v040.tar.gz
           tar -xzf /tmp/gpt-notice-v040.tar.gz -C .
+          cp /tmp/auto-release.yml .github/workflows/auto-release.yml
 
       - name: Validate v0.4.0
         if: steps.pending.outputs.needed == 'true'
@@ -67,10 +70,10 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .v040-chunks
-          rm -f .github/workflows/apply-v0.4.0.yml .github/workflows/kick-v0.4.0.yml .v040-trigger .v040-diagnostic.txt
+          rm -f .v040-trigger .v040-trigger-r5 .v040-diagnostic.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add manifest.json background.js background-utils.js background-tab-groups.js background-monitor-tabs.js background-watchdog.js background-actions.js background-events.js content.js popup.html popup.css popup.js README.md PRIVACY.md tests .v040-chunks .v040-trigger .v040-trigger-r5 .v040-diagnostic.txt
           git commit -m 'feat: replace popup monitor window with background tab group'
           git fetch origin feat/v0.4-background-tab-group
           git rebase origin/feat/v0.4-background-tab-group
