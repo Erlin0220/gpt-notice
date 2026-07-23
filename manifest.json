@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 任务完成提醒",
-  "version": "0.4.0",
-  "description": "使用折叠后台标签组继续监控 ChatGPT 任务；完成通知显示问题标题、思考时长和回复第一行。",
+  "version": "0.5.0",
+  "description": "为 ChatGPT 网页任务提供逐步完成通知、后台标签监控和消息队列自动执行。",
   "minimum_chrome_version": "120",
   "permissions": [
     "alarms",
@@ -35,7 +35,7 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["content.js"],
+      "js": ["queue-core.js", "content.js", "queue.js"],
       "run_at": "document_idle"
     }
   ],
