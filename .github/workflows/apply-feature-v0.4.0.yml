@@ -31,23 +31,45 @@ jobs:
       - name: Extract embedded source archive
         if: steps.pending.outputs.needed == 'true'
         run: |
-          set -euo pipefail
-          python3 <<'PY'
+          set +e
+          python3 <<'PY' > .v040-diagnostic.txt 2>&1
           from pathlib import Path
-          lines = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8').splitlines()
-          start = next(i for i, line in enumerate(lines) if "<<'ARCHIVE'" in line) + 1
-          end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'ARCHIVE')
-          payload = ''.join(line.strip() for line in lines[start:end] if line.strip())
-          if not payload.startswith('H4sI'):
-              raise RuntimeError(f'unexpected archive prefix: {payload[:20]!r}')
-          Path('/tmp/gpt-notice-v040.tar.gz.b64').write_text(payload, encoding='ascii')
-          print(f'archive base64 chars: {len(payload)}')
+          import base64, gzip, hashlib, io, tarfile, traceback
+          try:
+              lines = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8').splitlines()
+              start = next(i for i, line in enumerate(lines) if "<<'ARCHIVE'" in line) + 1
+              end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'ARCHIVE')
+              payload = ''.join(line.strip() for line in lines[start:end] if line.strip())
+              print('payload_length=', len(payload))
+              print('payload_prefix=', repr(payload[:40]))
+              print('payload_suffix=', repr(payload[-40:]))
+              print('payload_sha256=', hashlib.sha256(payload.encode('ascii', 'replace')).hexdigest())
+              raw = base64.b64decode(payload, validate=True)
+              print('decoded_length=', len(raw))
+              print('decoded_sha256=', hashlib.sha256(raw).hexdigest())
+              gzip.decompress(raw)
+              print('gzip_test=ok')
+              with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+                  names = archive.getnames()
+                  print('tar_entries=', len(names))
+                  print('\n'.join(names[:20]))
+                  archive.extractall('.')
+              print('extract=ok')
+          except Exception:
+              traceback.print_exc()
+              raise
           PY
-          base64 --decode /tmp/gpt-notice-v040.tar.gz.b64 > /tmp/gpt-notice-v040.tar.gz
-          test -s /tmp/gpt-notice-v040.tar.gz
-          file /tmp/gpt-notice-v040.tar.gz
-          gzip -t /tmp/gpt-notice-v040.tar.gz
-          tar -xzf /tmp/gpt-notice-v040.tar.gz -C .
+          STATUS=$?
+          cat .v040-diagnostic.txt
+          if [[ "$STATUS" -ne 0 ]]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add .v040-diagnostic.txt
+            git commit -m 'test: capture v0.4.0 archive diagnostic' || true
+            git push origin feat/v0.4-background-tab-group || true
+            exit "$STATUS"
+          fi
+          rm -f .v040-diagnostic.txt
 
       - name: Validate v0.4.0
         if: steps.pending.outputs.needed == 'true'
@@ -71,7 +93,7 @@ jobs:
         if: steps.pending.outputs.needed == 'true'
         run: |
           set -euo pipefail
-          rm -f .github/workflows/apply-v0.4.0.yml .github/workflows/kick-v0.4.0.yml .v040-trigger
+          rm -f .github/workflows/apply-v0.4.0.yml .github/workflows/kick-v0.4.0.yml .v040-trigger .v040-diagnostic.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
