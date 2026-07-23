@@ -1,0 +1,92 @@
+name: Publish v0.2.0
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/publish-v0.2.0.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate extension
+        run: |
+          node --check background.js
+          node --check background-events.js
+          node --check background-actions.js
+          node --check background-utils.js
+          node --check content.js
+          node --check popup.js
+          node tests/background.test.js
+
+      - name: Build Chrome extension package
+        run: |
+          set -euo pipefail
+          rm -rf dist package
+          mkdir -p package/chatgpt-task-notifier dist
+          rsync -a ./ package/chatgpt-task-notifier/ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='dist/' \
+            --exclude='package/'
+          cd package
+          zip -r ../dist/chatgpt-task-notifier-v0.2.0.zip chatgpt-task-notifier
+          cd ../dist
+          sha256sum chatgpt-task-notifier-v0.2.0.zip > SHA256SUMS.txt
+
+      - name: Prepare release notes
+        run: |
+          cat > dist/RELEASE_NOTES.md <<'EOF'
+          ## ChatGPT 任务完成提醒 v0.2.0
+
+          本版本重点修复关闭 ChatGPT 标签后的后台监控、重复任务，以及打开任务时重复创建标签的问题。
+
+          ### 修复内容
+
+          - 修复最小化监控窗口中任务永久显示“执行中”。
+          - 增加后台监控页周期刷新，及时获取服务端结果。
+          - 同一 ChatGPT 会话只保留一个运行中任务。
+          - 正常标签与后台监控标签可同时绑定同一个任务。
+          - 避免历史消息加载时误创建重复任务。
+          - 点击通知或面板“打开”时优先跳转到已有标签。
+
+          ### 安装
+
+          1. 下载 `chatgpt-task-notifier-v0.2.0.zip` 并解压。
+          2. Chrome 打开 `chrome://extensions/`。
+          3. 开启“开发者模式”。
+          4. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
+
+          > 整个 Chrome 完全退出后，扩展无法继续监控。
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.2.0 >/dev/null 2>&1; then
+            gh release edit v0.2.0 \
+              --title "ChatGPT Task Notifier v0.2.0" \
+              --notes-file dist/RELEASE_NOTES.md
+            gh release upload v0.2.0 \
+              dist/chatgpt-task-notifier-v0.2.0.zip \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create v0.2.0 \
+              dist/chatgpt-task-notifier-v0.2.0.zip \
+              dist/SHA256SUMS.txt \
+              --target "$GITHUB_SHA" \
+              --title "ChatGPT Task Notifier v0.2.0" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi
