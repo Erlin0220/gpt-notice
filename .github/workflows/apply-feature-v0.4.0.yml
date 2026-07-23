@@ -31,14 +31,22 @@ jobs:
       - name: Extract embedded source archive
         if: steps.pending.outputs.needed == 'true'
         run: |
+          set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
-          text = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8')
-          start = text.index("<<'ARCHIVE'\n") + len("<<'ARCHIVE'\n")
-          end = text.index("\nARCHIVE", start)
-          Path('/tmp/gpt-notice-v040.tar.gz.b64').write_text(text[start:end].strip(), encoding='ascii')
+          lines = Path('.github/workflows/apply-v0.4.0.yml').read_text(encoding='utf-8').splitlines()
+          start = next(i for i, line in enumerate(lines) if "<<'ARCHIVE'" in line) + 1
+          end = next(i for i in range(start, len(lines)) if lines[i].strip() == 'ARCHIVE')
+          payload = ''.join(line.strip() for line in lines[start:end] if line.strip())
+          if not payload.startswith('H4sI'):
+              raise RuntimeError(f'unexpected archive prefix: {payload[:20]!r}')
+          Path('/tmp/gpt-notice-v040.tar.gz.b64').write_text(payload, encoding='ascii')
+          print(f'archive base64 chars: {len(payload)}')
           PY
-          base64 -d /tmp/gpt-notice-v040.tar.gz.b64 > /tmp/gpt-notice-v040.tar.gz
+          base64 --decode /tmp/gpt-notice-v040.tar.gz.b64 > /tmp/gpt-notice-v040.tar.gz
+          test -s /tmp/gpt-notice-v040.tar.gz
+          file /tmp/gpt-notice-v040.tar.gz
+          gzip -t /tmp/gpt-notice-v040.tar.gz
           tar -xzf /tmp/gpt-notice-v040.tar.gz -C .
 
       - name: Validate v0.4.0
