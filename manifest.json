@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT 任务完成提醒",
+  "version": "0.2.0",
+  "description": "在 ChatGPT 任务完成、等待操作或失败时发送 Windows 通知；支持会话级去重、复用已打开标签，并在关闭原标签后继续监控。",
+  "minimum_chrome_version": "120",
+  "permissions": [
+    "notifications",
+    "storage",
+    "tabs",
+    "windows"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "ChatGPT 任务提醒",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
