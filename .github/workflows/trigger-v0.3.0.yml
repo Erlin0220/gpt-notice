@@ -36,8 +36,13 @@ jobs:
           marker = "python3 <<'PY'\n"
           if marker not in workflow:
               raise RuntimeError('embedded update script not found')
-          script = workflow.split(marker, 1)[1].split("\n          PY", 1)[0]
-          Path('/tmp/apply-v0.3.0.py').write_text(textwrap.dedent(script), encoding='utf-8')
+          script = textwrap.dedent(workflow.split(marker, 1)[1].split("\n          PY", 1)[0])
+          old_pattern = r"r'async function maybeNotify\(task, settings\) \{.*?\n\}\n\nasync function showTestNotification\(\) \{.*?\n\}\n'"
+          new_pattern = r"r'async function maybeNotify\(task, settings\) \{.*?async function showTestNotification\(\) \{.*?\n\}\n'"
+          if old_pattern not in script:
+              raise RuntimeError('notification replacement pattern not found')
+          script = script.replace(old_pattern, new_pattern, 1)
+          Path('/tmp/apply-v0.3.0.py').write_text(script, encoding='utf-8')
           PY
 
       - name: Run update script
