@@ -80,7 +80,7 @@ async function reconcileQueueObserversNow() {
         observer.cleanupAt = 0;
         observer.url = observerTab.url || queue.conversationUrl;
         observers[key] = observer;
-        await makeQueueObserverDurable(observer.tabId);
+        await makeQueueObserverDurable(observerTab, observer.managed !== false);
         continue;
       }
       staleObservers.push(observer);
@@ -103,11 +103,22 @@ async function reconcileQueueObserversNow() {
           cleanupAt: 0
         };
         changed = true;
-        await makeQueueObserverDurable(preferred.id);
+        await makeQueueObserverDurable(preferred, donorObserver.managed !== false);
+      } else {
+        observers[key] = {
+          tabId: preferred.id,
+          windowId: preferred.windowId,
+          groupId: null,
+          url: preferred.url || queue.conversationUrl,
+          createdAt: now,
+          cleanupAt: 0,
+          managed: false
+        };
+        changed = true;
+        await makeQueueObserverDurable(preferred, false);
       }
       continue;
     }
-
     const created = await createQueueObserverTab(key, queue.conversationUrl);
     if (created) {
       const createdTab = created.tab;
@@ -141,7 +152,7 @@ async function reconcileQueueObserversNow() {
     if (observer.cleanupAt > now) continue;
     delete observers[key];
     changed = true;
-    try { await chrome.tabs.remove(observer.tabId); } catch {}
+    await releaseQueueObserver(observer);
   }
 
   for (const observer of staleObservers) {
@@ -152,16 +163,30 @@ async function reconcileQueueObserversNow() {
       return queueTabMatches(tab, activeKey, queue.conversationUrl);
     });
     if (stillMapped || neededByActiveQueue) continue;
-    try { await chrome.tabs.remove(observer.tabId); } catch {}
+    await releaseQueueObserver(observer);
   }
 
   if (changed) await chrome.storage.local.set({ [QUEUE_OBSERVER_STORAGE_KEY]: observers });
 }
 
-async function makeQueueObserverDurable(tabId) {
-  try {
-    await chrome.tabs.update(tabId, { muted: true, autoDiscardable: false });
-  } catch {}
+async function makeQueueObserverDurable(tabOrId, managed = true) {
+  const tabId = typeof tabOrId === "number" ? tabOrId : tabOrId?.id;
+  if (!Number.isInteger(tabId)) return;
+  if (typeof tabOrId === "object" && tabOrId?.discarded) {
+    try { await chrome.tabs.reload(tabId); } catch {}
+  }
+  const patch = { autoDiscardable: false };
+  if (managed) patch.muted = true;
+  try { await chrome.tabs.update(tabId, patch); } catch {}
+}
+
+async function releaseQueueObserver(observer) {
+  if (!Number.isInteger(observer?.tabId)) return;
+  if (observer.managed === false) {
+    try { await chrome.tabs.update(observer.tabId, { autoDiscardable: true }); } catch {}
+    return;
+  }
+  try { await chrome.tabs.remove(observer.tabId); } catch {}
 }
 
 function normalizeBackgroundQueue(queue = {}, key = "") {
@@ -247,6 +272,7 @@ async function createQueueObserverTab(key, url) {
       url,
       createdAt: Date.now(),
       cleanupAt: 0,
+      managed: true,
       tab
     };
   } catch (error) {
@@ -284,11 +310,20 @@ async function promoteQueueObserverTab(tabId) {
   const entry = Object.entries(stored).find(([, observer]) => observer?.tabId === tabId);
   if (!entry) return;
   const [key, observer] = entry;
-  const next = { ...stored };
-  delete next[key];
+  if (observer.managed === false) return;
+
+  const next = {
+    ...stored,
+    [key]: {
+      ...observer,
+      managed: false,
+      groupId: null,
+      cleanupAt: 0
+    }
+  };
   await chrome.storage.local.set({ [QUEUE_OBSERVER_STORAGE_KEY]: next });
   try {
-    if (Number.isInteger(observer.groupId) && observer.groupId >= 0) await chrome.tabs.ungroup(tabId);
+    if (Number.isInteger(observer.groupId) && observer.groupId >= 0) await chrome.tabs.ungroup([tabId]);
   } catch {}
-  try { await chrome.tabs.update(tabId, { muted: false, autoDiscardable: true }); } catch {}
+  try { await chrome.tabs.update(tabId, { muted: false, autoDiscardable: false }); } catch {}
 }

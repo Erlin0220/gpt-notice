@@ -178,14 +178,19 @@
   }
 
   async function handleNavigationChange() {
+    const currentUrl = location.href;
     const nextKey = resolveConversationKey();
-    if (location.href === runtime.lastUrl && nextKey === runtime.conversationKey) return;
+    if (currentUrl === runtime.lastUrl && nextKey === runtime.conversationKey) return;
+    if (!nextKey) return;
+
+    const previousKey = runtime.conversationKey;
+    if (nextKey === previousKey) {
+      const explicitKey = core.getConversationKey(currentUrl, runtime.temporaryKey);
+      if (explicitKey === previousKey) runtime.lastUrl = currentUrl;
+      return;
+    }
 
     const previousUrl = runtime.lastUrl;
-    const previousKey = runtime.conversationKey;
-    runtime.lastUrl = location.href;
-    if (!nextKey || nextKey === previousKey) return;
-
     const previousQueue = await loadQueue(previousKey);
     if (core.shouldMigrateQueue(previousKey, nextKey)) {
       await migrateDraftQueue(previousKey, nextKey, previousUrl);
@@ -197,6 +202,7 @@
       });
     }
 
+    runtime.lastUrl = currentUrl;
     runtime.conversationKey = nextKey;
     runtime.queue = await loadQueue(nextKey);
     runtime.sendConfirmation = null;
@@ -205,7 +211,6 @@
     runtime.manualTaskObserved = false;
     resetAssistantTracking();
   }
-
   async function migrateDraftQueue(fromKey, toKey, previousUrl) {
     await mutateQueuesLocked(`migrate:${fromKey}:${toKey}`, (queues) => {
       const source = core.normalizeQueue(queues[fromKey], fromKey);
@@ -413,6 +418,9 @@
   }
 
   function installSubmissionListeners() {
+    document.addEventListener("input", (event) => {
+      if (isComposerElement(event.target)) scheduleUiRender();
+    }, true);
     document.addEventListener("click", (event) => {
       const button = event.target.closest?.("button");
       if (!button || !looksLikeSendButton(button) || runtime.dispatching) return;

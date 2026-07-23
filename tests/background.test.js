@@ -192,6 +192,7 @@ const chrome = {
     async getPermissionLevel() { return "granted"; }
   },
   storage: {
+    onChanged: createEvent(),
     local: {
       async get(keys) {
         if (typeof keys === "string") return { [keys]: storage[keys] };
@@ -230,6 +231,7 @@ for (const file of [
   "background-monitor-tabs.js",
   "background-watchdog.js",
   "background-actions.js",
+  "background-queue.js",
   "background-events.js"
 ]) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", file), "utf8"), context, { filename: file });
@@ -242,6 +244,8 @@ function resetRuntimeState() {
   storage.settings = { ...DEFAULT_SETTINGS };
   storage.tasks = {};
   storage.meta = {};
+  storage.messageQueues = {};
+  storage.queueObserverTabs = {};
   tabs.clear();
   windows.clear();
   groups.clear();
@@ -448,8 +452,121 @@ async function flush() {
   await context.handleTabActivated(90);
   assert.equal(storage.tasks.activate.observerMode, "normal_tab", "activating a monitor tab should promote it");
 
+  resetRuntimeState();
+  storage.messageQueues = {
+    "c:queue-handoff": {
+      conversationUrl: "https://chatgpt.com/g/g-p-demo/c/queue-handoff",
+      paused: false,
+      activeItemId: null,
+      items: [{ id: "queued-1", text: "next prompt", status: "pending" }]
+    }
+  };
+  await context.reconcileQueueObservers();
+  const queueObserver = storage.queueObserverTabs["c:queue-handoff"];
+  assert.ok(queueObserver?.tabId, "an unfinished queue must create a background observer after navigation");
+  assert.equal(calls.tabsCreate.length, 1);
+  assert.equal(calls.tabsCreate[0].url, "https://chatgpt.com/g/g-p-demo/c/queue-handoff");
+  assert.equal(calls.tabsCreate[0].active, false, "queue observer must not steal focus");
+  assert.equal(tabs.get(queueObserver.tabId).autoDiscardable, false);
+  assert.equal(tabs.get(queueObserver.tabId).mutedInfo.muted, true);
+
+  storage.messageQueues["c:queue-handoff"].items[0].status = "completed";
+  await context.reconcileQueueObservers();
+  assert.ok(storage.queueObserverTabs["c:queue-handoff"].cleanupAt > Date.now());
+  storage.queueObserverTabs["c:queue-handoff"].cleanupAt = Date.now() - 1;
+  await context.reconcileQueueObservers();
+  assert.equal(tabs.has(queueObserver.tabId), false, "completed queue observer must be removed after the grace period");
+
+  resetRuntimeState();
+  addTab({
+    id: 95,
+    windowId: 1,
+    url: "https://chatgpt.com/g/g-p-demo/c/project-chat",
+    active: false,
+    lastAccessed: Date.now()
+  });
+  storage.messageQueues = {
+    "c:project-chat": {
+      conversationUrl: "https://chatgpt.com/g/g-p-demo/c/project-chat",
+      paused: false,
+      activeItemId: null,
+      items: [{ id: "queued-project", text: "project next", status: "pending" }]
+    }
+  };
+  await context.reconcileQueueObservers();
+  assert.equal(calls.tabsCreate.length, 0, "an existing project conversation tab must be reused");
+  const existingObserver = storage.queueObserverTabs["c:project-chat"];
+  assert.equal(existingObserver.managed, false, "a user tab must be tracked without becoming an extension-managed tab");
+  assert.equal(tabs.get(95).autoDiscardable, false, "a reused tab must be protected from Memory Saver while the queue is active");
+  assert.equal(tabs.get(95).mutedInfo.muted, false, "a reused user tab must not be muted");
+
+  storage.messageQueues["c:project-chat"].items[0].status = "completed";
+  await context.reconcileQueueObservers();
+  storage.queueObserverTabs["c:project-chat"].cleanupAt = Date.now() - 1;
+  await context.reconcileQueueObservers();
+  assert.equal(tabs.has(95), true, "a reused user tab must never be closed by queue cleanup");
+  assert.equal(tabs.get(95).autoDiscardable, true, "a reused tab must return to the browser default after queue cleanup");
+
+  resetRuntimeState();
+  addTab({
+    id: 96,
+    windowId: 1,
+    url: "https://chatgpt.com/c/discarded-queue-tab",
+    active: false,
+    discarded: true,
+    lastAccessed: Date.now()
+  });
+  storage.messageQueues = {
+    "c:discarded-queue-tab": {
+      conversationUrl: "https://chatgpt.com/c/discarded-queue-tab",
+      paused: false,
+      activeItemId: null,
+      items: [{ id: "queued-discarded", text: "resume", status: "pending" }]
+    }
+  };
+  await context.reconcileQueueObservers();
+  assert.deepEqual(calls.tabsReload, [96], "a discarded reused tab must be reloaded so its queue can continue");
+  assert.equal(calls.tabsCreate.length, 0);
+
+  resetRuntimeState();
+  const promotedQueueTab = addTab({
+    id: 97,
+    windowId: 1,
+    url: "https://chatgpt.com/c/promoted-queue-tab",
+    active: false,
+    groupId: 11
+  });
+  groups.set(11, { id: 11, windowId: 1, title: "GPT 后台", color: "grey", collapsed: true, tabIds: [97] });
+  storage.queueObserverTabs = {
+    "c:promoted-queue-tab": {
+      tabId: 97,
+      windowId: 1,
+      groupId: 11,
+      url: promotedQueueTab.url,
+      createdAt: Date.now(),
+      cleanupAt: 0,
+      managed: true
+    }
+  };
+  await context.promoteQueueObserverTab(97);
+  assert.equal(storage.queueObserverTabs["c:promoted-queue-tab"].managed, false);
+  assert.equal(tabs.get(97).groupId, -1, "an activated queue observer must become a normal tab");
+  assert.equal(tabs.get(97).mutedInfo.muted, false);
+  assert.equal(tabs.get(97).autoDiscardable, false, "a promoted tab remains protected while its queue may still be active");
+
+  resetRuntimeState();
+  storage.messageQueues = {
+    "c:paused": {
+      conversationUrl: "https://chatgpt.com/c/paused",
+      paused: true,
+      activeItemId: null,
+      items: [{ id: "queued-paused", text: "paused next", status: "pending" }]
+    }
+  };
+  await context.reconcileQueueObservers();
+  assert.equal(calls.tabsCreate.length, 0, "a paused pending queue must not create a background observer");
   assert.equal(STORAGE_SCHEMA_VERSION, 2);
-  console.log("background v0.4.0 tests passed");
+  console.log("background and queue observer tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

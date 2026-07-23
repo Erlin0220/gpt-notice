@@ -97,7 +97,7 @@
   function getConversationKey(value, temporaryKey = "", discoveredConversationId = "") {
     try {
       const url = new URL(value || "https://chatgpt.com/");
-      const conversationId = discoveredConversationId || findConversationId(url.href);
+      const conversationId = findConversationId(url.href);
       if (conversationId) return `c:${conversationId}`;
       const shareMatch = url.pathname.match(/(?:^|\/)share\/([^/?#]+)/);
       if (shareMatch) return `share:${shareMatch[1]}`;
@@ -105,6 +105,7 @@
       if (projectMatch) return `project-draft:${projectMatch[1]}:${temporaryKey || "page"}`;
       const trimmedPath = url.pathname.replace(/\/+$/, "") || "/";
       if (trimmedPath !== "/") return `path:${trimmedPath}`;
+      if (discoveredConversationId) return `c:${discoveredConversationId}`;
     } catch {
       // Fall through to a per-tab temporary key.
     }

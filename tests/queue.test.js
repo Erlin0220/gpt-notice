@@ -15,6 +15,21 @@ assert.equal(
   core.getConversationKey("https://chatgpt.com/g/g-p-demo/project", "tab-1"),
   "project-draft:g-p-demo:tab-1"
 );
+assert.equal(
+  core.getConversationKey("https://chatgpt.com/g/g-p-demo/project", "tab-1", "stale-conversation"),
+  "project-draft:g-p-demo:tab-1",
+  "stale DOM conversation ids must not override an explicit project route"
+);
+assert.equal(
+  core.getConversationKey("https://chatgpt.com/g/g-p-demo/c/fresh-conversation", "tab-1", "stale-conversation"),
+  "c:fresh-conversation",
+  "the conversation id in the URL must win during SPA navigation"
+);
+assert.equal(
+  core.getConversationKey("https://chatgpt.com/g/g-demo", "tab-1", "stale-conversation"),
+  "path:/g/g-demo",
+  "stale DOM ids must not rebind unrelated routes"
+);
 assert.equal(core.shouldMigrateQueue("temp:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("project-draft:g-p-demo:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("c:old", "c:new"), false);
@@ -103,4 +118,4 @@ const manyPending = Array.from({ length: 130 }, (_, index) => ({
 const pendingQueue = core.normalizeQueue({ items: manyPending }, "c:pending");
 assert.equal(pendingQueue.items.length, 130, "history pruning must never discard unfinished queue items");
 
-console.log("queue v0.5.1 tests passed");
+console.log("queue v0.5.2 tests passed");
