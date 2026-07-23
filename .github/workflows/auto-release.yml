@@ -1,0 +1,175 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".release-trigger-*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Read extension version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./manifest.json').version")"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid manifest version: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already exists; no new release is needed."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate extension
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          set -euo pipefail
+          node --check background.js
+          node --check background-events.js
+          node --check background-actions.js
+          node --check background-utils.js
+          node --check content.js
+          node --check popup.js
+          node tests/background.test.js
+          python3 -m json.tool manifest.json >/dev/null
+          test -s icons/chatgpt.png
+
+      - name: Build Chrome extension package
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist package
+          mkdir -p package/chatgpt-task-notifier dist
+          rsync -a ./ package/chatgpt-task-notifier/ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='.release/' \
+            --exclude='.release-trigger-*' \
+            --exclude='dist/' \
+            --exclude='package/' \
+            --exclude='tests/'
+          cd package
+          zip -qr "../dist/chatgpt-task-notifier-v${VERSION}.zip" chatgpt-task-notifier
+          cd ../dist
+          sha256sum "chatgpt-task-notifier-v${VERSION}.zip" > SHA256SUMS.txt
+
+      - name: Prepare release notes
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREVIOUS_TAG="$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -n 1 || true)"
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            CHANGES="$(git log "${PREVIOUS_TAG}..HEAD" --no-merges --pretty=format:'- %s (`%h`)' || true)"
+          else
+            CHANGES="$(git log HEAD --no-merges --pretty=format:'- %s (`%h`)' || true)"
+          fi
+          if [[ -z "$CHANGES" ]]; then
+            CHANGES="- 发布 ${TAG}"
+          fi
+
+          cat > dist/RELEASE_NOTES.md <<EOF
+          ## ChatGPT 任务完成提醒 ${TAG}
+
+          ### 更新内容
+
+          ${CHANGES}
+
+          ### 安装
+
+          1. 下载 \`chatgpt-task-notifier-v${VERSION}.zip\` 并解压。
+          2. Chrome 打开 \`chrome://extensions/\`。
+          3. 开启“开发者模式”。
+          4. 点击“加载已解压的扩展程序”，选择解压后的文件夹。
+
+          > 整个 Chrome 完全退出后，扩展无法继续监控。
+          EOF
+
+      - name: Create GitHub Release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET_SHA: ${{ steps.version.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSETS=(
+            "dist/chatgpt-task-notifier-v${VERSION}.zip"
+            "dist/SHA256SUMS.txt"
+          )
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --verify-tag \
+              --title "ChatGPT Task Notifier ${TAG}" \
+              --notes-file dist/RELEASE_NOTES.md
+          else
+            gh release create "$TAG" "${ASSETS[@]}" \
+              --target "$TARGET_SHA" \
+              --title "ChatGPT Task Notifier ${TAG}" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi
+
+      - name: Verify release assets
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" \
+            --json url,tagName,name,isDraft,isPrerelease,publishedAt,assets \
+            > release-info.json
+          jq -e --arg tag "$TAG" '.isDraft == false and .tagName == $tag' release-info.json >/dev/null
+          jq -e --arg asset "chatgpt-task-notifier-v${VERSION}.zip" '[.assets[].name] | index($asset) != null' release-info.json >/dev/null
+          jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' release-info.json >/dev/null
+          cat release-info.json
