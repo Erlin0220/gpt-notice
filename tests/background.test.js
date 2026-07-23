@@ -92,7 +92,9 @@ const context = vm.createContext({
   setTimeout: (fn) => { fn(); return 1; },
   clearTimeout() {}
 });
-vm.runInContext(fs.readFileSync(require.resolve("../background.js"), "utf8"), context);
+for (const file of ["../background-events.js", "../background-actions.js", "../background-utils.js"]) {
+  vm.runInContext(fs.readFileSync(require.resolve(file), "utf8"), context);
+}
 
 assert.equal(
   context.sanitizeChatUrl("https://chat.openai.com/c/abc?utm_source=x#hash"),
