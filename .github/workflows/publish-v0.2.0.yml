@@ -6,6 +6,11 @@ on:
       - main
     paths:
       - ".github/workflows/publish-v0.2.0.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".release-trigger-v0.2.0"
   workflow_dispatch:
 
 permissions:
@@ -37,6 +42,7 @@ jobs:
             --exclude='.git/' \
             --exclude='.github/' \
             --exclude='.release/' \
+            --exclude='.release-trigger-v0.2.0' \
             --exclude='dist/' \
             --exclude='package/'
           cd package
@@ -87,25 +93,20 @@ jobs:
             gh release create v0.2.0 \
               dist/chatgpt-task-notifier-v0.2.0.zip \
               dist/SHA256SUMS.txt \
-              --target "$GITHUB_SHA" \
+              --target main \
               --title "ChatGPT Task Notifier v0.2.0" \
               --notes-file dist/RELEASE_NOTES.md
           fi
 
-      - name: Verify and record release
+      - name: Verify release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p .release
           gh release view v0.2.0 \
             --json url,tagName,name,isDraft,isPrerelease,publishedAt,assets \
-            > .release/v0.2.0.json
-          jq -e '.isDraft == false and .tagName == "v0.2.0"' .release/v0.2.0.json >/dev/null
-          jq -e '[.assets[].name] | index("chatgpt-task-notifier-v0.2.0.zip") != null' .release/v0.2.0.json >/dev/null
-          jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' .release/v0.2.0.json >/dev/null
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .release/v0.2.0.json
-          git commit -m "chore: record v0.2.0 release" || exit 0
-          git push
+            > release-info.json
+          jq -e '.isDraft == false and .tagName == "v0.2.0"' release-info.json >/dev/null
+          jq -e '[.assets[].name] | index("chatgpt-task-notifier-v0.2.0.zip") != null' release-info.json >/dev/null
+          jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' release-info.json >/dev/null
+          cat release-info.json
