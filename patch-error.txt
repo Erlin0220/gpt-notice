@@ -1,5 +1,0 @@
-exit=1
-Traceback (most recent call last):
-  File "<stdin>", line 7, in <module>
-  File "<string>", line 410, in <module>
-TypeError: replace_once() missing 1 required positional argument: 'label'

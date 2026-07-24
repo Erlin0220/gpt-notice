@@ -15,6 +15,7 @@ const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const ALLOWED_STATUSES = new Set([...ACTIVE_STATUSES, ...FINISHED_STATUSES]);
 const NOTIFICATION_ICON = "icons/chatgpt.png";
 const MAX_TASK_HISTORY = 40;
+const URL_PROMOTION_WINDOW_MS = 60_000;
 let mutationQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(() => void migrateState());
@@ -74,6 +75,7 @@ async function handleMessage(message, sender) {
   switch (message?.type) {
     case "PAGE_READY": return handlePageReady(message, sender);
     case "PAGE_CHANGED": return handlePageChanged(message, sender);
+    case "PAGE_PROMOTED": return handlePagePromoted(message, sender);
     case "TASK_STARTED": return handleTaskStarted(message, sender);
     case "TASK_STATE": return handleTaskState(message, sender);
     case "HEARTBEAT": return handleHeartbeat(message, sender);
@@ -93,11 +95,23 @@ async function handlePageReady(message, sender) {
   if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
   return enqueueMutation(async () => {
     const state = await readState();
-    const task = Object.values(state.tasks)
+    const nextUrl = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
+    let task = Object.values(state.tasks)
       .filter((item) => ACTIVE_STATUSES.has(item.status) && item.tabId === tab.id)
       .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
-    if (task) {
-      task.url = sanitizeChatUrl(message.url || tab.url || task.url);
+    if (task && !samePage(task.url, nextUrl)) {
+      if (canPromoteTaskUrl(task, nextUrl)) {
+        promoteTaskUrl(task, nextUrl, tab);
+        state.tasks[task.id] = task;
+        await writeTasks(state.tasks);
+      } else {
+        cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
+        state.tasks[task.id] = task;
+        await writeTasks(pruneTasks(state.tasks));
+        task = null;
+      }
+    } else if (task) {
+      task.url = nextUrl;
       task.windowId = tab.windowId;
       task.observerMode = "current_page";
       task.updatedAt = Date.now();
@@ -105,6 +119,29 @@ async function handlePageReady(message, sender) {
       await writeTasks(state.tasks);
     }
     return { ok: true, settings: state.settings, task: task ? publicTask(task) : null };
+  });
+}
+
+async function handlePagePromoted(message, sender) {
+  const tab = sender.tab;
+  if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
+  return enqueueMutation(async () => {
+    const state = await readState();
+    const nextUrl = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
+    const task = Object.values(state.tasks)
+      .filter((item) => ACTIVE_STATUSES.has(item.status) && item.tabId === tab.id)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+    if (!task) return { ok: true, task: null };
+    if (!samePage(task.url, nextUrl) && !canPromoteTaskUrl(task, nextUrl)) {
+      cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
+      state.tasks[task.id] = task;
+      await writeTasks(pruneTasks(state.tasks));
+      return { ok: true, task: null };
+    }
+    promoteTaskUrl(task, nextUrl, tab);
+    state.tasks[task.id] = task;
+    await writeTasks(state.tasks);
+    return { ok: true, task: publicTask(task) };
   });
 }
 
@@ -125,11 +162,22 @@ async function handleTaskStarted(message, sender) {
     if (!task || task.tabId !== tab.id) {
       task = Object.values(state.tasks).find((item) => item.tabId === tab.id && ACTIVE_STATUSES.has(item.status)) || null;
     }
+    const nextUrl = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
+    if (task && !samePage(task.url, nextUrl)) {
+      if (canPromoteTaskUrl(task, nextUrl, now)) {
+        promoteTaskUrl(task, nextUrl, tab);
+      } else {
+        cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
+        state.tasks[task.id] = task;
+        task = null;
+      }
+    }
     if (!task) task = normalizeTask({ id: createTaskId(), createdAt: now, startedAt: now });
     task.status = "running";
     task.tabId = tab.id;
     task.windowId = tab.windowId;
-    task.url = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
+    task.url = nextUrl;
+    task.urlPromotionExpiresAt = isDraftChatUrl(nextUrl) ? now + URL_PROMOTION_WINDOW_MS : 0;
     task.title = cleanText(message.questionTitle || message.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.title, 240);
     task.baselineAssistantHash = String(message.baselineAssistantHash || "");
@@ -158,8 +206,18 @@ async function handleTaskState(message, sender) {
     const now = Date.now();
     const nextStatus = String(message.status || task.status);
     if (!ALLOWED_STATUSES.has(nextStatus)) return { ok: false, error: "Invalid task status" };
+    const nextUrl = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
+    if (!samePage(task.url, nextUrl)) {
+      if (canPromoteTaskUrl(task, nextUrl, now)) promoteTaskUrl(task, nextUrl, sender.tab);
+      else {
+        cancelTaskRecord(task, "任务状态来自其他 ChatGPT 会话，旧任务监控已停止");
+        state.tasks[task.id] = task;
+        await writeTasks(pruneTasks(state.tasks));
+        return { ok: true, task: null, cancelled: true };
+      }
+    }
     task.status = nextStatus;
-    task.url = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
+    task.url = nextUrl;
     task.title = cleanText(message.questionTitle || task.title || task.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.prompt || task.title, 240);
     task.assistantFirstLine = cleanText(message.assistantFirstLine || task.assistantFirstLine || "", 240);
@@ -175,6 +233,7 @@ async function handleTaskState(message, sender) {
     }
     if (FINISHED_STATUSES.has(task.status)) {
       task.finishedAt = now;
+      task.urlPromotionExpiresAt = 0;
       if (!task.thinkingTimeText) task.thinkingTimeText = formatElapsed(now - task.startedAt);
     }
     state.tasks[task.id] = task;
@@ -190,7 +249,17 @@ async function handleHeartbeat(message, sender) {
     const task = message.taskId ? state.tasks[message.taskId] : null;
     if (!task || !ACTIVE_STATUSES.has(task.status)) return { ok: true, task: null };
     if (!Number.isInteger(sender.tab?.id) || sender.tab.id !== task.tabId) return { ok: true, task: null };
-    task.url = sanitizeChatUrl(message.url || sender.tab.url || task.url);
+    const nextUrl = sanitizeChatUrl(message.url || sender.tab.url || task.url);
+    if (!samePage(task.url, nextUrl)) {
+      if (canPromoteTaskUrl(task, nextUrl)) promoteTaskUrl(task, nextUrl, sender.tab);
+      else {
+        cancelTaskRecord(task, "心跳来自其他 ChatGPT 会话，旧任务监控已停止");
+        state.tasks[task.id] = task;
+        await writeTasks(pruneTasks(state.tasks));
+        return { ok: true, task: null, cancelled: true };
+      }
+    }
+    task.url = nextUrl;
     task.windowId = sender.tab.windowId;
     task.latestAssistantHash = String(message.latestAssistantHash || task.latestAssistantHash || "");
     task.lastHeartbeatAt = Date.now();
@@ -203,10 +272,20 @@ async function handleHeartbeat(message, sender) {
 }
 
 async function stopTasksForNavigatedTab(tabId, nextUrl) {
-  const state = await readState();
-  const current = Object.values(state.tasks).find((task) => task.tabId === tabId && ACTIVE_STATUSES.has(task.status));
-  if (!current || samePage(current.url, nextUrl)) return;
-  await cancelActiveTasksForTab(tabId, "已切换到其他 ChatGPT 会话，旧任务监控已停止");
+  return enqueueMutation(async () => {
+    const state = await readState();
+    const current = Object.values(state.tasks).find((task) => task.tabId === tabId && ACTIVE_STATUSES.has(task.status));
+    if (!current || samePage(current.url, nextUrl)) return;
+    if (canPromoteTaskUrl(current, nextUrl)) {
+      promoteTaskUrl(current, nextUrl);
+      state.tasks[current.id] = current;
+      await writeTasks(state.tasks);
+      return;
+    }
+    cancelTaskRecord(current, "已切换到其他 ChatGPT 会话，旧任务监控已停止");
+    state.tasks[current.id] = current;
+    await writeTasks(pruneTasks(state.tasks));
+  });
 }
 
 async function cancelActiveTasksForTab(tabId, reason) {
@@ -375,6 +454,7 @@ function normalizeTask(task = {}) {
     windowId: Number.isInteger(task.windowId) ? task.windowId : null,
     observerMode: Number.isInteger(task.tabId) ? "current_page" : "none",
     url: sanitizeChatUrl(task.url || "https://chatgpt.com/"),
+    urlPromotionExpiresAt: Math.max(0, Number(task.urlPromotionExpiresAt || 0)),
     title: cleanText(task.title || task.prompt || "ChatGPT 任务", 80),
     prompt: cleanText(task.prompt || "ChatGPT 任务", 240),
     baselineAssistantHash: String(task.baselineAssistantHash || ""),
@@ -447,6 +527,52 @@ function samePage(left, right) {
     const a = new URL(sanitizeChatUrl(left));
     const b = new URL(sanitizeChatUrl(right));
     return a.pathname.replace(/\/+$/, "") === b.pathname.replace(/\/+$/, "");
+  } catch {
+    return false;
+  }
+}
+
+function cancelTaskRecord(task, reason) {
+  const now = Date.now();
+  task.status = "cancelled";
+  task.finishedAt = now;
+  task.updatedAt = now;
+  task.observerMode = "none";
+  task.tabId = null;
+  task.windowId = null;
+  task.urlPromotionExpiresAt = 0;
+  task.stopReason = cleanText(reason || "任务监控已停止", 160);
+  return task;
+}
+
+function promoteTaskUrl(task, nextUrl, tab = null) {
+  task.url = sanitizeChatUrl(nextUrl || task.url);
+  task.urlPromotionExpiresAt = 0;
+  if (Number.isInteger(tab?.id)) task.tabId = tab.id;
+  if (Number.isInteger(tab?.windowId)) task.windowId = tab.windowId;
+  task.observerMode = "current_page";
+  task.updatedAt = Date.now();
+  return task;
+}
+
+function canPromoteTaskUrl(task, nextUrl, now = Date.now()) {
+  if (!task || !ACTIVE_STATUSES.has(task.status)) return false;
+  if (!isDraftChatUrl(task.url) || !getConversationId(nextUrl)) return false;
+  return Number(task.urlPromotionExpiresAt || 0) >= now;
+}
+
+function getConversationId(value) {
+  try {
+    return new URL(value || "https://chatgpt.com/").pathname.match(/(?:^|\/)c\/([^/?#]+)/)?.[1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function isDraftChatUrl(value) {
+  try {
+    const pathname = new URL(sanitizeChatUrl(value)).pathname.replace(/\/+$/, "") || "/";
+    return !getConversationId(value) && (pathname === "/" || /(?:^|\/)g\/g-p-[^/]+\/project$/.test(pathname));
   } catch {
     return false;
   }

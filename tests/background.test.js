@@ -15,7 +15,7 @@ function createEvent() {
 
 const storage = { settings: {}, tasks: {} };
 const calls = { tabsCreate: [], tabsUpdate: [], windowsUpdate: [], notifications: [] };
-const tabs = new Map([[7, { id: 7, windowId: 3, active: false, url: "https://chatgpt.com/c/test" }]]);
+const tabs = new Map([[7, { id: 7, windowId: 3, active: false, url: "https://chatgpt.com/" }]]);
 const windows = new Map([[3, { id: 3, focused: false }]]);
 const runtimeMessages = createEvent();
 const tabRemoved = createEvent();
@@ -88,21 +88,23 @@ async function send(message, tab = tabs.get(7)) {
 
 (async () => {
   await new Promise((resolve) => setTimeout(resolve, 5));
-  const started = await send({
+
+  const promotedStart = await send({
     type: "TASK_STARTED",
-    url: "https://chatgpt.com/c/test",
-    prompt: "测试任务",
-    questionTitle: "测试任务"
+    url: "https://chatgpt.com/",
+    prompt: "新建会话首条任务",
+    questionTitle: "新建会话首条任务"
   });
-  assert.equal(started.task.status, "running");
-  assert.equal(started.task.observerMode, "current_page");
-  assert.equal(started.task.baselineAssistantHash, "");
-  assert.equal(typeof started.task.latestAssistantHash, "string");
-  assert.equal(calls.tabsCreate.length, 0, "starting a task must not create a monitor tab");
+  assert.equal(promotedStart.task.status, "running");
+  tabs.get(7).url = "https://chatgpt.com/c/new-thread";
+  await tabUpdated.emit(7, { url: tabs.get(7).url }, tabs.get(7));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(storage.tasks[promotedStart.task.id].status, "running", "draft-to-conversation navigation must keep the active task");
+  assert.match(storage.tasks[promotedStart.task.id].url, /\/c\/new-thread/);
 
   await send({
     type: "TASK_STATE",
-    taskId: started.task.id,
+    taskId: promotedStart.task.id,
     status: "completed",
     assistantFirstLine: "执行完成",
     thinkingTimeText: "思考了 3s"
@@ -110,14 +112,23 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(calls.notifications.length, 1);
   assert.equal(calls.tabsCreate.length, 0, "completion must not create a tab");
 
-  const navigationTask = await send({ type: "TASK_STARTED", url: "https://chatgpt.com/c/test", prompt: "切换会话" });
+  tabs.get(7).url = "https://chatgpt.com/c/old";
+  const oldTask = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "旧会话" });
+  tabs.get(7).url = "https://chatgpt.com/c/new";
+  const readyOnDifferentConversation = await send({ type: "PAGE_READY", url: tabs.get(7).url });
+  assert.equal(readyOnDifferentConversation.task, null, "PAGE_READY must not rebind an old task to a different conversation");
+  assert.equal(storage.tasks[oldTask.task.id].status, "cancelled");
+  assert.match(storage.tasks[oldTask.task.id].stopReason, /其他 ChatGPT 会话/);
+
+  const navigationTask = await send({ type: "TASK_STARTED", url: "https://chatgpt.com/c/new", prompt: "切换会话" });
   await send({ type: "PAGE_CHANGED", url: "https://chatgpt.com/c/next", reason: "切换会话" });
   assert.equal(storage.tasks[navigationTask.task.id].status, "cancelled");
   assert.match(storage.tasks[navigationTask.task.id].stopReason, /切换会话/);
 
   await assert.rejects(() => send({ type: "TASK_STATE", taskId: navigationTask.task.id, status: "unknown" }), /Invalid task status|Task not found/);
 
-  const second = await send({ type: "TASK_STARTED", url: "https://chatgpt.com/c/test", prompt: "关闭测试" });
+  tabs.get(7).url = "https://chatgpt.com/c/close";
+  const second = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "关闭测试" });
   tabs.delete(7);
   await tabRemoved.emit(7, { windowId: 3 });
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -126,7 +137,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.match(storage.tasks[second.task.id].stopReason, /页面已关闭/);
   assert.equal(calls.tabsCreate.length, 0, "closing a task tab must never recreate it");
 
-  console.log("background v0.6.1 tests passed");
+  console.log("background v0.6.2 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

@@ -24,6 +24,8 @@ assert.ok(content.includes("pendingConfirmed"), "task creation must wait for sen
 assert.ok(content.includes("sendWithRetry"), "task state messages must retry transient failures");
 assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop the previous task");
 assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
+assert.ok(content.includes("PAGE_PROMOTED"), "draft-to-conversation navigation must preserve the active task");
+assert.ok(content.includes("isConversationPromotion"), "URL promotion must be explicitly constrained");
 
 const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
 const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
@@ -49,6 +51,8 @@ assert.ok(queue.includes("runtime.queueCache"), "long item bodies must be cached
 assert.ok(queue.includes("textsById"), "metadata-only updates must reuse cached long item bodies");
 assert.ok(queue.includes("let claimed = false"), "lease acquisition must re-check ownership while holding the storage lock");
 assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a second tab must not reset a valid active lease");
+assert.ok(queue.includes("if (runtime.sendConfirmation || runtime.dispatching) return;"), "manual reconciliation must not race an unconfirmed send");
+assert.ok(queue.includes('mode === "auto-execute" ? "auto" : "manual"'), "auto overwrite confirmation must retain automatic dispatch safety checks");
 assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
 assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");
 assert.ok(!queue.includes("window.prompt("));

@@ -394,6 +394,7 @@
   }
 
   async function reconcilePageStateForAction() {
+    if (runtime.sendConfirmation || runtime.dispatching) return;
     const now = Date.now();
     const snapshot = collectSnapshot(now);
     updateAssistantTracking(snapshot.assistant, now);
@@ -804,7 +805,8 @@
     else if (mode === "execute-now" || mode === "auto-execute") {
       runtime.deferredAutoItemId = "";
       await reconcilePageStateForAction();
-      await dispatchQueueItem(itemId, { allowOverwrite: true, source: "manual" });
+      const source = mode === "auto-execute" ? "auto" : "manual";
+      await dispatchQueueItem(itemId, { allowOverwrite: true, source });
     }
   }
 

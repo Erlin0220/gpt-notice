@@ -52,12 +52,12 @@ const chrome = {
       calls.push(message);
       if (message.type === "PAGE_READY") return { ok: true, task: null };
       if (message.type === "TASK_STARTED") return { ok: true, task: { id: `task-${++taskCounter}`, status: "running", startedAt: Date.now(), baselineAssistantHash: message.baselineAssistantHash } };
-      if (message.type === "PAGE_CHANGED") return { ok: true };
+      if (message.type === "PAGE_CHANGED" || message.type === "PAGE_PROMOTED") return { ok: true, task: null };
       return { ok: true, task: { status: message.status || "running" } };
     }
   }
 };
-const location = { href: "https://chatgpt.com/c/one", origin: "https://chatgpt.com" };
+const location = { href: "https://chatgpt.com/", origin: "https://chatgpt.com" };
 class MutationObserver { observe() {} }
 const context = vm.createContext({
   window: {}, globalThis: null, document, chrome, location, console, URL, Date, Math, Promise,
@@ -78,16 +78,19 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 0, "click intent alone must not create a task");
 
   userMessages.push(new FakeElement({ text: "测试发送" }));
+  location.href = "https://chatgpt.com/c/new-thread";
   await intervals[0]();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "observed user message must confirm task creation");
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "root-to-conversation promotion must not cancel the pending task");
+  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "the first task must start after ChatGPT assigns a conversation URL");
+  assert.match(calls.find((call) => call.type === "TASK_STARTED").url, /\/c\/new-thread/);
 
   location.href = "https://chatgpt.com/c/two";
   await intervals[0]();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "SPA navigation must cancel the previous page task");
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.6.1 lifecycle tests passed");
+  console.log("content v0.6.2 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
