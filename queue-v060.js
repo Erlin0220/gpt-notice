@@ -10,6 +10,9 @@
   const COMPLETION_TO_NEXT_DELAY_MS = 2_500;
   const LEASE_TTL_MS = 15_000;
   const LEASE_REFRESH_MS = 5_000;
+  const WRITE_LOCK_TTL_MS = 5_000;
+  const WRITE_LOCK_ATTEMPTS = 12;
+  const STORAGE_LOCK_NAME = "gpt-notice-queue-storage-v3";
   const INDEX_STORAGE_KEY = "messageQueueIndexV3";
   const ITEM_STORAGE_PREFIX = "messageQueueItemV3:";
   const LEGACY_STORAGE_KEY = core.QUEUE_STORAGE_KEY;
@@ -38,6 +41,7 @@
     deferredAutoItemId: "",
     uiNotice: "",
     storageWrite: Promise.resolve(),
+    queueCache: new Map(),
     lastLeaseRefreshAt: 0,
     suppressComposerMutations: 0,
     observer: null
@@ -65,8 +69,9 @@
   function installStorageListener() {
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local") return;
-      if (!changes[INDEX_STORAGE_KEY] && !Object.keys(changes).some((key) => key.startsWith(ITEM_STORAGE_PREFIX))) return;
-      void loadQueue(runtime.conversationKey).then((queue) => {
+      const itemChanged = Object.keys(changes).some((key) => key.startsWith(ITEM_STORAGE_PREFIX));
+      if (!changes[INDEX_STORAGE_KEY] && !itemChanged) return;
+      void loadQueue(runtime.conversationKey, { forceTexts: itemChanged }).then((queue) => {
         runtime.queue = queue;
         scheduleUiRender();
       });
@@ -265,28 +270,28 @@
   async function migrateQueue(fromKey, toKey, previousUrl) {
     const source = await loadQueue(fromKey);
     if (!source.items.length) return;
-    const target = await loadQueue(toKey);
-    const previousTarget = core.normalizeQueue(target, toKey);
-    const ids = new Set(target.items.map((item) => item.id));
-    target.items.push(...source.items.filter((item) => !ids.has(item.id)));
-    target.paused = source.paused || target.paused;
-    target.activeItemId = source.activeItemId || target.activeItemId;
-    target.nextDispatchAt = Math.max(source.nextDispatchAt, target.nextDispatchAt);
-    target.conversationUrl = location.href;
-    target.lease = null;
-    await persistQueue(toKey, target, previousTarget);
+    await mutateQueueByKey(toKey, (target) => {
+      const ids = new Set(target.items.map((item) => item.id));
+      target.items.push(...source.items.filter((item) => !ids.has(item.id)));
+      target.paused = source.paused || target.paused;
+      target.activeItemId = source.activeItemId || target.activeItemId;
+      target.nextDispatchAt = Math.max(source.nextDispatchAt, target.nextDispatchAt);
+      target.conversationUrl = location.href;
+      target.lease = null;
+      return target;
+    });
     await deleteQueue(fromKey, source);
     runtime.lastUrl = previousUrl;
   }
 
   async function recoverInterruptedQueue() {
-    if (!runtime.queue) return;
-    const leaseOwnedByThisTab = runtime.queue.lease?.ownerId === runtime.instanceId;
-    if (runtime.queue.activeItemId || (runtime.queue.lease && runtime.queue.lease.expiresAt <= Date.now() && !leaseOwnedByThisTab)) {
-      const recovered = core.resetInterruptedItems(runtime.queue);
+    if (!runtime.queue || !core.shouldRecoverInterruptedQueue(runtime.queue, runtime.instanceId, Date.now())) return;
+    runtime.queue = await mutateCurrentQueue((current) => {
+      if (!core.shouldRecoverInterruptedQueue(current, runtime.instanceId, Date.now())) return current;
+      const recovered = core.resetInterruptedItems(current);
       recovered.lease = null;
-      runtime.queue = await persistQueue(runtime.conversationKey, recovered, runtime.queue);
-    }
+      return recovered;
+    });
   }
 
   async function enqueueComposerText() {
@@ -308,12 +313,20 @@
     await nextFrame();
     const item = core.createQueueItem(text);
     if (!item) return;
-    await mutateCurrentQueue((queue) => {
-      queue.items.push(item);
-      queue.conversationUrl = location.href;
-      return queue;
-    });
-    await writeComposerText("");
+    if (!(await writeComposerText(""))) {
+      showUiNotice("输入框清空失败，内容未加入队列");
+      return;
+    }
+    try {
+      await mutateCurrentQueue((queue) => {
+        queue.items.push(item);
+        queue.conversationUrl = location.href;
+        return queue;
+      });
+    } catch (error) {
+      await writeComposerText(text);
+      throw error;
+    }
     showUiNotice(`已加入队列 · ${item.text.length.toLocaleString()} 字符`);
     scheduleUiRender();
     void inspect();
@@ -745,10 +758,10 @@
     return `<li class="gptq-item" data-status="${escapeHtml(item.status)}">
       <div class="gptq-item-main"><span class="gptq-index">${index + 1}</span><div><p>${escapeHtml(preview)}</p><small>${labels[item.status] || item.status} · ${item.text.length.toLocaleString()} 字符${item.error ? ` · ${escapeHtml(item.error)}` : ""}</small></div></div>
       <div class="gptq-item-actions">
-        ${canModify ? `<button type="button" data-action="edit" data-id="${item.id}">编辑</button><button type="button" data-action="execute-now" data-id="${item.id}">立即执行</button>` : ""}
-        ${item.status === "failed" ? `<button type="button" data-action="retry" data-id="${item.id}">重试</button>` : ""}
-        ${item.status === "pending" ? `<button type="button" data-action="up" data-id="${item.id}">↑</button><button type="button" data-action="down" data-id="${item.id}">↓</button>` : ""}
-        ${!["running", "dispatching"].includes(item.status) ? `<button type="button" data-action="delete" data-id="${item.id}">删除</button>` : ""}
+        ${canModify ? `<button type="button" data-action="edit" data-id="${escapeHtml(item.id)}">编辑</button><button type="button" data-action="execute-now" data-id="${escapeHtml(item.id)}">立即执行</button>` : ""}
+        ${item.status === "failed" ? `<button type="button" data-action="retry" data-id="${escapeHtml(item.id)}">重试</button>` : ""}
+        ${item.status === "pending" ? `<button type="button" data-action="up" data-id="${escapeHtml(item.id)}">↑</button><button type="button" data-action="down" data-id="${escapeHtml(item.id)}">↓</button>` : ""}
+        ${!["running", "dispatching"].includes(item.status) ? `<button type="button" data-action="delete" data-id="${escapeHtml(item.id)}">删除</button>` : ""}
       </div></li>`;
   }
 
@@ -813,40 +826,77 @@
     });
   }
 
-  async function loadQueue(key) {
+  async function loadQueue(key, { forceTexts = false, allowLegacy = true } = {}) {
     const indexResult = await chrome.storage.local.get([INDEX_STORAGE_KEY, LEGACY_STORAGE_KEY]);
     const index = indexResult[INDEX_STORAGE_KEY] || {};
-    let metadata = index[key];
-    if (!metadata && indexResult[LEGACY_STORAGE_KEY]?.[key]) {
-      const legacy = core.normalizeQueue(indexResult[LEGACY_STORAGE_KEY][key], key);
-      await persistQueue(key, legacy, core.normalizeQueue({}, key));
-      metadata = (await chrome.storage.local.get(INDEX_STORAGE_KEY))[INDEX_STORAGE_KEY]?.[key];
+    const metadata = index[key];
+    if (!metadata && allowLegacy && indexResult[LEGACY_STORAGE_KEY]?.[key]) {
+      await migrateLegacyQueue(key, indexResult[LEGACY_STORAGE_KEY][key]);
+      return loadQueue(key, { forceTexts: true, allowLegacy: false });
     }
-    if (!metadata) return core.normalizeQueue({}, key);
-    const itemKeys = (metadata.items || []).map((item) => itemStorageKey(item.id));
-    const texts = itemKeys.length ? await chrome.storage.local.get(itemKeys) : {};
-    return core.normalizeQueue({
+    if (!metadata) {
+      runtime.queueCache.delete(key);
+      return core.normalizeQueue({}, key);
+    }
+    const signature = metadataSignature(metadata);
+    const cached = runtime.queueCache.get(key);
+    if (!forceTexts && cached?.signature === signature) return cached.queue;
+
+    const itemIds = (metadata.items || []).map((item) => item.id);
+    const itemIdSet = new Set(itemIds);
+    const textsById = new Map(cached?.textsById || []);
+    for (const cachedId of [...textsById.keys()]) {
+      if (!itemIdSet.has(cachedId)) textsById.delete(cachedId);
+    }
+    const idsToRead = forceTexts ? itemIds : itemIds.filter((id) => !textsById.has(id));
+    const itemKeys = idsToRead.map(itemStorageKey);
+    const storedTexts = itemKeys.length ? await chrome.storage.local.get(itemKeys) : {};
+    for (const id of idsToRead) textsById.set(id, String(storedTexts[itemStorageKey(id)] || ""));
+
+    const queue = core.normalizeQueue({
       ...metadata,
-      items: (metadata.items || []).map((item) => ({ ...item, text: String(texts[itemStorageKey(item.id)] || "") }))
+      items: (metadata.items || []).map((item) => ({ ...item, text: textsById.get(item.id) || "" }))
     }, key);
+    runtime.queueCache.set(key, { signature, queue, textsById });
+    return queue;
+  }
+
+  function metadataSignature(metadata) {
+    return JSON.stringify({
+      revision: Number(metadata?.revision || 0),
+      activeItemId: metadata?.activeItemId || "",
+      paused: Boolean(metadata?.paused),
+      nextDispatchAt: Number(metadata?.nextDispatchAt || 0),
+      lease: metadata?.lease || null,
+      items: (metadata?.items || []).map((item) => [item.id, item.status, item.retryCount, item.startedAt, item.finishedAt, item.error])
+    });
   }
 
   async function mutateCurrentQueue(mutator) {
-    const run = runtime.storageWrite.then(async () => {
-      const previous = await loadQueue(runtime.conversationKey);
-      const working = core.normalizeQueue(previous, runtime.conversationKey);
-      const next = core.normalizeQueue(mutator(working) || working, runtime.conversationKey);
+    const result = await mutateQueueByKey(runtime.conversationKey, mutator);
+    runtime.queue = result;
+    return result;
+  }
+
+  async function mutateQueueByKey(key, mutator) {
+    const run = runtime.storageWrite.then(() => withStorageLock(async () => {
+      const previous = await loadQueue(key, { forceTexts: true, allowLegacy: false });
+      const working = core.normalizeQueue(previous, key);
+      const next = core.normalizeQueue(mutator(working) || working, key);
       next.revision = previous.revision + 1;
       next.updatedAt = Date.now();
-      if (!next.conversationUrl) next.conversationUrl = location.href;
-      runtime.queue = await persistQueue(runtime.conversationKey, next, previous);
-      return runtime.queue;
-    });
+      if (!next.conversationUrl) next.conversationUrl = key === runtime.conversationKey ? location.href : previous.conversationUrl;
+      return persistQueueUnlocked(key, next, previous);
+    }));
     runtime.storageWrite = run.catch(() => {});
     return run;
   }
 
   async function persistQueue(key, queue, previous = core.normalizeQueue({}, key)) {
+    return withStorageLock(() => persistQueueUnlocked(key, queue, previous));
+  }
+
+  async function persistQueueUnlocked(key, queue, previous = core.normalizeQueue({}, key)) {
     const normalized = core.normalizeQueue(queue, key);
     const oldById = new Map(previous.items.map((item) => [item.id, item]));
     const setValues = {};
@@ -855,36 +905,107 @@
     }
     const deletedKeys = previous.items.filter((item) => !normalized.items.some((next) => next.id === item.id)).map((item) => itemStorageKey(item.id));
     const { [INDEX_STORAGE_KEY]: currentIndex = {} } = await chrome.storage.local.get(INDEX_STORAGE_KEY);
-    const metadata = {
-      ...normalized,
-      items: normalized.items.map(({ text, ...item }) => item)
-    };
+    const metadata = { ...normalized, items: normalized.items.map(({ text, ...item }) => item) };
     setValues[INDEX_STORAGE_KEY] = { ...currentIndex, [key]: metadata };
     await chrome.storage.local.set(setValues);
     if (deletedKeys.length) await chrome.storage.local.remove(deletedKeys);
+    runtime.queueCache.set(key, {
+      signature: metadataSignature(metadata),
+      queue: normalized,
+      textsById: new Map(normalized.items.map((item) => [item.id, item.text]))
+    });
     return normalized;
   }
 
   async function deleteQueue(key, queue) {
+    return withStorageLock(() => deleteQueueUnlocked(key, queue));
+  }
+
+  async function deleteQueueUnlocked(key, queue) {
     const { [INDEX_STORAGE_KEY]: index = {} } = await chrome.storage.local.get(INDEX_STORAGE_KEY);
     const next = { ...index };
     delete next[key];
     await chrome.storage.local.set({ [INDEX_STORAGE_KEY]: next });
     const keys = queue.items.map((item) => itemStorageKey(item.id));
     if (keys.length) await chrome.storage.local.remove(keys);
+    runtime.queueCache.delete(key);
+  }
+
+  async function migrateLegacyQueue(key, rawQueue) {
+    await withStorageLock(async () => {
+      const { [INDEX_STORAGE_KEY]: index = {} } = await chrome.storage.local.get(INDEX_STORAGE_KEY);
+      if (!index[key]) {
+        const legacy = core.normalizeQueue(rawQueue, key);
+        await persistQueueUnlocked(key, legacy, core.normalizeQueue({}, key));
+      }
+      const { [LEGACY_STORAGE_KEY]: legacyQueues = {} } = await chrome.storage.local.get(LEGACY_STORAGE_KEY);
+      if (legacyQueues[key]) {
+        const nextLegacy = { ...legacyQueues };
+        delete nextLegacy[key];
+        if (Object.keys(nextLegacy).length) await chrome.storage.local.set({ [LEGACY_STORAGE_KEY]: nextLegacy });
+        else await chrome.storage.local.remove(LEGACY_STORAGE_KEY);
+      }
+    });
+  }
+
+  async function withStorageLock(operation) {
+    if (globalThis.navigator?.locks?.request) {
+      return navigator.locks.request(STORAGE_LOCK_NAME, { mode: "exclusive" }, operation);
+    }
+    const token = await acquireFallbackStorageLock();
+    try {
+      return await operation();
+    } finally {
+      await releaseFallbackStorageLock(token);
+    }
+  }
+
+  async function acquireFallbackStorageLock() {
+    const ownerId = `${runtime.instanceId}:${core.createId("lock")}`;
+    for (let attempt = 0; attempt < WRITE_LOCK_ATTEMPTS; attempt += 1) {
+      const now = Date.now();
+      const { [core.WRITE_LOCK_STORAGE_KEY]: locks = {} } = await chrome.storage.local.get(core.WRITE_LOCK_STORAGE_KEY);
+      const current = locks[STORAGE_LOCK_NAME];
+      if (current && current.ownerId !== ownerId && current.expiresAt > now) {
+        await delay(35 + attempt * 20);
+        continue;
+      }
+      await chrome.storage.local.set({
+        [core.WRITE_LOCK_STORAGE_KEY]: {
+          ...locks,
+          [STORAGE_LOCK_NAME]: { ownerId, expiresAt: now + WRITE_LOCK_TTL_MS }
+        }
+      });
+      await delay(30 + Math.floor(Math.random() * 20));
+      const { [core.WRITE_LOCK_STORAGE_KEY]: verified = {} } = await chrome.storage.local.get(core.WRITE_LOCK_STORAGE_KEY);
+      if (verified[STORAGE_LOCK_NAME]?.ownerId === ownerId) return ownerId;
+    }
+    throw new Error("消息队列跨标签写入锁获取失败");
+  }
+
+  async function releaseFallbackStorageLock(ownerId) {
+    const { [core.WRITE_LOCK_STORAGE_KEY]: locks = {} } = await chrome.storage.local.get(core.WRITE_LOCK_STORAGE_KEY);
+    if (locks[STORAGE_LOCK_NAME]?.ownerId !== ownerId) return;
+    const next = { ...locks };
+    delete next[STORAGE_LOCK_NAME];
+    if (Object.keys(next).length) await chrome.storage.local.set({ [core.WRITE_LOCK_STORAGE_KEY]: next });
+    else await chrome.storage.local.remove(core.WRITE_LOCK_STORAGE_KEY);
   }
 
   function itemStorageKey(id) { return `${ITEM_STORAGE_PREFIX}${id}`; }
 
   async function acquireLease() {
-    const queue = await loadQueue(runtime.conversationKey);
-    const now = Date.now();
-    if (queue.lease && queue.lease.ownerId !== runtime.instanceId && queue.lease.expiresAt > now) return false;
+    let claimed = false;
     await mutateCurrentQueue((current) => {
-      current.lease = { ownerId: runtime.instanceId, expiresAt: Date.now() + LEASE_TTL_MS };
+      const now = Date.now();
+      if (current.lease && current.lease.ownerId !== runtime.instanceId && current.lease.expiresAt > now) return current;
+      current.lease = { ownerId: runtime.instanceId, expiresAt: now + LEASE_TTL_MS };
+      claimed = true;
       return current;
     });
-    return (await loadQueue(runtime.conversationKey)).lease?.ownerId === runtime.instanceId;
+    if (!claimed) return false;
+    const verified = await loadQueue(runtime.conversationKey);
+    return verified.lease?.ownerId === runtime.instanceId && verified.lease.expiresAt > Date.now();
   }
 
   async function refreshLease() {
@@ -901,15 +1022,10 @@
   function releaseCurrentLease() { void releaseLease(runtime.conversationKey); }
   async function releaseLease(key) {
     if (!key) return;
-    const queue = await loadQueue(key);
-    if (queue.lease?.ownerId !== runtime.instanceId) return;
-    const previousKey = runtime.conversationKey;
-    runtime.conversationKey = key;
-    await mutateCurrentQueue((current) => {
+    await mutateQueueByKey(key, (current) => {
       if (current.lease?.ownerId === runtime.instanceId) current.lease = null;
       return current;
     });
-    runtime.conversationKey = previousKey;
   }
 
   async function writeComposerText(text) {
@@ -982,7 +1098,7 @@
   function getLatestAssistant() {
     const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')].filter((node) => isVisible(node) || node.textContent?.trim());
     const node = nodes.at(-1);
-    const text = core.cleanText(node?.innerText || node?.textContent || "");
+    const text = core.cleanText(node?.innerText || node?.textContent || "", 50_000);
     return { node, text, hash: text ? hashText(text) : "", count: nodes.length };
   }
 

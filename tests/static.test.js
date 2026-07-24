@@ -19,6 +19,11 @@ assert.ok(!background.includes("active: false"), "service worker must not create
 const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
 assert.ok(content.includes("ChatGPTTaskNotifierBridge"));
 assert.ok(!content.includes("location.reload()"));
+assert.ok(!content.includes("isMonitor"), "obsolete background-monitor mode must be removed");
+assert.ok(content.includes("pendingConfirmed"), "task creation must wait for send confirmation");
+assert.ok(content.includes("sendWithRetry"), "task state messages must retry transient failures");
+assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop the previous task");
+assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
 
 const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
 const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
@@ -37,7 +42,26 @@ assert.ok(queue.includes('class="gptq-confirm"'));
 assert.ok(queue.includes("event.stopImmediatePropagation()"));
 assert.ok(queue.includes("previousComposerText"));
 assert.ok(queue.includes("runtime.uiActionInFlight"));
+assert.ok(queue.includes("navigator.locks.request"), "cross-tab writes must use Web Locks when available");
+assert.ok(queue.includes("acquireFallbackStorageLock"), "queue writes need a storage-lock fallback");
+assert.ok(queue.includes("migrateLegacyQueue"), "legacy queues must be removed after migration");
+assert.ok(queue.includes("runtime.queueCache"), "long item bodies must be cached by metadata revision");
+assert.ok(queue.includes("textsById"), "metadata-only updates must reuse cached long item bodies");
+assert.ok(queue.includes("let claimed = false"), "lease acquisition must re-check ownership while holding the storage lock");
+assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a second tab must not reset a valid active lease");
+assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
 assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");
 assert.ok(!queue.includes("window.prompt("));
+
+
+
+const privacy = fs.readFileSync(path.join(root, "PRIVACY.md"), "utf8");
+assert.ok(!privacy.includes("GPT 后台"));
+assert.ok(!privacy.includes("Chrome Alarms API"));
+const ci = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+assert.ok(ci.includes("pull_request:"));
+const release = fs.readFileSync(path.join(root, ".github/workflows/auto-release.yml"), "utf8");
+assert.ok(!release.includes("types: [closed]"));
+assert.ok(!/Validate extension\n\s+if:/.test(release), "release validation must never be skipped");
 
 console.log(`static v${manifest.version} tests passed`);

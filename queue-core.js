@@ -154,6 +154,14 @@
     return next;
   }
 
+  function shouldRecoverInterruptedQueue(queue, instanceId, now = Date.now()) {
+    const normalized = normalizeQueue(queue);
+    const lease = normalized.lease;
+    const validOtherLease = Boolean(lease && lease.ownerId !== String(instanceId || "") && lease.expiresAt > now);
+    if (normalized.activeItemId && validOtherLease) return false;
+    return Boolean(normalized.activeItemId || (lease && lease.expiresAt <= now));
+  }
+
   function resetInterruptedItems(queue) {
     const normalized = normalizeQueue(queue);
     const now = Date.now();
@@ -171,6 +179,6 @@
     QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
     cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId,
     getConversationKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
-    hasActiveWork, canAdmit, canDispatch, isItemCompleted, moveItem, resetInterruptedItems
+    hasActiveWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue, resetInterruptedItems
   };
 });

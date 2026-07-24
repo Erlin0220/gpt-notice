@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-  pull_request:
-    branches:
-      - main
-    types: [closed]
   workflow_dispatch:
 
 permissions:
@@ -19,7 +15,6 @@ concurrency:
 
 jobs:
   release:
-    if: github.event_name != 'pull_request' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout latest main
@@ -51,14 +46,18 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
+            if [[ -z "$TAG_SHA" || "$TAG_SHA" != "${{ steps.version.outputs.target_sha }}" ]]; then
+              echo "Release $TAG already exists but does not point to current main." >&2
+              exit 1
+            fi
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "$TAG already exists; skipping duplicate publication."
+            echo "$TAG already exists for the current commit; publication is idempotent."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate extension
-        if: steps.existing.outputs.exists != 'true'
         shell: bash
         run: |
           set -euo pipefail

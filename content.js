@@ -3,14 +3,15 @@
   window.__CHATGPT_TASK_NOTIFIER_LOADED__ = true;
 
   const COMPLETION_STABLE_MS = 4_000;
+  const RECOVERY_IDLE_GRACE_MS = 10_000;
   const INSPECT_INTERVAL_MS = 800;
   const HEARTBEAT_INTERVAL_MS = 5_000;
   const PENDING_SUBMISSION_MS = 10_000;
+  const START_RETRY_MS = 800;
 
   const state = {
     taskId: null,
     running: false,
-    isMonitor: false,
     remoteStatus: null,
     baselineAssistantHash: "",
     latestAssistantHash: "",
@@ -21,11 +22,20 @@
     pendingPrompt: "",
     pendingBaselineHash: "",
     pendingAt: 0,
+    pendingConfirmed: false,
+    nextStartAttemptAt: 0,
+    startInFlight: false,
     startedAt: 0,
     lastUrl: location.href,
+    lastPageKey: getPageKey(location.href),
     lastReportedStatus: null,
+    reportInFlight: false,
     lastContentChangeAt: Date.now(),
-    inspectionScheduled: false
+    inspectionScheduled: false,
+    inspectRunning: false,
+    restoredAt: 0,
+    restoredAssistantHash: "",
+    restoredObservedRunning: false
   };
 
   globalThis.ChatGPTTaskNotifierBridge = {
@@ -34,13 +44,12 @@
         taskId: state.taskId,
         running: state.running,
         status: state.remoteStatus,
-        startedAt: state.startedAt,
-        isMonitor: state.isMonitor
+        startedAt: state.startedAt
       };
     }
   };
 
-  boot().catch((error) => console.debug("[ChatGPT Task Notifier] boot failed", error));
+  boot().catch((error) => console.warn("[ChatGPT Task Notifier] boot failed", error));
 
   async function boot() {
     state.lastUserCount = getUserMessages().length;
@@ -49,11 +58,7 @@
     state.latestAssistantHash = assistant.hash;
     state.lastSettledAssistantHash = assistant.hash;
 
-    const response = await safeSend({ type: "PAGE_READY", url: location.href });
-    if (response?.task && ["running", "waiting_action"].includes(response.task.status)) {
-      attachExistingTask(response.task);
-    }
-
+    await bindCurrentPage();
     installSubmissionListeners();
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message?.type !== "PROBE_TASK_STATE") return false;
@@ -70,49 +75,63 @@
       attributeFilter: ["aria-label", "aria-hidden", "disabled", "data-testid", "data-state"]
     });
 
-    setInterval(inspect, INSPECT_INTERVAL_MS);
-    setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
-    inspect();
+    setInterval(() => void inspect(), INSPECT_INTERVAL_MS);
+    setInterval(() => void sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
+    await inspect();
+  }
+
+  async function bindCurrentPage() {
+    const response = await sendWithRetry({ type: "PAGE_READY", url: location.href }, 2);
+    if (response?.task && ["running", "waiting_action"].includes(response.task.status)) {
+      attachExistingTask(response.task);
+    }
   }
 
   function attachExistingTask(task) {
+    const assistant = getLatestAssistant();
     state.taskId = task.id;
     state.running = true;
-    state.isMonitor = Boolean(task.isMonitor);
     state.remoteStatus = task.status;
     state.baselineAssistantHash = task.baselineAssistantHash || "";
+    state.latestAssistantHash = assistant.hash;
+    state.lastAssistantText = assistant.text;
     state.startedAt = task.startedAt || Date.now();
     state.lastReportedStatus = task.status;
     state.latestAssistantChangedAt = Date.now();
+    state.restoredAt = Date.now();
+    state.restoredAssistantHash = assistant.hash || task.latestAssistantHash || "";
+    state.restoredObservedRunning = false;
   }
 
   function installSubmissionListeners() {
     document.addEventListener("click", (event) => {
       const button = event.target.closest?.("button");
-      if (!button || button.disabled || !looksLikeSendButton(button)) return;
+      if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true" || !looksLikeSendButton(button)) return;
       rememberPendingSubmission();
     }, true);
 
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.defaultPrevented) return;
       if (!isComposerElement(event.target)) return;
       rememberPendingSubmission();
     }, true);
 
     document.addEventListener("submit", (event) => {
-      if (event.target?.querySelector?.("#prompt-textarea, textarea, [contenteditable='true']")) {
-        rememberPendingSubmission();
-      }
+      if (event.defaultPrevented) return;
+      if (event.target?.querySelector?.("#prompt-textarea, textarea, [contenteditable='true']")) rememberPendingSubmission();
     }, true);
   }
 
   function rememberPendingSubmission() {
+    const prompt = getComposerText();
+    if (!prompt) return;
     const assistant = getLatestAssistant();
-    state.pendingPrompt = getComposerText() || getLatestUserText() || "ChatGPT 任务";
+    state.pendingPrompt = prompt;
     state.pendingBaselineHash = assistant.hash || state.lastSettledAssistantHash || "";
     state.pendingAt = Date.now();
-    void startTask({ prompt: state.pendingPrompt, baselineHash: state.pendingBaselineHash });
-    setTimeout(inspect, 150);
+    state.pendingConfirmed = false;
+    state.nextStartAttemptAt = 0;
+    setTimeout(() => void inspect(), 150);
   }
 
   function scheduleInspect() {
@@ -121,90 +140,107 @@
     state.inspectionScheduled = true;
     setTimeout(() => {
       state.inspectionScheduled = false;
-      inspect();
+      void inspect();
     }, 120);
   }
 
   async function inspect() {
-    const now = Date.now();
-    const snapshot = collectSnapshot();
-    const assistant = snapshot.assistant;
-    const userCount = getUserMessages().length;
+    if (state.inspectRunning) return;
+    state.inspectRunning = true;
+    try {
+      await handleNavigationChange();
+      const now = Date.now();
+      const snapshot = collectSnapshot(now);
+      const assistant = snapshot.assistant;
+      const userCount = getUserMessages().length;
 
-    if (location.href !== state.lastUrl) state.lastUrl = location.href;
-    if (assistant.text !== state.lastAssistantText) {
-      state.lastAssistantText = assistant.text;
-      state.latestAssistantHash = assistant.hash;
-      state.latestAssistantChangedAt = now;
-      state.lastContentChangeAt = now;
-    }
+      if (assistant.text !== state.lastAssistantText) {
+        state.lastAssistantText = assistant.text;
+        state.latestAssistantHash = assistant.hash;
+        state.latestAssistantChangedAt = now;
+        state.lastContentChangeAt = now;
+      }
+      if (state.restoredAt && snapshot.domRunning) state.restoredObservedRunning = true;
 
-    const recentSubmission = state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS;
-    if (userCount > state.lastUserCount && !state.running && recentSubmission) {
-      await startTask({
-        prompt: getLatestUserText() || state.pendingPrompt,
-        baselineHash: state.pendingBaselineHash || state.lastSettledAssistantHash
-      });
-    }
-    state.lastUserCount = userCount;
+      const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS);
+      if (recentSubmission && (userCount > state.lastUserCount || snapshot.domRunning)) state.pendingConfirmed = true;
+      if (!recentSubmission && !state.running) clearPendingSubmission();
 
-    if (!state.running) {
-      if (assistant.hash) state.lastSettledAssistantHash = assistant.hash;
-      return;
-    }
+      if (!state.running && state.pendingConfirmed && now >= state.nextStartAttemptAt) {
+        await startTask({
+          prompt: getLatestUserText() || state.pendingPrompt,
+          baselineHash: state.pendingBaselineHash || state.lastSettledAssistantHash
+        });
+      }
+      state.lastUserCount = userCount;
 
-    if (snapshot.stopVisible && state.remoteStatus !== "running") {
-      await reportStatus("running", assistant);
-    }
-    if (snapshot.waitingAction && !snapshot.stopVisible) {
-      await reportStatus("waiting_action", assistant);
-      return;
-    }
-    if (snapshot.visibleError && !snapshot.stopVisible) {
-      await reportStatus("failed", assistant);
-      finishLocalTask();
-      return;
-    }
-    if (snapshot.completed) {
-      await reportStatus("completed", assistant);
-      state.lastSettledAssistantHash = assistant.hash;
-      finishLocalTask();
+      if (!state.running) {
+        if (assistant.hash) state.lastSettledAssistantHash = assistant.hash;
+        return;
+      }
+
+      if (snapshot.stopVisible && state.remoteStatus !== "running") await reportStatus("running", assistant);
+      if (snapshot.waitingAction && !snapshot.stopVisible) {
+        await reportStatus("waiting_action", assistant);
+        return;
+      }
+      if (snapshot.visibleError && !snapshot.stopVisible) {
+        if (await reportStatus("failed", assistant)) finishLocalTask();
+        return;
+      }
+      if (snapshot.completed) {
+        if (await reportStatus("completed", assistant)) {
+          state.lastSettledAssistantHash = assistant.hash;
+          finishLocalTask();
+        }
+      }
+    } catch (error) {
+      console.debug("[ChatGPT Task Notifier] inspect failed", error);
+    } finally {
+      state.inspectRunning = false;
     }
   }
 
-  function collectSnapshot() {
-    const now = Date.now();
+  async function handleNavigationChange() {
+    const currentUrl = location.href;
+    const currentPageKey = getPageKey(currentUrl);
+    if (currentUrl === state.lastUrl && currentPageKey === state.lastPageKey) return;
+    const previousPageKey = state.lastPageKey;
+    state.lastUrl = currentUrl;
+    state.lastPageKey = currentPageKey;
+    if (previousPageKey && currentPageKey !== previousPageKey) {
+      await sendWithRetry({
+        type: "PAGE_CHANGED",
+        url: currentUrl,
+        previousUrl: previousPageKey,
+        reason: "已切换到其他 ChatGPT 会话，旧任务监控已停止"
+      }, 3);
+      finishLocalTask();
+      state.lastUserCount = getUserMessages().length;
+      const assistant = getLatestAssistant();
+      state.lastSettledAssistantHash = assistant.hash;
+      state.lastAssistantText = assistant.text;
+      state.latestAssistantHash = assistant.hash;
+      await bindCurrentPage();
+    }
+  }
+
+  function collectSnapshot(now = Date.now()) {
     const assistant = getLatestAssistant();
     const stopVisible = hasStopControl();
     const waitingAction = hasApprovalControl();
     const visibleError = findVisibleError();
     const busy = hasBusyIndicator();
-    const responseChanged = Boolean(
-      assistant.hash && assistant.hash !== state.baselineAssistantHash && assistant.text.trim()
-    );
+    const domRunning = stopVisible || waitingAction || busy;
+    const responseChanged = Boolean(assistant.hash && assistant.hash !== state.baselineAssistantHash && assistant.text.trim());
     const stableLongEnough = now - state.latestAssistantChangedAt >= COMPLETION_STABLE_MS;
     const ranLongEnough = !state.startedAt || now - state.startedAt >= 1_800;
     const composerReady = isComposerReady();
+    const recoveryReady = !state.restoredAt || state.restoredObservedRunning || assistant.hash !== state.restoredAssistantHash || now - state.restoredAt >= RECOVERY_IDLE_GRACE_MS;
     const completed = Boolean(
-      state.running &&
-      !stopVisible &&
-      !waitingAction &&
-      !visibleError &&
-      !busy &&
-      responseChanged &&
-      stableLongEnough &&
-      ranLongEnough &&
-      composerReady
+      state.running && !domRunning && !visibleError && responseChanged && stableLongEnough && ranLongEnough && composerReady && recoveryReady
     );
-    return {
-      assistant,
-      stopVisible,
-      waitingAction,
-      visibleError,
-      busy,
-      composerReady,
-      completed
-    };
+    return { assistant, stopVisible, waitingAction, visibleError, busy, domRunning, composerReady, completed };
   }
 
   function buildProbe() {
@@ -227,209 +263,162 @@
   }
 
   async function startTask({ prompt, baselineHash }) {
-    if (state.running) return;
-    state.running = true;
-    state.remoteStatus = "running";
-    state.startedAt = Date.now();
-    state.baselineAssistantHash = baselineHash || state.lastSettledAssistantHash || "";
-    state.latestAssistantChangedAt = Date.now();
-    state.lastContentChangeAt = Date.now();
-    state.lastReportedStatus = "running";
-
-    const resolvedPrompt = prompt || getLatestUserText() || "ChatGPT 任务";
-    const response = await safeSend({
-      type: "TASK_STARTED",
-      taskId: state.taskId,
-      url: location.href,
-      questionTitle: getQuestionTitle(resolvedPrompt),
-      prompt: cleanText(resolvedPrompt, 160),
-      baselineAssistantHash: state.baselineAssistantHash,
-      latestAssistantHash: getLatestAssistant().hash
-    });
-    if (response?.task?.id) {
+    if (state.running || state.startInFlight || !state.pendingConfirmed) return false;
+    state.startInFlight = true;
+    try {
+      const startedAt = Date.now();
+      const resolvedPrompt = prompt || getLatestUserText() || state.pendingPrompt || "ChatGPT 任务";
+      const response = await sendWithRetry({
+        type: "TASK_STARTED",
+        taskId: state.taskId,
+        url: location.href,
+        questionTitle: getQuestionTitle(resolvedPrompt),
+        prompt: cleanText(resolvedPrompt, 240),
+        baselineAssistantHash: baselineHash || state.lastSettledAssistantHash || "",
+        latestAssistantHash: getLatestAssistant().hash
+      }, 3);
+      if (!response?.task?.id) {
+        state.nextStartAttemptAt = Date.now() + START_RETRY_MS;
+        return false;
+      }
       state.taskId = response.task.id;
-      state.isMonitor = Boolean(response.task.isMonitor);
+      state.running = true;
+      state.remoteStatus = "running";
+      state.startedAt = response.task.startedAt || startedAt;
+      state.baselineAssistantHash = response.task.baselineAssistantHash || baselineHash || state.lastSettledAssistantHash || "";
+      state.lastReportedStatus = "running";
+      state.latestAssistantChangedAt = Date.now();
+      state.lastContentChangeAt = Date.now();
+      state.restoredAt = 0;
+      state.restoredAssistantHash = "";
+      state.restoredObservedRunning = false;
+      clearPendingSubmission();
+      return true;
+    } finally {
+      state.startInFlight = false;
     }
   }
 
-  async function reportStatus(status, assistant = getLatestAssistant()) {
-    if (!state.taskId || state.lastReportedStatus === status) {
+  async function reportStatus(status, assistant = getLatestAssistant(), extra = {}) {
+    if (!state.taskId) return false;
+    if (state.lastReportedStatus === status) {
       state.remoteStatus = status;
-      return;
+      return true;
     }
-    state.lastReportedStatus = status;
-    state.remoteStatus = status;
-    await safeSend({
-      type: "TASK_STATE",
-      taskId: state.taskId,
-      status,
-      url: location.href,
-      prompt: getLatestUserText(),
-      questionTitle: getQuestionTitle(getLatestUserText()),
-      assistantFirstLine: assistant.firstLine || "",
-      thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),
-      latestAssistantHash: assistant.hash,
-      lastContentChangeAt: state.lastContentChangeAt
-    });
+    if (state.reportInFlight) return false;
+    state.reportInFlight = true;
+    try {
+      const response = await sendWithRetry({
+        type: "TASK_STATE",
+        taskId: state.taskId,
+        status,
+        url: location.href,
+        prompt: getLatestUserText(),
+        questionTitle: getQuestionTitle(getLatestUserText()),
+        assistantFirstLine: assistant.firstLine || "",
+        thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),
+        latestAssistantHash: assistant.hash,
+        lastContentChangeAt: state.lastContentChangeAt,
+        ...extra
+      }, 3);
+      if (!response?.ok) return false;
+      state.lastReportedStatus = status;
+      state.remoteStatus = status;
+      return true;
+    } finally {
+      state.reportInFlight = false;
+    }
+  }
+
+  function clearPendingSubmission() {
+    state.pendingPrompt = "";
+    state.pendingBaselineHash = "";
+    state.pendingAt = 0;
+    state.pendingConfirmed = false;
+    state.nextStartAttemptAt = 0;
   }
 
   function finishLocalTask() {
     state.running = false;
     state.remoteStatus = null;
     state.taskId = null;
-    state.isMonitor = false;
     state.startedAt = 0;
-    state.pendingPrompt = "";
-    state.pendingBaselineHash = "";
-    state.pendingAt = 0;
     state.lastReportedStatus = null;
     state.baselineAssistantHash = state.latestAssistantHash;
+    state.restoredAt = 0;
+    state.restoredAssistantHash = "";
+    state.restoredObservedRunning = false;
+    clearPendingSubmission();
   }
 
   async function sendHeartbeat() {
     if (!state.taskId || !state.running) return;
-    const response = await safeSend({
+    const response = await sendWithRetry({
       type: "HEARTBEAT",
       taskId: state.taskId,
       url: location.href,
       latestAssistantHash: getLatestAssistant().hash
-    });
-    if (response?.task) state.isMonitor = Boolean(response.task.isMonitor);
+    }, 2);
+    if (response?.task?.status) state.remoteStatus = response.task.status;
   }
 
   function getLatestAssistant() {
-    const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')]
-      .filter(isVisibleOrHasContent);
+    const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')].filter(isVisibleOrHasContent);
     const node = nodes.at(-1);
     const rawText = String(node?.innerText || node?.textContent || "");
-    const text = cleanText(rawText, 20_000);
-    return {
-      node,
-      text,
-      hash: text ? hashText(text) : "",
-      firstLine: getAssistantFirstLine(node, rawText),
-      thinkingTimeText: getThinkingTimeText(node)
-    };
+    const text = cleanText(rawText, 50_000);
+    return { node, text, hash: text ? hashText(text) : "", firstLine: getAssistantFirstLine(node, rawText), thinkingTimeText: getThinkingTimeText(node) };
   }
 
-  function getUserMessages() {
-    return [...document.querySelectorAll('[data-message-author-role="user"]')];
-  }
-
+  function getUserMessages() { return [...document.querySelectorAll('[data-message-author-role="user"]')]; }
   function getLatestUserText() {
     const node = getUserMessages().at(-1);
-    return cleanText(node?.innerText || node?.textContent || "ChatGPT 任务", 160);
+    return cleanText(node?.innerText || node?.textContent || "ChatGPT 任务", 240);
   }
-
   function getComposerText() {
     const composer = findComposer();
-    if (!composer) return "";
-    return cleanText(composer.value || composer.innerText || composer.textContent || "", 160);
+    return composer ? cleanText(composer.value || composer.innerText || composer.textContent || "", 240) : "";
   }
-
   function findComposer() {
-    return document.querySelector("#prompt-textarea") ||
-      document.querySelector("textarea[placeholder]") ||
-      document.querySelector('[contenteditable="true"][data-virtualkeyboard]') ||
-      document.querySelector('main [contenteditable="true"]');
+    return document.querySelector("#prompt-textarea") || document.querySelector("textarea[placeholder]") || document.querySelector('[contenteditable="true"][data-virtualkeyboard]') || document.querySelector('main [contenteditable="true"]');
   }
-
   function isComposerElement(target) {
-    if (!(target instanceof Element)) return false;
-    return Boolean(
-      target.matches?.('#prompt-textarea, textarea, [contenteditable="true"]') ||
-      target.closest?.('#prompt-textarea, textarea, [contenteditable="true"]')
-    );
+    return target instanceof Element && Boolean(target.matches?.('#prompt-textarea, textarea, [contenteditable="true"]') || target.closest?.('#prompt-textarea, textarea, [contenteditable="true"]'));
   }
-
   function isComposerReady() {
-    if (state.isMonitor) {
-      return document.readyState === "interactive" || document.readyState === "complete";
-    }
     const composer = findComposer();
-    if (!composer || !isVisible(composer)) return false;
-    return composer.getAttribute("aria-disabled") !== "true" && !composer.disabled;
+    return Boolean(composer && isVisible(composer) && composer.getAttribute("aria-disabled") !== "true" && !composer.disabled);
   }
-
   function looksLikeSendButton(button) {
     const testId = (button.getAttribute("data-testid") || "").toLowerCase();
     const label = combinedText(button).toLowerCase();
-    return testId.includes("send-button") ||
-      /^(send|发送|傳送|提交)$/.test(label) ||
-      label.includes("send message") ||
-      label.includes("发送消息");
+    return testId.includes("send-button") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
   }
-
   function hasStopControl() {
-    const selectors = [
-      'button[data-testid*="stop"]',
-      'button[aria-label*="Stop"]',
-      'button[aria-label*="stop"]',
-      'button[aria-label*="停止"]',
-      'button[aria-label*="中止"]',
-      'button[aria-label*="取消生成"]'
-    ];
-    if (selectors.some((selector) => [...document.querySelectorAll(selector)].some(isRelevantElement))) return true;
-    return getRelevantButtons().some((button) => {
-      const text = combinedText(button).toLowerCase();
-      return ["stop generating", "stop responding", "停止生成", "停止响应", "中止生成", "取消生成"]
-        .some((keyword) => text.includes(keyword));
-    });
+    const selectors = ['button[data-testid*="stop"]', 'button[aria-label*="Stop"]', 'button[aria-label*="stop"]', 'button[aria-label*="停止"]', 'button[aria-label*="中止"]', 'button[aria-label*="取消生成"]'];
+    if (selectors.some((selector) => [...document.querySelectorAll(selector)].some(isVisible))) return true;
+    return getRelevantButtons().some((button) => ["stop generating", "stop responding", "停止生成", "停止响应", "中止生成", "取消生成"].some((keyword) => combinedText(button).toLowerCase().includes(keyword)));
   }
-
   function hasApprovalControl() {
-    const labels = new Set([
-      "allow", "approve", "confirm", "continue", "run", "allow once", "always allow",
-      "允许", "批准", "确认", "继续", "运行", "允许一次", "始终允许"
-    ]);
+    const labels = new Set(["allow", "approve", "confirm", "continue", "run", "allow once", "always allow", "允许", "批准", "确认", "继续", "运行", "允许一次", "始终允许"]);
     return getRelevantButtons().some((button) => labels.has(combinedText(button).toLowerCase()));
   }
-
   function findVisibleError() {
-    const errorWords = [
-      "something went wrong", "there was an error generating a response", "network error", "conversation not found",
-      "出现错误", "发生错误", "网络错误", "生成回复时出错", "找不到对话"
-    ];
-    const candidates = [
-      ...document.querySelectorAll('[role="alert"], main [data-testid*="error"], main .text-red-500')
-    ].filter(isRelevantElement);
-    return candidates.some((node) => {
+    const words = ["something went wrong", "there was an error generating a response", "network error", "conversation not found", "出现错误", "发生错误", "网络错误", "生成回复时出错", "找不到对话"];
+    return [...document.querySelectorAll('[role="alert"], main [data-testid*="error"], main .text-red-500')].filter(isVisible).some((node) => {
       const text = cleanText(node.innerText || node.textContent || "", 500).toLowerCase();
-      return errorWords.some((word) => text.includes(word));
+      return words.some((word) => text.includes(word));
     });
   }
-
   function hasBusyIndicator() {
-    const busyWords = [
-      "working", "thinking", "searching", "running", "generating",
-      "正在处理", "正在思考", "正在搜索", "正在运行", "正在生成"
-    ];
-    const nodes = [
-      ...document.querySelectorAll('main [aria-live="polite"], main [role="status"], main [data-state="loading"]')
-    ].filter(isRelevantElement);
-    return nodes.some((node) => {
+    const words = ["working", "thinking", "searching", "running", "generating", "正在处理", "正在思考", "正在搜索", "正在运行", "正在生成"];
+    return [...document.querySelectorAll('main [aria-live="polite"], main [role="status"], main [data-state="loading"]')].filter(isVisible).some((node) => {
       const text = cleanText(node.innerText || node.textContent || "", 200).toLowerCase();
-      return busyWords.some((word) => text.includes(word));
+      return words.some((word) => text.includes(word));
     });
   }
-
-  function getRelevantButtons() {
-    return [...document.querySelectorAll("main button")].filter(isRelevantElement);
-  }
-
-  function combinedText(element) {
-    return cleanText(`${element.getAttribute("aria-label") || ""} ${element.innerText || ""} ${element.title || ""}`, 120);
-  }
-
-  function isRelevantElement(element) {
-    if (!state.isMonitor) return isVisible(element);
-    if (!(element instanceof Element)) return false;
-    if (element.hidden || element.getAttribute("aria-hidden") === "true") return false;
-    const style = getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    return Boolean(combinedText(element) || element.textContent?.trim() || element.getAttribute("data-testid"));
-  }
-
+  function getRelevantButtons() { return [...document.querySelectorAll("main button")].filter(isVisible); }
+  function combinedText(element) { return cleanText(`${element.getAttribute("aria-label") || ""} ${element.innerText || ""} ${element.title || ""}`, 120); }
   function isVisible(element) {
     if (!(element instanceof Element)) return false;
     const style = getComputedStyle(element);
@@ -437,49 +426,38 @@
     const rect = element.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0;
   }
-
-  function isVisibleOrHasContent(element) {
-    return Boolean(element && (isVisible(element) || element.textContent?.trim()));
+  function isVisibleOrHasContent(element) { return Boolean(element && (isVisible(element) || element.textContent?.trim())); }
+  function getPageKey(value) {
+    try {
+      const url = new URL(value, location.origin);
+      return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`;
+    } catch {
+      return String(value || "");
+    }
   }
-
   function getQuestionTitle(value) {
     const raw = String(value || "").replace(/\r/g, "").trim();
     let title = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || "ChatGPT 任务";
-    const punctuationIndexes = ["。", "！", "？", "!", "?"]
-      .map((mark) => title.indexOf(mark))
-      .filter((index) => index >= 6);
-    if (punctuationIndexes.length) title = title.slice(0, Math.min(...punctuationIndexes) + 1);
+    const indexes = ["。", "！", "？", "!", "?"].map((mark) => title.indexOf(mark)).filter((index) => index >= 6);
+    if (indexes.length) title = title.slice(0, Math.min(...indexes) + 1);
     return cleanText(title.replace(/^#+\s*/, ""), 80) || "ChatGPT 任务";
   }
-
   function getAssistantFirstLine(node, rawText) {
-    const roots = [
-      node?.querySelector?.("[data-message-content]"),
-      node?.querySelector?.(".markdown"),
-      node?.querySelector?.('[class*="prose"]'),
-      node
-    ].filter(Boolean);
+    const roots = [node?.querySelector?.("[data-message-content]"), node?.querySelector?.(".markdown"), node?.querySelector?.('[class*="prose"]'), node].filter(Boolean);
     for (const root of roots) {
-      const blocks = root.matches?.("h1,h2,h3,h4,p,li,blockquote,pre")
-        ? [root]
-        : [...(root.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || [])];
+      const blocks = root.matches?.("h1,h2,h3,h4,p,li,blockquote,pre") ? [root] : [...(root.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || [])];
       for (const block of blocks) {
-        const line = String(block.innerText || block.textContent || "")
-          .split(/\n+/).map((item) => item.trim())
-          .find((item) => item && !isAssistantUiLine(item));
+        const line = String(block.innerText || block.textContent || "").split(/\n+/).map((item) => item.trim()).find((item) => item && !isAssistantUiLine(item));
         if (line) return cleanText(line, 240);
       }
     }
-    const fallback = String(rawText || "").split(/\n+/).map((line) => line.trim())
-      .find((line) => line && !isAssistantUiLine(line));
+    const fallback = String(rawText || "").split(/\n+/).map((line) => line.trim()).find((line) => line && !isAssistantUiLine(line));
     return cleanText(fallback || "", 240);
   }
-
   function isAssistantUiLine(line) {
     const normalized = cleanText(line, 160).toLowerCase();
     return /^(思考了\s*\d|thought for\s*\d|复制$|copy$|分享$|share$|重新生成$|regenerate$|good response$|bad response$)/i.test(normalized);
   }
-
   function getThinkingTimeText(node) {
     const turn = node?.closest?.('[data-testid^="conversation-turn-"]') || node?.closest?.("article") || node?.parentElement;
     const text = String(turn?.innerText || node?.innerText || node?.textContent || "");
@@ -495,29 +473,29 @@
     if (seconds || !totalMinutes) parts.push(`${seconds}s`);
     return `思考了 ${parts.join(" ")}`;
   }
-
   function formatThinkingTime(elapsedMs) {
     const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
   }
-
-  function cleanText(value, maxLength) {
-    return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
-  }
-
+  function cleanText(value, maxLength) { return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength); }
   function hashText(text) {
     let hash = 2166136261;
-    for (let index = 0; index < text.length; index += 1) {
-      hash ^= text.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
-    }
+    for (let index = 0; index < text.length; index += 1) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 16777619); }
     return (hash >>> 0).toString(36);
   }
-
-  async function safeSend(message) {
-    try { return await chrome.runtime.sendMessage(message); }
-    catch { return null; }
+  function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+  async function sendWithRetry(message, attempts = 3) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const response = await chrome.runtime.sendMessage(message);
+        if (response && response.ok !== false) return response;
+      } catch (error) {
+        if (attempt === attempts - 1) console.debug("[ChatGPT Task Notifier] message failed", message.type, error);
+      }
+      if (attempt < attempts - 1) await delay(150 * (attempt + 1));
+    }
+    return null;
   }
 })();

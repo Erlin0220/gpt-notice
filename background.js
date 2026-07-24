@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
 
 const ACTIVE_STATUSES = new Set(["running", "waiting_action"]);
 const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled"]);
+const ALLOWED_STATUSES = new Set([...ACTIVE_STATUSES, ...FINISHED_STATUSES]);
 const NOTIFICATION_ICON = "icons/chatgpt.png";
 const MAX_TASK_HISTORY = 40;
 let mutationQueue = Promise.resolve();
@@ -26,7 +27,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => void stopTasksForClosedTab(tabId));
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.url && !isChatUrl(changeInfo.url)) void stopTasksForClosedTab(tabId, "页面已离开 ChatGPT，已停止监控");
+  if (!changeInfo.url) return;
+  if (!isChatUrl(changeInfo.url)) void stopTasksForClosedTab(tabId, "页面已离开 ChatGPT，已停止监控");
+  else void stopTasksForNavigatedTab(tabId, changeInfo.url);
 });
 chrome.notifications.onClicked.addListener((notificationId) => {
   const taskId = parseNotificationTaskId(notificationId);
@@ -62,6 +65,7 @@ async function migrateState() {
         changed = true;
       }
     }
+    await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: state.settings });
     if (changed) await writeTasks(pruneTasks(state.tasks));
   });
 }
@@ -69,6 +73,7 @@ async function migrateState() {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "PAGE_READY": return handlePageReady(message, sender);
+    case "PAGE_CHANGED": return handlePageChanged(message, sender);
     case "TASK_STARTED": return handleTaskStarted(message, sender);
     case "TASK_STATE": return handleTaskState(message, sender);
     case "HEARTBEAT": return handleHeartbeat(message, sender);
@@ -103,6 +108,13 @@ async function handlePageReady(message, sender) {
   });
 }
 
+async function handlePageChanged(message, sender) {
+  const tab = sender.tab;
+  if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
+  await cancelActiveTasksForTab(tab.id, cleanText(message.reason || "已切换到其他 ChatGPT 会话，旧任务监控已停止", 160));
+  return { ok: true };
+}
+
 async function handleTaskStarted(message, sender) {
   const tab = sender.tab;
   if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
@@ -121,6 +133,8 @@ async function handleTaskStarted(message, sender) {
     task.title = cleanText(message.questionTitle || message.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.title, 240);
     task.baselineAssistantHash = String(message.baselineAssistantHash || "");
+    task.latestAssistantHash = String(message.latestAssistantHash || task.latestAssistantHash || "");
+    task.lastHeartbeatAt = now;
     task.startedAt = task.finishedAt ? now : task.startedAt || now;
     task.finishedAt = null;
     task.updatedAt = now;
@@ -142,12 +156,17 @@ async function handleTaskState(message, sender) {
     if (!task) return { ok: false, error: "Task not found" };
     const previousStatus = task.status;
     const now = Date.now();
-    task.status = String(message.status || task.status);
+    const nextStatus = String(message.status || task.status);
+    if (!ALLOWED_STATUSES.has(nextStatus)) return { ok: false, error: "Invalid task status" };
+    task.status = nextStatus;
     task.url = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
     task.title = cleanText(message.questionTitle || task.title || task.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.prompt || task.title, 240);
     task.assistantFirstLine = cleanText(message.assistantFirstLine || task.assistantFirstLine || "", 240);
     task.thinkingTimeText = cleanText(message.thinkingTimeText || task.thinkingTimeText || "", 60);
+    task.latestAssistantHash = String(message.latestAssistantHash || task.latestAssistantHash || "");
+    task.stopReason = cleanText(message.stopReason || task.stopReason || "", 160);
+    task.lastHeartbeatAt = now;
     task.updatedAt = now;
     if (Number.isInteger(sender.tab?.id)) {
       task.tabId = sender.tab.id;
@@ -173,11 +192,40 @@ async function handleHeartbeat(message, sender) {
     if (!Number.isInteger(sender.tab?.id) || sender.tab.id !== task.tabId) return { ok: true, task: null };
     task.url = sanitizeChatUrl(message.url || sender.tab.url || task.url);
     task.windowId = sender.tab.windowId;
-    task.updatedAt = Date.now();
+    task.latestAssistantHash = String(message.latestAssistantHash || task.latestAssistantHash || "");
+    task.lastHeartbeatAt = Date.now();
+    task.updatedAt = task.lastHeartbeatAt;
     task.observerMode = "current_page";
     state.tasks[task.id] = task;
     await writeTasks(state.tasks);
     return { ok: true, task: publicTask(task) };
+  });
+}
+
+async function stopTasksForNavigatedTab(tabId, nextUrl) {
+  const state = await readState();
+  const current = Object.values(state.tasks).find((task) => task.tabId === tabId && ACTIVE_STATUSES.has(task.status));
+  if (!current || samePage(current.url, nextUrl)) return;
+  await cancelActiveTasksForTab(tabId, "已切换到其他 ChatGPT 会话，旧任务监控已停止");
+}
+
+async function cancelActiveTasksForTab(tabId, reason) {
+  return enqueueMutation(async () => {
+    const state = await readState();
+    let changed = false;
+    const now = Date.now();
+    for (const task of Object.values(state.tasks)) {
+      if (task.tabId !== tabId || !ACTIVE_STATUSES.has(task.status)) continue;
+      task.status = "cancelled";
+      task.finishedAt = now;
+      task.updatedAt = now;
+      task.observerMode = "none";
+      task.tabId = null;
+      task.windowId = null;
+      task.stopReason = cleanText(reason || "任务监控已停止", 160);
+      changed = true;
+    }
+    if (changed) await writeTasks(pruneTasks(state.tasks));
   });
 }
 
@@ -219,7 +267,7 @@ async function maybeNotify(task, settings) {
   if (task.status === "completed" && !settings.notifyCompleted) return;
   if (task.status === "waiting_action" && !settings.notifyAttention) return;
   if (task.status === "failed" && !settings.notifyFailed) return;
-  if (!["completed", "waiting_action", "failed"].includes(task.status)) return;
+  if (!['completed', 'waiting_action', 'failed'].includes(task.status)) return;
   if (!settings.notifyWhenFocused && await isTaskTabFocused(task)) return;
   const title = task.title || task.prompt || "ChatGPT 任务";
   let message = "";
@@ -286,7 +334,7 @@ async function getPopupState() {
 
 async function updateSettings(patch) {
   const state = await readState();
-  state.settings = { ...state.settings, ...Object.fromEntries(Object.entries(patch).filter(([key]) => key in DEFAULT_SETTINGS)) };
+  state.settings = { ...DEFAULT_SETTINGS, ...Object.fromEntries(Object.entries({ ...state.settings, ...patch }).filter(([key]) => key in DEFAULT_SETTINGS)) };
   await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: state.settings });
   return { ok: true, settings: state.settings };
 }
@@ -309,7 +357,7 @@ async function showTestNotification() {
 async function readState() {
   const result = await chrome.storage.local.get([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TASKS]);
   return {
-    settings: { ...DEFAULT_SETTINGS, ...(result.settings || {}) },
+    settings: { ...DEFAULT_SETTINGS, ...Object.fromEntries(Object.entries(result.settings || {}).filter(([key]) => key in DEFAULT_SETTINGS)) },
     tasks: Object.fromEntries(Object.entries(result.tasks || {}).map(([id, task]) => [id, normalizeTask({ ...task, id })]))
   };
 }
@@ -330,6 +378,8 @@ function normalizeTask(task = {}) {
     title: cleanText(task.title || task.prompt || "ChatGPT 任务", 80),
     prompt: cleanText(task.prompt || "ChatGPT 任务", 240),
     baselineAssistantHash: String(task.baselineAssistantHash || ""),
+    latestAssistantHash: String(task.latestAssistantHash || ""),
+    lastHeartbeatAt: Number(task.lastHeartbeatAt || 0),
     assistantFirstLine: cleanText(task.assistantFirstLine || "", 240),
     thinkingTimeText: cleanText(task.thinkingTimeText || "", 60),
     stopReason: cleanText(task.stopReason || task.observerLostReason || "", 160),
@@ -352,6 +402,9 @@ function publicTask(task) {
     startedAt: task.startedAt,
     updatedAt: task.updatedAt,
     finishedAt: task.finishedAt,
+    baselineAssistantHash: task.baselineAssistantHash,
+    latestAssistantHash: task.latestAssistantHash,
+    lastHeartbeatAt: task.lastHeartbeatAt,
     assistantFirstLine: task.assistantFirstLine,
     thinkingTimeText: task.thinkingTimeText
   };
@@ -384,6 +437,16 @@ function sanitizeChatUrl(value) {
 function isChatUrl(value) {
   try {
     return ["chatgpt.com", "chat.openai.com"].includes(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function samePage(left, right) {
+  try {
+    const a = new URL(sanitizeChatUrl(left));
+    const b = new URL(sanitizeChatUrl(right));
+    return a.pathname.replace(/\/+$/, "") === b.pathname.replace(/\/+$/, "");
   } catch {
     return false;
   }

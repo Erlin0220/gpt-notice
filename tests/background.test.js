@@ -96,6 +96,8 @@ async function send(message, tab = tabs.get(7)) {
   });
   assert.equal(started.task.status, "running");
   assert.equal(started.task.observerMode, "current_page");
+  assert.equal(started.task.baselineAssistantHash, "");
+  assert.equal(typeof started.task.latestAssistantHash, "string");
   assert.equal(calls.tabsCreate.length, 0, "starting a task must not create a monitor tab");
 
   await send({
@@ -108,6 +110,13 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(calls.notifications.length, 1);
   assert.equal(calls.tabsCreate.length, 0, "completion must not create a tab");
 
+  const navigationTask = await send({ type: "TASK_STARTED", url: "https://chatgpt.com/c/test", prompt: "切换会话" });
+  await send({ type: "PAGE_CHANGED", url: "https://chatgpt.com/c/next", reason: "切换会话" });
+  assert.equal(storage.tasks[navigationTask.task.id].status, "cancelled");
+  assert.match(storage.tasks[navigationTask.task.id].stopReason, /切换会话/);
+
+  await assert.rejects(() => send({ type: "TASK_STATE", taskId: navigationTask.task.id, status: "unknown" }), /Invalid task status|Task not found/);
+
   const second = await send({ type: "TASK_STARTED", url: "https://chatgpt.com/c/test", prompt: "关闭测试" });
   tabs.delete(7);
   await tabRemoved.emit(7, { windowId: 3 });
@@ -117,7 +126,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.match(storage.tasks[second.task.id].stopReason, /页面已关闭/);
   assert.equal(calls.tabsCreate.length, 0, "closing a task tab must never recreate it");
 
-  console.log("background v0.6.0 tests passed");
+  console.log("background v0.6.1 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

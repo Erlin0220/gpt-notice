@@ -35,6 +35,14 @@ assert.equal(core.isItemCompleted(active, {
   stopVisible: false, waitingAction: false, busy: false, visibleError: false, stableForMs: 4_500
 }), true);
 
+const otherLeaseQueue = core.normalizeQueue({
+  ...runningQueue,
+  lease: { ownerId: "other-tab", expiresAt: Date.now() + 10_000 }
+}, "c:test");
+assert.equal(core.shouldRecoverInterruptedQueue(otherLeaseQueue, "this-tab"), false, "a second tab must not reset an actively leased queue");
+assert.equal(core.shouldRecoverInterruptedQueue(otherLeaseQueue, "other-tab"), true, "the reloaded owner tab may recover its interrupted queue");
+assert.equal(core.shouldRecoverInterruptedQueue({ ...otherLeaseQueue, lease: { ownerId: "other-tab", expiresAt: Date.now() - 1 } }, "this-tab"), true, "an expired lease must be recoverable");
+
 const recovered = core.resetInterruptedItems(runningQueue);
 assert.equal(recovered.activeItemId, null);
 assert.equal(recovered.items[0].status, "pending");
@@ -45,4 +53,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.0 tests passed");
+console.log("queue v0.6.1 tests passed");
