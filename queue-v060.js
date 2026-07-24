@@ -266,6 +266,7 @@
     const source = await loadQueue(fromKey);
     if (!source.items.length) return;
     const target = await loadQueue(toKey);
+    const previousTarget = core.normalizeQueue(target, toKey);
     const ids = new Set(target.items.map((item) => item.id));
     target.items.push(...source.items.filter((item) => !ids.has(item.id)));
     target.paused = source.paused || target.paused;
@@ -273,7 +274,7 @@
     target.nextDispatchAt = Math.max(source.nextDispatchAt, target.nextDispatchAt);
     target.conversationUrl = location.href;
     target.lease = null;
-    await persistQueue(toKey, target, target);
+    await persistQueue(toKey, target, previousTarget);
     await deleteQueue(fromKey, source);
     runtime.lastUrl = previousUrl;
   }
