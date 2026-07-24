@@ -3,6 +3,8 @@ name: Apply audited v0.6.1 target
 on:
   pull_request_target:
     types: [synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -13,7 +15,15 @@ concurrency:
 
 jobs:
   apply:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/comprehensive-audit-v061'
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'fix/comprehensive-audit-v061') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       github.event.issue.number == 9 &&
+       github.event.comment.user.login == 'Erlin0220' &&
+       github.event.comment.body == '/apply-audit-v061')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout audited branch
