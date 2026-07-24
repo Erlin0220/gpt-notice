@@ -1,0 +1,43 @@
+name: Debug v0.6.2 patch
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  debug:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/v0.6.2-navigation-safety
+          fetch-depth: 0
+      - name: Capture exact patch error
+        shell: bash
+        run: |
+          set +e
+          python3 - <<'PY' > /tmp/patch-output.txt 2>&1
+          from pathlib import Path
+          import base64, re, zlib
+          text = Path('.github/workflows/apply-v062.yml').read_text()
+          payload = re.search(r'base64\.b64decode\("([A-Za-z0-9+/=]+)"\)', text).group(1)
+          code = zlib.decompress(base64.b64decode(payload)).decode()
+          code = code.replace('ROOT = Path(__file__).resolve().parents[1]', 'ROOT = Path.cwd()')
+          code = code.replace("不再继续检测.')\ns = s.replace", "不再继续检测.',\n    'README workflow steps')\ns = s.replace")
+          exec(code)
+          PY
+          status=$?
+          git reset --hard HEAD
+          {
+            echo "exit=$status"
+            cat /tmp/patch-output.txt
+          } > patch-error.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add patch-error.txt
+          git commit -m "chore: capture v0.6.2 patch error"
+          git push origin HEAD:fix/v0.6.2-navigation-safety
