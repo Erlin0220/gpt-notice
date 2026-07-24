@@ -1,0 +1,88 @@
+name: Apply audited v0.6.1 target
+
+on:
+  pull_request_target:
+    types: [synchronize, reopened]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-audit-v061-target-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/comprehensive-audit-v061'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout audited branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/comprehensive-audit-v061
+          fetch-depth: 0
+
+      - name: Check payload state
+        id: payload
+        shell: bash
+        run: |
+          if [[ -f scripts/apply-v061-payload.py ]]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Audited payload already applied."
+          fi
+
+      - name: Apply verified payload
+        if: steps.payload.outputs.skip != 'true'
+        run: python3 scripts/apply-v061-payload.py
+
+      - name: Validate extension
+        if: steps.payload.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            node --check "$file"
+          done < <(find . -maxdepth 1 -type f -name '*.js' -print0 | sort -z)
+          for test_file in tests/*.test.js; do
+            node "$test_file"
+          done
+          python3 -m json.tool manifest.json >/dev/null
+          test -s icons/chatgpt.png
+          git diff --check
+
+      - name: Commit audited source changes
+        if: steps.payload.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout origin/fix/comprehensive-audit-v061 -- .github/workflows
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && { echo "No changes to commit"; exit 1; }
+          git commit -m "fix: harden task lifecycle and queue consistency v0.6.1"
+          git push origin HEAD:fix/comprehensive-audit-v061
+
+      - name: Build extension test package
+        if: steps.payload.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf package
+          mkdir -p package/chatgpt-task-notifier
+          rsync -a ./ package/chatgpt-task-notifier/ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='package/' \
+            --exclude='scripts/' \
+            --exclude='tests/'
+
+      - name: Upload extension test package
+        if: steps.payload.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-under-test-v0.6.1
+          path: package/chatgpt-task-notifier
+          if-no-files-found: error
