@@ -1,15 +1,15 @@
 name: Debug v0.6.2 patch
 
 on:
-  push:
-    branches: [fix/v0.6.2-navigation-safety]
-    paths: [.github/workflows/debug-v062.yml]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   debug:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
