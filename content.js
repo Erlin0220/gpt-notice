@@ -7,6 +7,7 @@
   const INSPECT_INTERVAL_MS = 800;
   const HEARTBEAT_INTERVAL_MS = 5_000;
   const PENDING_SUBMISSION_MS = 10_000;
+  const URL_PROMOTION_WINDOW_MS = 60_000;
   const START_RETRY_MS = 800;
 
   const state = {
@@ -205,14 +206,33 @@
     const currentUrl = location.href;
     const currentPageKey = getPageKey(currentUrl);
     if (currentUrl === state.lastUrl && currentPageKey === state.lastPageKey) return;
+    const previousUrl = state.lastUrl;
     const previousPageKey = state.lastPageKey;
+    const promoted = isConversationPromotion(previousUrl, currentUrl);
     state.lastUrl = currentUrl;
     state.lastPageKey = currentPageKey;
+
+    if (previousPageKey && currentPageKey !== previousPageKey && promoted) {
+      if (state.running && state.taskId) {
+        const response = await sendWithRetry({
+          type: "PAGE_PROMOTED",
+          taskId: state.taskId,
+          url: currentUrl,
+          previousUrl
+        }, 3);
+        if (response?.task?.id) {
+          state.taskId = response.task.id;
+          state.remoteStatus = response.task.status || state.remoteStatus;
+        }
+      }
+      return;
+    }
+
     if (previousPageKey && currentPageKey !== previousPageKey) {
       await sendWithRetry({
         type: "PAGE_CHANGED",
         url: currentUrl,
-        previousUrl: previousPageKey,
+        previousUrl,
         reason: "已切换到其他 ChatGPT 会话，旧任务监控已停止"
       }, 3);
       finishLocalTask();
@@ -434,6 +454,25 @@
     } catch {
       return String(value || "");
     }
+  }
+  function getConversationId(value) {
+    try {
+      return new URL(value, location.origin).pathname.match(/(?:^|\/)c\/([^/?#]+)/)?.[1] || "";
+    } catch {
+      return "";
+    }
+  }
+  function isDraftChatUrl(value) {
+    try {
+      const pathname = new URL(value, location.origin).pathname.replace(/\/+$/, "") || "/";
+      return !getConversationId(value) && (pathname === "/" || /(?:^|\/)g\/g-p-[^/]+\/project$/.test(pathname));
+    } catch {
+      return false;
+    }
+  }
+  function isConversationPromotion(previousUrl, currentUrl, now = Date.now()) {
+    const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= URL_PROMOTION_WINDOW_MS);
+    return isDraftChatUrl(previousUrl) && Boolean(getConversationId(currentUrl)) && (state.running || recentSubmission);
   }
   function getQuestionTitle(value) {
     const raw = String(value || "").replace(/\r/g, "").trim();

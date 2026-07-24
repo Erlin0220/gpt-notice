@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT 任务完成提醒",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "仅监控当前打开的 ChatGPT 页面，提供任务完成通知和稳定的消息队列。",
   "minimum_chrome_version": "120",
   "permissions": [
@@ -33,7 +33,11 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["queue-core.js", "content.js", "queue-v060.js"],
+      "js": [
+        "queue-core.js",
+        "content.js",
+        "queue-v060.js"
+      ],
       "run_at": "document_idle"
     }
   ],
