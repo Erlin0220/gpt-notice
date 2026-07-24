@@ -1,12 +1,5 @@
 exit=1
 Traceback (most recent call last):
-  File "<stdin>", line 5, in <module>
-  File "<string>", line 20, in <module>
-  File "<string>", line 7, in read
-  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
-    with self.open(mode='r', encoding=encoding, errors=errors) as f:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
-    return io.open(self, mode, buffering, encoding, errors, newline)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/home/runner/work/gpt-notice/content.js'
+  File "<stdin>", line 7, in <module>
+  File "<string>", line 410, in <module>
+TypeError: replace_once() missing 1 required positional argument: 'label'
