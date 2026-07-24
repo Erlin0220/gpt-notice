@@ -26,7 +26,7 @@ Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任�
 1. 用户在 ChatGPT 当前页面发送消息后，扩展开始监控该页面。
 2. 可以切换到其他浏览器标签页，原 ChatGPT 页面仍会继续运行和通知。
 3. 新建聊天被 ChatGPT 自动分配正式会话 URL 时，当前任务会安全迁移到该 URL。
-4. 关闭该 ChatGPT 页面后，扩展将任务标记为已停止，不再继续检测.
+4. 关闭该 ChatGPT 页面后，扩展将任务标记为已停止，不再继续检测。
 5. 扩展不会自动创建后台标签，也不会自动重新打开已关闭页面。
 6. 页面刷新时可恢复同一标签中的任务状态；中断的队列任务会暂停，避免重复发送。
 
@@ -76,16 +76,17 @@ node --check queue-v060.js
 node --check popup.js
 node tests/static.test.js
 node tests/background.test.js
+node tests/content.test.js
 node tests/queue.test.js
 ```
 
 ## 项目结构
 
-- `background.js`：当前页面任务状态、通知和面板消息路由。
-- `content.js`：ChatGPT 页面任务状态识别。
+- `background.js`：当前页面任务状态、会话 URL 绑定、通知和面板消息路由。
+- `content.js`：ChatGPT 页面任务状态识别和草稿页到正式会话的安全迁移。
 - `queue-core.js`：消息队列数据结构和纯函数。
 - `queue-v060.js`：队列 UI、拆分存储、实时状态纠偏和自动发送。
 - `popup.*`：扩展设置和最近任务。
-- `tests/`：静态架构、旧数据兼容和队列纯函数测试。
+- `tests/`：静态架构、任务生命周期、旧数据兼容和队列纯函数测试。
 
 > ChatGPT 和相关图标归 OpenAI 所有。本项目为非官方浏览器扩展，与 OpenAI 不存在隶属或背书关系。
