@@ -24,9 +24,11 @@ jobs:
           import base64, re, zlib
           text = Path('.github/workflows/apply-v062.yml').read_text()
           payload = re.search(r'base64\.b64decode\("([A-Za-z0-9+/=]+)"\)', text).group(1)
-          exec(zlib.decompress(base64.b64decode(payload)))
+          code = zlib.decompress(base64.b64decode(payload)).decode()
+          code = code.replace('ROOT = Path(__file__).resolve().parents[1]', 'ROOT = Path.cwd()')
+          exec(code)
           PY
-          rm -f .github/workflows/trigger-apply-v062.yml
+          rm -f .github/workflows/trigger-apply-v062.yml .github/workflows/debug-v062.yml patch-error.txt
       - name: Validate extension
         shell: bash
         run: |
