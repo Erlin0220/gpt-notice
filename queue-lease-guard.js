@@ -39,7 +39,11 @@
     if (root[PREPARED_MARKER]) return root[PREPARED_MARKER];
     const session = root.sessionStorage;
     if (!session || typeof session.setItem !== "function") return "";
-    const instanceId = createPageInstanceId(now, randomValue);
+    const previousTimestamp = typeof session.getItem === "function"
+      ? parsePageInstanceTimestamp(session.getItem(INSTANCE_STORAGE_KEY))
+      : 0;
+    const requestedTimestamp = Math.max(0, Number(now) || 0);
+    const instanceId = createPageInstanceId(Math.max(requestedTimestamp, previousTimestamp + 1), randomValue);
     session.setItem(INSTANCE_STORAGE_KEY, instanceId);
     root[PREPARED_MARKER] = instanceId;
     return instanceId;
