@@ -7,7 +7,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "u
 assert.match(manifest.version, /^\d+\.\d+\.\d+(?:\.\d+)?$/);
 assert.ok(!manifest.permissions.includes("tabGroups"), "current-page mode must not request tabGroups");
 assert.ok(!manifest.permissions.includes("alarms"), "current-page mode must not request alarms");
-assert.deepEqual(manifest.content_scripts[0].js, ["queue-lease-guard.js", "queue-core.js", "content.js", "queue-v060.js"]);
+assert.deepEqual(manifest.content_scripts[0].js, ["queue-lease-guard.js", "chatgpt-dom.js", "queue-core.js", "content.js", "queue-v060.js"]);
 
 const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
 assert.ok(background.includes("stopTasksForClosedTab"));
@@ -16,7 +16,11 @@ assert.ok(!background.includes("chrome.tabs.group"));
 assert.ok(!background.includes("chrome.alarms"));
 assert.ok(!background.includes("active: false"), "service worker must not create background monitor tabs");
 
+const domAdapter = fs.readFileSync(path.join(root, "chatgpt-dom.js"), "utf8");
 const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
+assert.ok(domAdapter.includes("findActiveComposer"), "project and conversation pages must share active-composer selection");
+assert.ok(domAdapter.includes("documentRef.activeElement"), "the focused composer must be preferred after SPA navigation");
+assert.ok(domAdapter.includes("documentRef.querySelector = function activeComposerQuerySelector"), "the adapter must guard existing composer lookups without duplicating queue logic");
 assert.ok(content.includes("ChatGPTTaskNotifierBridge"));
 assert.ok(!content.includes("location.reload()"));
 assert.ok(!content.includes("isMonitor"), "obsolete background-monitor mode must be removed");
