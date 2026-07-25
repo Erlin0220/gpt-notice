@@ -7,6 +7,9 @@
 
   const INSPECT_INTERVAL_MS = 900;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
+  const SEND_BUTTON_WAIT_MS = 2_500;
+  const SEND_BUTTON_POLL_MS = 100;
+  const DUPLICATE_ENQUEUE_WINDOW_MS = 5_000;
   const COMPLETION_TO_NEXT_DELAY_MS = 2_500;
   const LEASE_TTL_MS = 15_000;
   const LEASE_REFRESH_MS = 5_000;
@@ -309,6 +312,15 @@
     }
     const text = getComposerTextRaw();
     if (!text.trim()) return;
+    const duplicate = runtime.queue.items.find((item) =>
+      ["pending", "dispatching", "running"].includes(item.status) &&
+      item.text === core.cleanText(text) &&
+      now - item.createdAt <= DUPLICATE_ENQUEUE_WINDOW_MS
+    );
+    if (duplicate) {
+      showUiNotice("相同内容刚刚已加入队列，未重复添加");
+      return;
+    }
     showUiNotice(`正在加入队列… ${text.length.toLocaleString()} 字符`);
     await nextFrame();
     const item = core.createQueueItem(text);
@@ -469,15 +481,20 @@
         return current;
       });
       if (!claimed) return false;
-      const sent = await submitPrompt(candidate.text, { allowOverwrite });
-      if (!sent) throw new Error("未找到可用的发送按钮");
+      const submission = await submitPrompt(candidate.text, { allowOverwrite });
+      if (!submission.ok) {
+        const error = new Error(submission.message || "消息发送失败");
+        error.retryable = submission.retryable !== false;
+        throw error;
+      }
       runtime.sendConfirmation = { itemId, baselineUserCount: snapshot.userCount, expiresAt: Date.now() + SEND_CONFIRM_TIMEOUT_MS };
       runtime.deferredAutoItemId = "";
       return true;
     } catch (error) {
-      if (previousComposerText && allowOverwrite && !runtime.sendConfirmation) await writeComposerText(previousComposerText);
-      if (claimed) await handleDispatchFailure(itemId, error?.message || "消息发送失败");
-      if (source !== "auto") showUiNotice(`立即执行失败：${error?.message || "未知错误"}`);
+      if (claimed && !runtime.sendConfirmation) await writeComposerText(previousComposerText);
+      if (claimed) await handleDispatchFailure(itemId, error?.message || "消息发送失败", { retryable: error?.retryable !== false });
+      if (source !== "auto" || error?.retryable === false) showUiNotice(`发送失败：${error?.message || "未知错误"}`);
+      if (error?.retryable === false) await releaseLease(runtime.conversationKey);
       return false;
     } finally {
       runtime.dispatching = false;
@@ -486,19 +503,35 @@
 
   async function submitPrompt(text, { allowOverwrite = false } = {}) {
     const composer = findComposer();
-    if (!composer || !isVisible(composer)) return false;
+    if (!composer || !isVisible(composer)) return { ok: false, message: "未找到可用的输入框", retryable: false };
     const previous = getComposerTextRaw();
-    if (previous.trim() && !allowOverwrite) return false;
+    if (previous.trim() && !allowOverwrite) return { ok: false, message: "输入框已有内容，未允许覆盖", retryable: false };
     const written = await writeComposerText(text);
-    if (!written) return false;
-    await delay(120);
-    const button = findSendButton();
-    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
-      await writeComposerText(previous);
-      return false;
+    if (!written) return { ok: false, message: "消息未能写入输入框", retryable: false };
+
+    const sendControl = await waitForSendButton();
+    if (!sendControl.button) {
+      return { ok: false, message: "未找到发送按钮，队列已暂停，请刷新页面或更新扩展", retryable: false };
     }
-    button.click();
-    return true;
+    if (!sendControl.ready) {
+      return { ok: false, message: "发送按钮仍不可用，队列已暂停，请检查输入框状态", retryable: false };
+    }
+    sendControl.button.click();
+    return { ok: true };
+  }
+
+  async function waitForSendButton(timeoutMs = SEND_BUTTON_WAIT_MS) {
+    const deadline = Date.now() + timeoutMs;
+    let lastButton = null;
+    do {
+      const button = findSendButton();
+      if (button) {
+        lastButton = button;
+        if (isSendButtonEnabled(button)) return { button, ready: true };
+      }
+      await delay(SEND_BUTTON_POLL_MS);
+    } while (Date.now() < deadline);
+    return { button: lastButton, ready: false };
   }
 
   async function handleSendConfirmation(snapshot, now) {
@@ -520,21 +553,28 @@
     }
   }
 
-  async function handleDispatchFailure(itemId, message) {
+  async function handleDispatchFailure(itemId, message, { retryable = true } = {}) {
     await mutateCurrentQueue((queue) => {
       const item = queue.items.find((candidate) => candidate.id === itemId);
       if (!item) return queue;
-      item.retryCount += 1;
       item.error = core.cleanText(message, 240);
       item.startedAt = null;
       item.finishedAt = null;
-      if (item.retryCount <= MAX_AUTO_RETRY) {
+      if (!retryable) {
         item.status = "pending";
-        queue.nextDispatchAt = Date.now() + 3_000;
-      } else {
-        item.status = "failed";
-        item.finishedAt = Date.now();
+        item.retryCount = 0;
         queue.paused = true;
+        queue.nextDispatchAt = 0;
+      } else {
+        item.retryCount += 1;
+        if (item.retryCount <= MAX_AUTO_RETRY) {
+          item.status = "pending";
+          queue.nextDispatchAt = Date.now() + 3_000;
+        } else {
+          item.status = "failed";
+          item.finishedAt = Date.now();
+          queue.paused = true;
+        }
       }
       queue.activeItemId = null;
       return queue;
@@ -733,16 +773,20 @@
     root.querySelector(".gptq-trigger").classList.toggle("has-items", pendingCount > 0);
     const enqueue = root.querySelector('[data-action="enqueue"]');
     enqueue.disabled = runtime.uiActionInFlight || !composerText || !canAdmit;
-    enqueue.title = !canAdmit ? "当前没有正在进行的会话，不能加入队列" : "将输入框内容加入当前会话队列";
+    enqueue.title = !canAdmit ? "当前没有正在执行的 ChatGPT 任务，不能加入新消息" : "将输入框内容加入当前会话队列";
     const pause = root.querySelector('[data-action="pause"]');
     pause.textContent = queue.paused ? "继续" : "暂停";
     const status = root.querySelector(".gptq-status");
+    const confirmation = root.querySelector(".gptq-confirm");
+    const confirmationMode = confirmation && !confirmation.hidden ? confirmation.dataset.mode || "" : "";
+    const waitingCount = core.countPending(queue);
     if (runtime.uiNotice) status.textContent = runtime.uiNotice;
-    else if (!canAdmit && !queue.activeItemId) status.textContent = "当前没有正在进行的会话，不能加入队列";
-    else if (queue.paused) status.textContent = "队列已暂停";
+    else if (queue.paused) status.textContent = "队列已暂停，请处理提示后点击继续";
     else if (queue.activeItemId) status.textContent = "正在执行队列消息";
-    else if (!snapshot.composerEmpty && core.countPending(queue)) status.textContent = "输入框有草稿，队列暂缓发送";
-    else if (core.countPending(queue)) status.textContent = `等待执行 ${core.countPending(queue)} 条`;
+    else if (confirmationMode === "auto-execute") status.textContent = "等待确认：是否覆盖当前草稿并执行下一条";
+    else if (!snapshot.composerEmpty && waitingCount) status.textContent = "输入框有草稿，队列等待确认";
+    else if (waitingCount) status.textContent = `等待执行 ${waitingCount} 条`;
+    else if (!canAdmit) status.textContent = "当前没有正在执行的 ChatGPT 任务，不能加入新消息";
     else status.textContent = "暂无等待消息";
     const list = root.querySelector(".gptq-list");
     const listMarkup = queue.items.length ? queue.items.map(renderItem).join("") : '<li class="gptq-empty">任务执行中输入下一条消息后加入队列</li>';
@@ -1122,17 +1166,36 @@
   }
 
   function findSendButton() {
-    const selectors = ['button[data-testid="send-button"]', 'button[data-testid*="send"]', 'button[aria-label="Send prompt"]', 'button[aria-label*="Send"]', 'button[aria-label*="发送"]', 'button[aria-label*="傳送"]'];
-    for (const selector of selectors) {
+    const directSelectors = [
+      "#composer-submit-button",
+      'button[data-testid="send-button"]',
+      'button[data-testid="composer-submit-button"]',
+      'button[data-testid*="send"]',
+      'button[aria-label="Send prompt"]',
+      'button[aria-label*="Send"]',
+      'button[aria-label*="发送"]',
+      'button[aria-label*="傳送"]'
+    ];
+    for (const selector of directSelectors) {
       const button = [...document.querySelectorAll(selector)].find(isVisible);
       if (button) return button;
+    }
+    const composerForm = findComposer()?.closest?.("form");
+    if (composerForm) {
+      const submit = [...composerForm.querySelectorAll('button[type="submit"], button')]
+        .find((button) => isVisible(button) && (button.getAttribute("type") === "submit" || looksLikeSendButton(button)));
+      if (submit) return submit;
     }
     return [...document.querySelectorAll("main button")].find((button) => isVisible(button) && looksLikeSendButton(button)) || null;
   }
   function looksLikeSendButton(button) {
+    const id = (button.id || button.getAttribute("id") || "").toLowerCase();
     const testId = (button.getAttribute("data-testid") || "").toLowerCase();
     const label = `${button.getAttribute("aria-label") || ""} ${button.innerText || ""} ${button.title || ""}`.trim().toLowerCase();
-    return testId.includes("send-button") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
+    return id === "composer-submit-button" || testId.includes("send-button") || testId.includes("composer-submit") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
+  }
+  function isSendButtonEnabled(button) {
+    return Boolean(button && isVisible(button) && !button.disabled && button.getAttribute("aria-disabled") !== "true" && button.getAttribute("data-disabled") !== "true");
   }
   function hasStopControl() {
     const selectors = ['button[data-testid*="stop"]', 'button[aria-label*="Stop"]', 'button[aria-label*="stop"]', 'button[aria-label*="停止"]', 'button[aria-label*="中止"]', 'button[aria-label*="取消生成"]'];

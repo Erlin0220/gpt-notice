@@ -52,6 +52,14 @@ assert.ok(queue.includes("textsById"), "metadata-only updates must reuse cached 
 assert.ok(queue.includes("let claimed = false"), "lease acquisition must re-check ownership while holding the storage lock");
 assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a second tab must not reset a valid active lease");
 assert.ok(queue.includes("if (runtime.sendConfirmation || runtime.dispatching) return;"), "manual reconciliation must not race an unconfirmed send");
+assert.ok(queue.includes("#composer-submit-button"), "current ChatGPT composer submit button id must be supported");
+assert.ok(queue.includes("waitForSendButton"), "queue submission must wait for the React send button to render");
+assert.ok(queue.includes("DUPLICATE_ENQUEUE_WINDOW_MS"), "rapid identical queue additions must be deduplicated");
+assert.ok(queue.includes("发送按钮仍不可用，队列已暂停"), "disabled composer controls need a specific paused error");
+assert.ok(queue.includes("if (claimed && !runtime.sendConfirmation) await writeComposerText(previousComposerText);"), "failed submission must restore the original draft exactly once");
+assert.ok(queue.includes('handleDispatchFailure(itemId, error?.message || "消息发送失败", { retryable: error?.retryable !== false })'), "non-retryable DOM failures must pause instead of looping");
+assert.ok(queue.indexOf('else if (queue.paused) status.textContent') < queue.indexOf('else if (!canAdmit) status.textContent'), "queue state must take priority over the enqueue admission hint");
+assert.ok(content.includes('id === "composer-submit-button"'), "task tracking must recognize the current send button id");
 assert.ok(queue.includes('mode === "auto-execute" ? "auto" : "manual"'), "auto overwrite confirmation must retain automatic dispatch safety checks");
 assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
 assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");

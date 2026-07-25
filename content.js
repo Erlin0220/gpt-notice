@@ -410,9 +410,10 @@
     return Boolean(composer && isVisible(composer) && composer.getAttribute("aria-disabled") !== "true" && !composer.disabled);
   }
   function looksLikeSendButton(button) {
+    const id = (button.id || button.getAttribute("id") || "").toLowerCase();
     const testId = (button.getAttribute("data-testid") || "").toLowerCase();
     const label = combinedText(button).toLowerCase();
-    return testId.includes("send-button") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
+    return id === "composer-submit-button" || testId.includes("send-button") || testId.includes("composer-submit") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
   }
   function hasStopControl() {
     const selectors = ['button[data-testid*="stop"]', 'button[aria-label*="Stop"]', 'button[aria-label*="stop"]', 'button[aria-label*="停止"]', 'button[aria-label*="中止"]', 'button[aria-label*="取消生成"]'];
