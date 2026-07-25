@@ -1,0 +1,92 @@
+name: Apply conversation lease refactor
+
+on:
+  push:
+    branches:
+      - fix/conversation-lease-instance-guard
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.head_commit.message == 'chore: apply conversation lease refactor'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/conversation-lease-instance-guard
+          fetch-depth: 0
+
+      - name: Bind leases to the exact page instance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('queue-v060.js')
+          source = path.read_text(encoding='utf-8')
+
+          replacements = [
+              (
+                  '  const core = globalThis.ChatGPTQueueCore;\n  if (!core) return;\n',
+                  '  const core = globalThis.ChatGPTQueueCore;\n  const leaseGuard = globalThis.ChatGPTQueueLeaseGuard;\n  if (!core || !leaseGuard) return;\n'
+              ),
+              (
+                  '    const ownerQueueKey = String(lease.ownerQueueKey || "");\n    const expiresAt = Number(lease.expiresAt || 0);\n    return Number.isInteger(ownerTabId) && ownerInstanceId && ownerQueueKey && expiresAt\n      ? { ownerTabId, ownerInstanceId, ownerQueueKey, expiresAt }\n      : null;\n',
+                  '    const ownerQueueKey = String(lease.ownerQueueKey || "");\n    const leaseId = String(lease.leaseId || "");\n    const expiresAt = Number(lease.expiresAt || 0);\n    return Number.isInteger(ownerTabId) && ownerInstanceId && ownerQueueKey && expiresAt\n      ? { ownerTabId, ownerInstanceId, ownerQueueKey, leaseId, expiresAt }\n      : null;\n'
+              ),
+              (
+                  '  function hasOtherConversationLease(now = Date.now()) {\n    const lease = runtime.conversationLease;\n    return Boolean(lease && lease.ownerTabId !== runtime.tabId && lease.expiresAt > now);\n  }\n',
+                  '  function isCurrentLeaseOwner(lease) {\n    return Boolean(lease && lease.ownerTabId === runtime.tabId && lease.ownerInstanceId === runtime.instanceId && lease.ownerQueueKey === runtime.queueKey);\n  }\n\n  function hasOtherConversationLease(now = Date.now()) {\n    const lease = runtime.conversationLease;\n    return Boolean(lease && !isCurrentLeaseOwner(lease) && lease.expiresAt > now);\n  }\n'
+              ),
+              (
+                  '      const current = normalizeConversationLease(leases[runtime.conversationKey]);\n      if (current && current.ownerTabId !== runtime.tabId && current.expiresAt > now) {\n        runtime.conversationLease = current;\n        return;\n      }\n      const next = {\n        ownerTabId: runtime.tabId,\n        ownerInstanceId: runtime.instanceId,\n        ownerQueueKey: runtime.queueKey,\n        expiresAt: now + LEASE_TTL_MS\n      };\n',
+                  '      const current = normalizeConversationLease(leases[runtime.conversationKey]);\n      const samePageOwner = Boolean(current && current.ownerTabId === runtime.tabId && current.ownerInstanceId === runtime.instanceId);\n      const newerPageInSameTab = Boolean(\n        current &&\n        current.ownerTabId === runtime.tabId &&\n        current.ownerInstanceId !== runtime.instanceId &&\n        leaseGuard.compareInstanceAge(runtime.instanceId, current.ownerInstanceId) > 0\n      );\n      if (current && !samePageOwner && !newerPageInSameTab && current.expiresAt > now) {\n        runtime.conversationLease = current;\n        return;\n      }\n      const next = {\n        ownerTabId: runtime.tabId,\n        ownerInstanceId: runtime.instanceId,\n        ownerQueueKey: runtime.queueKey,\n        leaseId: core.createId("lease"),\n        expiresAt: now + LEASE_TTL_MS\n      };\n'
+              ),
+              (
+                  '    return Boolean(verified && verified.ownerTabId === runtime.tabId && verified.ownerQueueKey === runtime.queueKey && verified.expiresAt > Date.now());\n',
+                  '    return Boolean(verified && isCurrentLeaseOwner(verified) && verified.expiresAt > Date.now());\n'
+              ),
+              (
+                  '    if (runtime.conversationLease?.ownerTabId !== runtime.tabId) return;\n',
+                  '    if (!isCurrentLeaseOwner(runtime.conversationLease)) return;\n'
+              ),
+              (
+                  '      if (!current || current.ownerTabId !== runtime.tabId) {\n        runtime.conversationLease = current;\n        return;\n      }\n',
+                  '      if (!isCurrentLeaseOwner(current)) {\n        runtime.conversationLease = current;\n        return;\n      }\n'
+              ),
+              (
+                  '      if (!current || current.ownerTabId !== runtime.tabId) return;\n',
+                  '      if (!isCurrentLeaseOwner(current)) return;\n'
+              ),
+          ]
+
+          for old, new in replacements:
+              count = source.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one match, found {count}: {old[:100]!r}')
+              source = source.replace(old, new, 1)
+
+          path.write_text(source, encoding='utf-8')
+          PY
+
+      - name: Validate patched extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do node --check "$file"; done < <(find . -maxdepth 1 -type f -name '*.js' -print0 | sort -z)
+          for test_file in tests/*.test.js; do node "$test_file"; done
+          python3 -m json.tool manifest.json >/dev/null
+
+      - name: Commit generated refactor
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-conversation-lease-refactor.yml
+          git add queue-v060.js
+          git commit -m "fix: bind conversation lease to page instance [skip ci]"
+          git push origin HEAD:fix/conversation-lease-instance-guard
