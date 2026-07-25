@@ -2,6 +2,13 @@
 
 Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任务完成、等待确认或失败时发送 Windows 通知，并提供当前会话内的消息队列。
 
+## v0.6.7 核心变化
+
+- 修复从 ChatGPT 项目主页新建聊天后，SPA 跳转保留隐藏旧输入框，导致正式会话中的新内容无法加入队列的问题。
+- 新增活动输入框适配器，优先选择当前聚焦、可见且可用的输入框；若页面短时间挂载多个输入框，则选择最新的可见实例。
+- 任务监控和消息队列继续复用原有输入框逻辑，但所有 `querySelector` 读取都会先经过统一适配，避免两个模块再次出现不同判断。
+- 增加真实项目主页、项目正式会话 URL、隐藏旧输入框和重复输入框挂载的回归测试。
+
 ## v0.6.6 核心变化
 
 - 队列仍按“标签页 + 会话”独立保存，执行权仍按 ChatGPT 会话唯一互斥。
@@ -62,6 +69,7 @@ Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任�
 - 支持删除、上移、下移、暂停、继续和失败重试。
 - 队列按“标签页 + 会话”隔离；同一会话的多个标签页不会共享队列，但会竞争唯一自动执行权。
 - 执行权按标签页和当前页面实例共同识别，旧页面实例无法干扰刷新后的新页面。
+- 项目主页进入正式会话后，扩展会忽略遗留的隐藏输入框并绑定当前可见输入框。
 - 单条队列消息最多保存 200,000 个字符；界面只显示短预览。
 
 ## 通知格式
@@ -95,6 +103,7 @@ Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任�
 ```bash
 node --check background.js
 node --check queue-lease-guard.js
+node --check chatgpt-dom.js
 node --check queue-core.js
 node --check content.js
 node --check queue-v060.js
@@ -104,6 +113,7 @@ node tests/background.test.js
 node tests/content.test.js
 node tests/queue.test.js
 node tests/lease-guard.test.js
+node tests/dom-adapter.test.js
 ```
 
 ## 项目结构
@@ -111,9 +121,10 @@ node tests/lease-guard.test.js
 - `background.js`：当前页面任务状态、会话 URL 绑定、通知和面板消息路由。
 - `content.js`：ChatGPT 页面任务状态识别和草稿页到正式会话的安全迁移。
 - `queue-lease-guard.js`：为每个页面文档生成独立身份，并保护会话级执行租约不被旧页面实例误刷新或误释放。
+- `chatgpt-dom.js`：统一选择当前聚焦、可见且可用的 ChatGPT 输入框，过滤项目跳转残留的隐藏旧输入框。
 - `queue-core.js`：消息队列数据结构和纯函数。
 - `queue-v060.js`：队列 UI、拆分存储、实时状态纠偏和自动发送。
 - `popup.*`：扩展设置和最近任务。
-- `tests/`：静态架构、任务生命周期、旧数据兼容、租约竞争和队列纯函数测试。
+- `tests/`：静态架构、任务生命周期、项目路由、输入框选择、旧数据兼容、租约竞争和队列纯函数测试。
 
 > ChatGPT 和相关图标归 OpenAI 所有。本项目为非官方浏览器扩展，与 OpenAI 不存在隶属或背书关系。
