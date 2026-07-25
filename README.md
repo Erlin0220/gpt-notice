@@ -2,6 +2,18 @@
 
 Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任务完成、等待确认或失败时发送 Windows 通知，并提供当前会话内的消息队列。
 
+## v0.6.12 核心变化
+
+- 页面刷新后，未完成的队列会统一进入暂停状态，不再自动续发旧页面留下的 pending 消息。
+- 队列元数据记录页面文档实例；刷新产生的新文档可以识别旧文档队列，并清除旧的执行状态与会话租约。
+- 用户确认点击“继续”后，队列才恢复自动发送，避免刷新期间重复提交或意外覆盖。
+
+## v0.6.11 核心变化
+
+- 修复自动续发早于上一条任务完成通知落库的竞态，避免相邻两条消息共用一个任务记录、少发一次通知。
+- 自动队列现在必须等待任务提醒桥结束上一条任务后才发送下一条；“立即执行”仍以实时 DOM 判断纠正过期状态。
+- 新增 Playwright 无登录扩展回归，并支持附加到已登录的 Chrome Profile 2 进行真实 Team 项目会话验收。
+
 ## v0.6.10 核心变化
 
 - 兼容 ChatGPT 新会话的 `WEB:临时ID` 路由；地址切换到正式会话 ID 时继续监控，不再错误取消任务。
@@ -133,6 +145,19 @@ node tests/queue.test.js
 node tests/lease-guard.test.js
 node tests/dom-adapter.test.js
 ```
+
+浏览器扩展 E2E：
+
+```bash
+npm install
+npm run e2e:install
+npm run e2e:smoke
+npm run e2e:profile2:prepare
+npm run e2e:profile2:attach
+npm run e2e:profile2:snapshot
+```
+
+无登录冒烟测试使用 Playwright Chromium。真实 ChatGPT Team 测试直接附加到已登录并已安装扩展的 Chrome Profile 2，避免在自动化浏览器中重复登录和触发真人验证。测试证据保存在 `test-results/`，详细说明见 `docs/PLAYWRIGHT-E2E.md`。
 
 ## 项目结构
 

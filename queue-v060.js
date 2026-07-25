@@ -28,6 +28,7 @@
 
   const runtime = {
     instanceId: getStableInstanceId(),
+    documentStartedAt: Math.floor(performance.timeOrigin || Date.now()),
     temporaryKey: getTemporaryKey(),
     tabId: null,
     conversationKey: "",
@@ -318,10 +319,10 @@
   }
 
   async function recoverInterruptedQueue() {
-    if (!runtime.queue || !core.shouldRecoverInterruptedQueue(runtime.queue)) return;
+    if (!runtime.queue || !core.shouldPauseQueueAfterPageReload(runtime.queue, runtime.instanceId, runtime.documentStartedAt)) return;
     runtime.queue = await mutateCurrentQueue((current) => {
-      if (!core.shouldRecoverInterruptedQueue(current)) return current;
-      return core.resetInterruptedItems(current);
+      if (!core.shouldPauseQueueAfterPageReload(current, runtime.instanceId, runtime.documentStartedAt)) return current;
+      return core.pauseQueueAfterPageReload(current);
     });
     await releaseLease(runtime.conversationKey);
   }
@@ -401,7 +402,7 @@
   function canPrepareQueueDispatch(queue, snapshot, now = Date.now()) {
     const normalized = core.normalizeQueue(queue, runtime.queueKey);
     if (normalized.paused || normalized.activeItemId || !core.getNextPendingItem(normalized) || normalized.nextDispatchAt > now) return false;
-    if (!snapshot.composerReady || snapshot.domRunning || snapshot.taskRunning || snapshot.visibleError || snapshot.manualHold) return false;
+    if (!snapshot.composerReady || snapshot.domRunning || snapshot.taskRunning || snapshot.bridgeRunning || snapshot.visibleError || snapshot.manualHold) return false;
     return snapshot.stableForMs >= 4_000;
   }
 
@@ -960,6 +961,7 @@
       paused: Boolean(metadata?.paused),
       nextDispatchAt: Number(metadata?.nextDispatchAt || 0),
       ownerTabId: metadata?.ownerTabId !== null && metadata?.ownerTabId !== undefined && Number.isInteger(Number(metadata.ownerTabId)) ? Number(metadata.ownerTabId) : null,
+      ownerInstanceId: String(metadata?.ownerInstanceId || ""),
       items: (metadata?.items || []).map((item) => [item.id, item.status, item.retryCount, item.startedAt, item.finishedAt, item.error])
     });
   }
@@ -978,6 +980,7 @@
       next.revision = previous.revision + 1;
       next.updatedAt = Date.now();
       next.ownerTabId = runtime.tabId;
+      next.ownerInstanceId = runtime.instanceId;
       if (!next.conversationUrl) next.conversationUrl = key === runtime.queueKey ? location.href : previous.conversationUrl;
       return persistQueueUnlocked(key, next, previous);
     }));
@@ -990,7 +993,7 @@
   }
 
   async function persistQueueUnlocked(key, queue, previous = core.normalizeQueue({}, key)) {
-    const normalized = core.normalizeQueue({ ...queue, ownerTabId: runtime.tabId }, key);
+    const normalized = core.normalizeQueue({ ...queue, ownerTabId: runtime.tabId, ownerInstanceId: runtime.instanceId }, key);
     const oldById = new Map(previous.items.map((item) => [item.id, item]));
     const setValues = {};
     for (const item of normalized.items) {

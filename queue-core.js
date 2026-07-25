@@ -62,6 +62,7 @@
       conversationKey: String(conversationKey || queue.conversationKey || ""),
       conversationUrl: String(queue.conversationUrl || ""),
       ownerTabId: queue.ownerTabId !== null && queue.ownerTabId !== undefined && Number.isInteger(Number(queue.ownerTabId)) ? Number(queue.ownerTabId) : null,
+      ownerInstanceId: String(queue.ownerInstanceId || ""),
       paused: Boolean(queue.paused),
       activeItemId: activeItem && ["dispatching", "running"].includes(activeItem.status) ? activeItem.id : null,
       nextDispatchAt: Math.max(0, Number(queue.nextDispatchAt || 0)),
@@ -141,7 +142,7 @@
     const normalized = normalizeQueue(queue);
     if (normalized.paused || normalized.activeItemId || !getNextPendingItem(normalized)) return false;
     if (normalized.nextDispatchAt > now) return false;
-    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.visibleError) return false;
+    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.bridgeRunning || snapshot.visibleError) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
     if (snapshot.busy && stableForMs < 8_000) return false;
     if (snapshot.manualHold || snapshot.composerEmpty === false) return false;
@@ -176,6 +177,34 @@
     return Boolean(normalizeQueue(queue).activeItemId);
   }
 
+  function shouldPauseQueueAfterPageReload(queue, currentInstanceId = "", documentStartedAt = 0) {
+    const normalized = normalizeQueue(queue);
+    const hasUnfinishedWork = normalized.items.some((item) => ["pending", "dispatching", "running"].includes(item.status));
+    if (!hasUnfinishedWork) return false;
+    if (normalized.ownerInstanceId && currentInstanceId) return normalized.ownerInstanceId !== String(currentInstanceId);
+    const startedAt = Math.max(0, Number(documentStartedAt || 0));
+    return Boolean(startedAt && normalized.updatedAt && normalized.updatedAt < startedAt);
+  }
+
+  function pauseQueueAfterPageReload(queue) {
+    const normalized = normalizeQueue(queue);
+    const now = Date.now();
+    normalized.items = normalized.items.map((item) => ["pending", "dispatching", "running"].includes(item.status)
+      ? {
+          ...item,
+          status: "pending",
+          startedAt: null,
+          finishedAt: null,
+          error: "页面已刷新，队列已暂停，请确认后继续"
+        }
+      : item);
+    normalized.activeItemId = null;
+    normalized.paused = normalized.items.some((item) => item.status === "pending");
+    normalized.nextDispatchAt = now + 2_000;
+    normalized.updatedAt = now;
+    return normalized;
+  }
+
   function resetInterruptedItems(queue) {
     const normalized = normalizeQueue(queue);
     const now = Date.now();
@@ -193,6 +222,7 @@
     QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
     cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId, isProvisionalConversationId,
     getConversationKey, getTabQueueKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
-    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue, resetInterruptedItems
+    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue,
+    shouldPauseQueueAfterPageReload, pauseQueueAfterPageReload, resetInterruptedItems
   };
 });

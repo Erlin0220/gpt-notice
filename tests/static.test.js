@@ -69,6 +69,10 @@ assert.ok(queue.includes("replaceChildren(document.createTextNode(text))"), "com
 assert.ok(queue.includes("suppressComposerMutations"), "programmatic writes must suppress observer churn");
 assert.ok(queue.includes("reconcilePageStateForAction"), "manual execution must repair stale state");
 assert.ok(queue.includes("resolveEffectiveTaskRunning"), "cached notifier state must be corrected with live DOM state");
+assert.ok(queue.includes("snapshot.bridgeRunning || snapshot.visibleError"), "automatic queue dispatch must wait for the previous notifier task and notification to finish");
+assert.ok(core.includes("shouldPauseQueueAfterPageReload"), "pending queue work must be recognized across full page reloads");
+assert.ok(core.includes("pauseQueueAfterPageReload"), "reload recovery must pause unfinished queue items instead of auto-sending them");
+assert.ok(queue.includes("ownerInstanceId"), "queue metadata must record the page document that last owned it");
 assert.ok(queue.includes('data-action="execute-now"'));
 assert.ok(queue.includes('class="gptq-confirm"'));
 assert.ok(queue.includes("event.stopImmediatePropagation()"));
@@ -84,7 +88,7 @@ assert.ok(queue.includes("resolveQueueKey"), "queue storage must be scoped by ta
 assert.ok(!queue.includes("loadQueue(runtime.conversationKey)"), "tab queue operations must never load the shared conversation key");
 assert.ok(queue.includes("ownerTabId"), "queue metadata must record its owning tab");
 assert.ok(queue.includes("hasOtherConversationLease"), "waiting tabs must recognize another tab's conversation lease");
-assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a refreshed tab must safely recover its own interrupted queue");
+assert.ok(queue.includes("shouldPauseQueueAfterPageReload"), "a refreshed tab must pause unfinished queue work from the previous page document");
 assert.ok(background.includes('case "GET_TAB_CONTEXT"'), "content scripts must obtain the real Chrome tab id from the service worker");
 assert.ok(background.includes("cleanupQueueStateForClosedTab"), "closing a tab must clean its queue and lease state");
 assert.ok(queue.includes("if (runtime.sendConfirmation || runtime.dispatching) return;"), "manual reconciliation must not race an unconfirmed send");
@@ -118,5 +122,7 @@ assert.ok(ci.includes("pull_request:"));
 const release = fs.readFileSync(path.join(root, ".github/workflows/auto-release.yml"), "utf8");
 assert.ok(!release.includes("types: [closed]"));
 assert.ok(!/Validate extension\n\s+if:/.test(release), "release validation must never be skipped");
+assert.ok(release.includes("--exclude='playwright.config.js'"), "release packages must exclude Playwright-only development files");
+assert.ok(ci.includes("--exclude='package-lock.json'"), "CI extension artifacts must exclude npm development metadata");
 
 console.log(`static v${manifest.version} tests passed`);

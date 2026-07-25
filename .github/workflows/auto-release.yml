@@ -89,7 +89,17 @@ jobs:
             --exclude='dist/' \
             --exclude='package/' \
             --exclude='node_modules/' \
-            --exclude='tests/'
+            --exclude='tests/' \
+            --exclude='scripts/' \
+            --exclude='docs/' \
+            --exclude='.test-profile/' \
+            --exclude='.playwright-cli/' \
+            --exclude='test-results/' \
+            --exclude='playwright-report/' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            --exclude='playwright.config.js' \
+            --exclude='.gitignore'
           cd package
           zip -qr "../dist/chatgpt-task-notifier-v${VERSION}.zip" chatgpt-task-notifier
           cd ../dist

@@ -29,7 +29,22 @@ jobs:
         shell: bash
         run: |
           mkdir -p artifact/chatgpt-task-notifier
-          rsync -a ./ artifact/chatgpt-task-notifier/ --exclude='.git/' --exclude='.github/' --exclude='artifact/' --exclude='tests/' --exclude='scripts/'
+          rsync -a ./ artifact/chatgpt-task-notifier/ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='artifact/' \
+            --exclude='tests/' \
+            --exclude='scripts/' \
+            --exclude='docs/' \
+            --exclude='node_modules/' \
+            --exclude='.test-profile/' \
+            --exclude='.playwright-cli/' \
+            --exclude='test-results/' \
+            --exclude='playwright-report/' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            --exclude='playwright.config.js' \
+            --exclude='.gitignore'
       - uses: actions/upload-artifact@v4
         with:
           name: extension-under-test

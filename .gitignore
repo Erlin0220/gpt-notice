@@ -1,2 +1,7 @@
 *.zip
 .DS_Store
+node_modules/
+.test-profile/
+test-results/
+playwright-report/
+.playwright-cli/

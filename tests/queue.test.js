@@ -36,6 +36,7 @@ assert.equal(core.canAdmit(queue, idleSnapshot), false);
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, busy: true }), true);
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, bridgeRunning: true }), true, "tracked tasks must remain admissible during temporary DOM-idle gaps");
 assert.equal(core.canDispatch(queue, idleSnapshot), true);
+assert.equal(core.canDispatch(queue, { ...idleSnapshot, bridgeRunning: true }), false, "automatic dispatch must wait for the notifier to finish the previous task and notification");
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }), false);
 
 const runningQueue = core.normalizeQueue({
@@ -57,6 +58,20 @@ assert.equal(core.isItemCompleted(active, {
 }), false, "without a copy action the four-second text stability fallback must remain");
 
 assert.equal(core.shouldRecoverInterruptedQueue(runningQueue), true, "a tab-scoped interrupted active item must be recovered by its own tab");
+assert.equal(core.shouldPauseQueueAfterPageReload(
+  core.normalizeQueue({ ownerInstanceId: "page-old", items: [itemB] }, "tab:7:c:test"),
+  "page-new",
+  Date.now()
+), true, "pending work from an older page document must pause after refresh");
+assert.equal(core.shouldPauseQueueAfterPageReload(
+  core.normalizeQueue({ ownerInstanceId: "page-current", items: [itemB] }, "tab:7:c:test"),
+  "page-current",
+  Date.now()
+), false, "same-document pending work must keep running normally");
+const reloadPaused = core.pauseQueueAfterPageReload(core.normalizeQueue({ ownerInstanceId: "page-old", items: [itemB] }, "tab:7:c:test"));
+assert.equal(reloadPaused.paused, true);
+assert.equal(reloadPaused.items[0].status, "pending");
+assert.match(reloadPaused.items[0].error, /页面已刷新/);
 assert.equal(core.hasLeaseWork(runningQueue), true);
 assert.equal(core.hasLeaseWork(core.normalizeQueue({ items: [itemB], paused: true }, "tab:7:c:test")), false, "a paused queue without an active item must release the conversation lease");
 
@@ -70,4 +85,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.10 tests passed");
+console.log("queue v0.6.12 tests passed");
