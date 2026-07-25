@@ -43,4 +43,4 @@ assert.equal(guard.isLeaseOwner({ ...lease, ownerQueueKey: "tab:7:session:c:othe
 
 assert.equal(guard.preparePageInstance({}, 30_000, 0.51), "", "missing sessionStorage must fail safely");
 
-console.log("conversation lease page-instance tests passed");
+console.log("conversation lease page-instance and fencing tests passed");
