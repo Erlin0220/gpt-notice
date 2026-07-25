@@ -117,6 +117,17 @@ async function send(message, tab = tabs.get(7)) {
     thinkingTimeText: "思考了 3s"
   });
   assert.equal(calls.notifications.length, 1);
+
+  tabs.get(7).url = "https://chatgpt.com/c/WEB:4fc9b63f-709a-4831-9b4b-0075d7aa4a1a";
+  const provisionalTask = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "临时 WEB 会话" });
+  assert.equal(storage.tasks[provisionalTask.task.id].status, "running");
+  assert.ok(storage.tasks[provisionalTask.task.id].urlPromotionExpiresAt > Date.now(), "a provisional WEB route must retain its promotion window");
+  tabs.get(7).url = "https://chatgpt.com/c/6a644987-cb58-83ee-a60c-3f34b6cca532";
+  const promotedWebReady = await send({ type: "PAGE_READY", url: tabs.get(7).url });
+  assert.equal(promotedWebReady.task.id, provisionalTask.task.id, "WEB provisional id promotion must keep the active task");
+  assert.equal(storage.tasks[provisionalTask.task.id].status, "running");
+  assert.match(storage.tasks[provisionalTask.task.id].url, /6a644987-cb58-83ee-a60c-3f34b6cca532/);
+  await send({ type: "TASK_STATE", taskId: provisionalTask.task.id, status: "completed", url: tabs.get(7).url, assistantFirstLine: "WEB 提升完成" });
   assert.equal(calls.tabsCreate.length, 0, "completion must not create a tab");
 
   tabs.get(7).url = "https://chatgpt.com/c/same-thread";
@@ -174,7 +185,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(storage.messageQueueConversationLeasesV1["c:close"], undefined, "closed tab lease must be released");
   assert.ok(storage.messageQueueConversationLeasesV1["c:other"]);
 
-  console.log("background v0.6.9 tests passed");
+  console.log("background v0.6.10 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

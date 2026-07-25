@@ -23,6 +23,9 @@ assert.equal(core.normalizeQueue({}, "tab:7:page-a:c:abc").ownerTabId, null, "an
 assert.equal(core.shouldMigrateQueue("temp:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("project-draft:g-p-demo:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("c:old", "c:new"), false);
+assert.equal(core.isProvisionalConversationId("WEB:4fc9b63f-709a-4831-9b4b-0075d7aa4a1a"), true);
+assert.equal(core.shouldMigrateQueue("c:WEB:4fc9b63f-709a-4831-9b4b-0075d7aa4a1a", "c:6a644987-cb58-83ee-a60c-3f34b6cca532"), true, "a provisional WEB route queue must migrate to the final conversation id");
+assert.equal(core.shouldMigrateQueue("c:6a644987-cb58-83ee-a60c-3f34b6cca532", "c:WEB:temporary"), false);
 
 const longText = "长".repeat(150_000);
 assert.equal(core.createQueueItem(longText).text.length, 150_000, "long queue messages must not be truncated to 20k");
@@ -67,4 +70,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.9 tests passed");
+console.log("queue v0.6.10 tests passed");

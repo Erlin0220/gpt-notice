@@ -104,12 +104,19 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   mainButtons.length = 0;
 
   userMessages.push(new FakeElement({ text: "测试发送" }));
+  const provisionalConversationUrl = "https://chatgpt.com/c/WEB:4fc9b63f-709a-4831-9b4b-0075d7aa4a1a";
+  location.href = provisionalConversationUrl;
+  await intervals[0]();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "project-draft-to-provisional conversation promotion must not cancel the pending task");
+  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "the first task must start after ChatGPT assigns a provisional WEB conversation URL");
+  assert.match(calls.find((call) => call.type === "TASK_STARTED").url, /\/c\/WEB:/);
+
   location.href = projectConversationUrl;
   await intervals[0]();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "project-draft-to-conversation promotion must not cancel the pending task");
-  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "the first task must start after ChatGPT assigns a project conversation URL");
-  assert.match(calls.find((call) => call.type === "TASK_STARTED").url, /\/c\/6a641d0e-bbb0-83e8-995e-14b42efe9c71/);
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "WEB provisional id promotion must not be treated as switching conversations");
+  assert.equal(calls.filter((call) => call.type === "PAGE_PROMOTED").length, 1, "the final conversation URL must promote the provisional WEB route");
 
   location.href = "https://chatgpt.com/g/g-p-another-wrapper/c/6a641d0e-bbb0-83e8-995e-14b42efe9c71";
   await intervals[0]();
@@ -144,7 +151,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.6.9 lifecycle tests passed");
+  console.log("content v0.6.10 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

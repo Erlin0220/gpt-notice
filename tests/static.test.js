@@ -32,6 +32,8 @@ assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop th
 assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
 assert.ok(content.includes("PAGE_PROMOTED"), "draft-to-conversation navigation must preserve the active task");
 assert.ok(content.includes("isConversationPromotion"), "URL promotion must be explicitly constrained");
+assert.ok(content.includes("isProvisionalConversationId"), "temporary WEB conversation ids must be promoted instead of cancelled");
+assert.ok(background.includes("isPromotableTaskUrl"), "the background task must keep a promotion window for WEB routes");
 assert.ok(content.includes('copy-turn-action-button'), "task completion must recognize the reply copy action");
 assert.ok(content.includes("COPY_ACTION_STABLE_MS"), "copy action completion needs a short settling interval");
 assert.ok(content.includes("isAmbiguousConversationTransition"), "temporary navigation during tab restoration must use a grace period");
@@ -54,6 +56,7 @@ assert.ok(queue.includes('leaseId: core.createId("lease")'), "each new conversat
 assert.ok(queue.includes("expectedLeaseId"), "refresh and release operations must fence stale lease calls");
 assert.ok(queue.includes("runtime.conversationLease?.leaseId"), "the caller must provide the lease id it actually owns");
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
+assert.ok(core.includes("isProvisionalConversationId"), "queue keys must recognize temporary WEB conversation ids");
 assert.ok(core.includes("canAdmit"));
 assert.ok(core.includes("snapshot?.bridgeRunning"), "queue admission must trust the tracked task during transient DOM-idle gaps");
 assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");

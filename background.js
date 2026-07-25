@@ -208,7 +208,7 @@ async function handleTaskStarted(message, sender) {
     task.tabId = tab.id;
     task.windowId = tab.windowId;
     task.url = nextUrl;
-    task.urlPromotionExpiresAt = isDraftChatUrl(nextUrl) ? now + URL_PROMOTION_WINDOW_MS : 0;
+    task.urlPromotionExpiresAt = isPromotableTaskUrl(nextUrl) ? now + URL_PROMOTION_WINDOW_MS : 0;
     task.title = cleanText(message.questionTitle || message.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.title, 240);
     task.baselineAssistantHash = String(message.baselineAssistantHash || "");
@@ -638,7 +638,7 @@ function cancelTaskRecord(task, reason) {
 
 function promoteTaskUrl(task, nextUrl, tab = null) {
   task.url = sanitizeChatUrl(nextUrl || task.url);
-  task.urlPromotionExpiresAt = 0;
+  task.urlPromotionExpiresAt = isProvisionalConversationId(getConversationId(task.url)) ? Date.now() + URL_PROMOTION_WINDOW_MS : 0;
   if (Number.isInteger(tab?.id)) task.tabId = tab.id;
   if (Number.isInteger(tab?.windowId)) task.windowId = tab.windowId;
   task.observerMode = "current_page";
@@ -648,7 +648,11 @@ function promoteTaskUrl(task, nextUrl, tab = null) {
 
 function canPromoteTaskUrl(task, nextUrl, now = Date.now()) {
   if (!task || !ACTIVE_STATUSES.has(task.status)) return false;
-  if (!isDraftChatUrl(task.url) || !getConversationId(nextUrl)) return false;
+  const currentId = getConversationId(task.url);
+  const nextId = getConversationId(nextUrl);
+  const draftPromotion = isDraftChatUrl(task.url) && Boolean(nextId);
+  const provisionalPromotion = isProvisionalConversationId(currentId) && Boolean(nextId) && !isProvisionalConversationId(nextId);
+  if (!draftPromotion && !provisionalPromotion) return false;
   return Number(task.urlPromotionExpiresAt || 0) >= now;
 }
 
@@ -658,6 +662,14 @@ function getConversationId(value) {
   } catch {
     return "";
   }
+}
+
+function isProvisionalConversationId(value) {
+  return /^WEB:/i.test(String(value || "").trim());
+}
+
+function isPromotableTaskUrl(value) {
+  return isDraftChatUrl(value) || isProvisionalConversationId(getConversationId(value));
 }
 
 function isDraftChatUrl(value) {

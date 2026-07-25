@@ -546,6 +546,9 @@
       return "";
     }
   }
+  function isProvisionalConversationId(value) {
+    return /^WEB:/i.test(String(value || "").trim());
+  }
   function isDraftChatUrl(value) {
     try {
       const pathname = new URL(value, location.origin).pathname.replace(/\/+$/, "") || "/";
@@ -556,7 +559,11 @@
   }
   function isConversationPromotion(previousUrl, currentUrl, now = Date.now()) {
     const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= URL_PROMOTION_WINDOW_MS);
-    return isDraftChatUrl(previousUrl) && Boolean(getConversationId(currentUrl)) && (state.running || recentSubmission);
+    const previousId = getConversationId(previousUrl);
+    const currentId = getConversationId(currentUrl);
+    const draftPromotion = isDraftChatUrl(previousUrl) && Boolean(currentId);
+    const provisionalPromotion = isProvisionalConversationId(previousId) && Boolean(currentId) && !isProvisionalConversationId(currentId);
+    return (draftPromotion || provisionalPromotion) && (state.running || recentSubmission);
   }
   function isAmbiguousConversationTransition(previousUrl, currentUrl) {
     const previousId = getConversationId(previousUrl);

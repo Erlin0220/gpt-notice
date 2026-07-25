@@ -84,6 +84,10 @@
     }
   }
 
+  function isProvisionalConversationId(value) {
+    return /^WEB:/i.test(String(value || "").trim());
+  }
+
   function getConversationKey(value, temporaryKey = "", discoveredConversationId = "") {
     try {
       const url = new URL(value || "https://chatgpt.com/");
@@ -108,7 +112,11 @@
   }
 
   function shouldMigrateQueue(fromKey, toKey) {
-    return Boolean(fromKey && toKey && fromKey !== toKey && toKey.startsWith("c:") && (fromKey.startsWith("temp:") || fromKey.startsWith("project-draft:")));
+    if (!fromKey || !toKey || fromKey === toKey || !toKey.startsWith("c:")) return false;
+    if (fromKey.startsWith("temp:") || fromKey.startsWith("project-draft:")) return true;
+    const fromConversationId = fromKey.startsWith("c:") ? fromKey.slice(2) : "";
+    const toConversationId = toKey.slice(2);
+    return isProvisionalConversationId(fromConversationId) && !isProvisionalConversationId(toConversationId);
   }
 
   function getPendingItems(queue) { return normalizeQueue(queue).items.filter((item) => item.status === "pending"); }
@@ -183,7 +191,7 @@
 
   return {
     QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
-    cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId,
+    cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId, isProvisionalConversationId,
     getConversationKey, getTabQueueKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
     hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue, resetInterruptedItems
   };
