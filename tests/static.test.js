@@ -25,6 +25,8 @@ assert.ok(content.includes("ChatGPTTaskNotifierBridge"));
 assert.ok(!content.includes("location.reload()"));
 assert.ok(!content.includes("isMonitor"), "obsolete background-monitor mode must be removed");
 assert.ok(content.includes("pendingConfirmed"), "task creation must wait for send confirmation");
+assert.ok(content.includes("pendingBaselineUserHash"), "task creation must require evidence of a new user message");
+assert.ok(!content.includes("userCount > state.lastUserCount || snapshot.domRunning"), "busy DOM alone must not create a task");
 assert.ok(content.includes("sendWithRetry"), "task state messages must retry transient failures");
 assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop the previous task");
 assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
@@ -92,8 +94,17 @@ assert.ok(queue.indexOf('else if (queue.paused) status.textContent') < queue.ind
 assert.ok(content.includes('id === "composer-submit-button"'), "task tracking must recognize the current send button id");
 assert.ok(queue.includes('mode === "auto-execute" ? "auto" : "manual"'), "auto overwrite confirmation must retain automatic dispatch safety checks");
 assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
+assert.ok(queue.includes("输入框内容已变化，未加入队列"), "enqueue must preserve text typed while the async action is pending");
+assert.ok(queue.includes("timer = setTimeout(finish, 100)"), "background tabs need a timer fallback when requestAnimationFrame is suspended");
+assert.ok(queue.includes("void nextFrame().then"), "UI rendering must not depend on requestAnimationFrame alone");
+const enqueueSection = queue.slice(queue.indexOf("async function enqueueComposerText"), queue.indexOf("async function dispatchNextItem"));
+assert.ok(enqueueSection.indexOf("const text = getComposerTextRaw();") < enqueueSection.indexOf("runtime.queue = await loadQueue(runtime.queueKey);"), "enqueue must snapshot the composer before its first async queue read");
 assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");
 assert.ok(!queue.includes("window.prompt("));
+
+const updater = fs.readFileSync(path.join(root, "scripts", "update-installed-extension.ps1"), "utf8");
+assert.ok(updater.includes("backupPath"), "Windows updater must back up the installed directory");
+assert.ok(updater.includes("chrome://extensions/"), "Windows updater must remind the user to reload Chrome");
 
 const privacy = fs.readFileSync(path.join(root, "PRIVACY.md"), "utf8");
 assert.ok(!privacy.includes("GPT 后台"));

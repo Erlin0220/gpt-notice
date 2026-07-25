@@ -24,6 +24,8 @@
     lastAssistantHasCopyAction: false,
     lastSettledAssistantHash: "",
     lastUserCount: 0,
+    pendingBaselineUserCount: 0,
+    pendingBaselineUserHash: "",
     pendingPrompt: "",
     pendingBaselineHash: "",
     pendingBaselineCopyActionCount: 0,
@@ -138,6 +140,9 @@
     const prompt = getComposerText();
     if (!prompt) return;
     const assistant = getLatestAssistant();
+    const latestUserText = getLatestUserText();
+    state.pendingBaselineUserCount = getUserMessages().length;
+    state.pendingBaselineUserHash = hashText(latestUserText);
     state.pendingPrompt = prompt;
     state.pendingBaselineHash = assistant.hash || state.lastSettledAssistantHash || "";
     state.pendingBaselineCopyActionCount = getCopyTurnActionCount();
@@ -176,7 +181,14 @@
       if (state.restoredAt && snapshot.domRunning) state.restoredObservedRunning = true;
 
       const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS);
-      if (recentSubmission && (userCount > state.lastUserCount || snapshot.domRunning)) state.pendingConfirmed = true;
+      const latestUserText = getLatestUserText();
+      const latestUserHash = hashText(latestUserText);
+      const userMessageConfirmed = userCount > state.pendingBaselineUserCount || Boolean(
+        latestUserHash &&
+        latestUserHash !== state.pendingBaselineUserHash &&
+        samePromptText(latestUserText, state.pendingPrompt)
+      );
+      if (recentSubmission && userMessageConfirmed) state.pendingConfirmed = true;
       if (!recentSubmission && !state.running) clearPendingSubmission();
 
       if (!state.running && state.pendingConfirmed && now >= state.nextStartAttemptAt) {
@@ -394,6 +406,8 @@
   }
 
   function clearPendingSubmission() {
+    state.pendingBaselineUserCount = 0;
+    state.pendingBaselineUserHash = "";
     state.pendingPrompt = "";
     state.pendingBaselineHash = "";
     state.pendingBaselineCopyActionCount = 0;
@@ -592,6 +606,12 @@
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
+  }
+  function samePromptText(left, right) {
+    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const normalizedLeft = normalize(left);
+    const normalizedRight = normalize(right);
+    return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
   }
   function cleanText(value, maxLength) { return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength); }
   function hashText(text) {

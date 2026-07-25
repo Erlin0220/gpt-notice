@@ -37,6 +37,7 @@ const listeners = new Map();
 const intervals = [];
 const userMessages = [];
 const assistantMessages = [];
+const mainButtons = [];
 const staleProjectComposer = new FakeElement({ text: "", tag: "textarea", visible: false });
 const composer = new FakeElement({ text: "测试发送", tag: "textarea", visible: true });
 const sendButton = new FakeElement({ tag: "button", attrs: { id: "composer-submit-button" } });
@@ -96,6 +97,12 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 0, "click intent alone must not create a task");
 
+  mainButtons.push(new FakeElement({ tag: "button", attrs: { "data-testid": "stop-button", "aria-label": "Stop generating" } }));
+  await intervals[0]();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 0, "temporary busy DOM without a new user message must not create a phantom task");
+  mainButtons.length = 0;
+
   userMessages.push(new FakeElement({ text: "测试发送" }));
   location.href = projectConversationUrl;
   await intervals[0]();
@@ -137,7 +144,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.6.7 lifecycle tests passed");
+  console.log("content v0.6.8 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

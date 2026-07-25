@@ -327,6 +327,8 @@
   }
 
   async function enqueueComposerText() {
+    const text = getComposerTextRaw();
+    if (!text.trim()) return;
     const now = Date.now();
     const snapshot = collectSnapshot(now);
     updateAssistantTracking(snapshot.assistant, now);
@@ -339,8 +341,6 @@
       showUiNotice("当前没有正在进行的会话，不能加入队列");
       return;
     }
-    const text = getComposerTextRaw();
-    if (!text.trim()) return;
     const duplicate = runtime.queue.items.find((item) =>
       ["pending", "dispatching", "running"].includes(item.status) &&
       item.text === core.cleanText(text) &&
@@ -352,6 +352,10 @@
     }
     showUiNotice(`正在加入队列… ${text.length.toLocaleString()} 字符`);
     await nextFrame();
+    if (getComposerTextRaw() !== text) {
+      showUiNotice("输入框内容已变化，未加入队列");
+      return;
+    }
     const item = core.createQueueItem(text);
     if (!item) return;
     if (!(await writeComposerText(""))) {
@@ -908,7 +912,7 @@
   function scheduleUiRender() {
     if (runtime.uiScheduled) return;
     runtime.uiScheduled = true;
-    requestAnimationFrame(() => {
+    void nextFrame().then(() => {
       runtime.uiScheduled = false;
       ensureUi();
     });
@@ -1429,5 +1433,19 @@
     return String(value || "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
   }
   function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-  function nextFrame() { return new Promise((resolve) => requestAnimationFrame(() => resolve())); }
+  function nextFrame() {
+    return new Promise((resolve) => {
+      let timer = 0;
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(finish, 100);
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(finish);
+      else finish();
+    });
+  }
 })();

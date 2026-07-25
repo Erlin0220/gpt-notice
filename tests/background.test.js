@@ -174,7 +174,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(storage.messageQueueConversationLeasesV1["c:close"], undefined, "closed tab lease must be released");
   assert.ok(storage.messageQueueConversationLeasesV1["c:other"]);
 
-  console.log("background v0.6.5 tests passed");
+  console.log("background v0.6.8 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
