@@ -1101,8 +1101,12 @@
     return normalizeConversationLease(leases[conversationKey]);
   }
 
-  function isCurrentLeaseOwner(lease) {
-    return Boolean(lease && lease.ownerTabId === runtime.tabId && lease.ownerInstanceId === runtime.instanceId && lease.ownerQueueKey === runtime.queueKey);
+  function isCurrentLeaseOwner(lease, expectedLeaseId = "") {
+    return leaseGuard.isLeaseOwner(lease, {
+      tabId: runtime.tabId,
+      instanceId: runtime.instanceId,
+      queueKey: runtime.queueKey
+    }, expectedLeaseId);
   }
 
   function hasOtherConversationLease(now = Date.now()) {
@@ -1161,7 +1165,7 @@
       const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
       const leases = { ...stored };
       const current = normalizeConversationLease(leases[runtime.conversationKey]);
-      if (!isCurrentLeaseOwner(current)) {
+      if (!isCurrentLeaseOwner(current, runtime.conversationLease?.leaseId)) {
         runtime.conversationLease = current;
         return;
       }
@@ -1172,14 +1176,14 @@
     });
   }
 
-  function releaseCurrentLease() { void releaseLease(runtime.conversationKey); }
-  async function releaseLease(conversationKey) {
+  function releaseCurrentLease() { void releaseLease(runtime.conversationKey, runtime.conversationLease?.leaseId); }
+  async function releaseLease(conversationKey, expectedLeaseId = runtime.conversationLease?.leaseId) {
     if (!conversationKey || !Number.isInteger(runtime.tabId)) return;
     await withStorageLock(async () => {
       const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
       const leases = { ...stored };
       const current = normalizeConversationLease(leases[conversationKey]);
-      if (!isCurrentLeaseOwner(current)) return;
+      if (!isCurrentLeaseOwner(current, expectedLeaseId)) return;
       delete leases[conversationKey];
       await chrome.storage.local.set({ [LEASE_STORAGE_KEY]: leases });
       if (conversationKey === runtime.conversationKey) runtime.conversationLease = null;
