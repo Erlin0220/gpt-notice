@@ -2,6 +2,14 @@
 
 Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任务完成、等待确认或失败时发送 Windows 通知，并提供当前会话内的消息队列。
 
+## v0.6.6 核心变化
+
+- 队列仍按“标签页 + 会话”独立保存，执行权仍按 ChatGPT 会话唯一互斥。
+- 每次文档加载都会生成新的页面实例 ID，刷新、完整导航和 BFCache 恢复不再只依赖可复用的 `tabId`。
+- 会话执行租约现在按“标签页 + 页面实例”校验；旧页面实例不能刷新、释放或重新抢回新页面实例的租约。
+- 同一标签刷新后可立即接管旧页面实例留下的租约，不需要等待 120 秒租约超时。
+- 同一会话打开多个标签页时，仍只有一个标签自动发送；其他标签保留各自队列并等待执行权。
+
 ## v0.6.5 核心变化
 
 - 每个 Chrome 标签页维护自己的消息队列；即使打开同一个 ChatGPT 会话，队列内容也不再合并。
@@ -53,6 +61,7 @@ Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任�
 - **立即执行**：实时检查页面是否仍在生成，页面已空闲时立即发送。
 - 支持删除、上移、下移、暂停、继续和失败重试。
 - 队列按“标签页 + 会话”隔离；同一会话的多个标签页不会共享队列，但会竞争唯一自动执行权。
+- 执行权按标签页和当前页面实例共同识别，旧页面实例无法干扰刷新后的新页面。
 - 单条队列消息最多保存 200,000 个字符；界面只显示短预览。
 
 ## 通知格式
@@ -85,6 +94,7 @@ Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任�
 
 ```bash
 node --check background.js
+node --check queue-lease-guard.js
 node --check queue-core.js
 node --check content.js
 node --check queue-v060.js
@@ -93,15 +103,17 @@ node tests/static.test.js
 node tests/background.test.js
 node tests/content.test.js
 node tests/queue.test.js
+node tests/lease-guard.test.js
 ```
 
 ## 项目结构
 
 - `background.js`：当前页面任务状态、会话 URL 绑定、通知和面板消息路由。
 - `content.js`：ChatGPT 页面任务状态识别和草稿页到正式会话的安全迁移。
+- `queue-lease-guard.js`：为每个页面文档生成独立身份，并保护会话级执行租约不被旧页面实例误刷新或误释放。
 - `queue-core.js`：消息队列数据结构和纯函数。
 - `queue-v060.js`：队列 UI、拆分存储、实时状态纠偏和自动发送。
 - `popup.*`：扩展设置和最近任务。
-- `tests/`：静态架构、任务生命周期、旧数据兼容和队列纯函数测试。
+- `tests/`：静态架构、任务生命周期、旧数据兼容、租约竞争和队列纯函数测试。
 
 > ChatGPT 和相关图标归 OpenAI 所有。本项目为非官方浏览器扩展，与 OpenAI 不存在隶属或背书关系。
