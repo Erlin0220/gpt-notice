@@ -7,7 +7,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "u
 assert.match(manifest.version, /^\d+\.\d+\.\d+(?:\.\d+)?$/);
 assert.ok(!manifest.permissions.includes("tabGroups"), "current-page mode must not request tabGroups");
 assert.ok(!manifest.permissions.includes("alarms"), "current-page mode must not request alarms");
-assert.deepEqual(manifest.content_scripts[0].js, ["queue-core.js", "content.js", "queue-v060.js"]);
+assert.deepEqual(manifest.content_scripts[0].js, ["queue-lease-guard.js", "queue-core.js", "content.js", "queue-v060.js"]);
 
 const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
 assert.ok(background.includes("stopTasksForClosedTab"));
@@ -32,8 +32,13 @@ assert.ok(content.includes("isAmbiguousConversationTransition"), "temporary navi
 assert.ok(content.includes("clearNavigationCandidate"), "temporary-route confirmation must use one cleanup-aware timer");
 assert.ok(background.includes("aConversationId === bConversationId"), "background navigation must compare conversation ids before paths");
 
+const leaseGuard = fs.readFileSync(path.join(root, "queue-lease-guard.js"), "utf8");
 const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
 const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
+assert.ok(leaseGuard.includes("chatgpt-message-queue-instance-v060"), "each document must create a fresh queue page-instance identity");
+assert.ok(leaseGuard.includes("reconcileLeaseMaps"), "lease writes must be reconciled against the current owner");
+assert.ok(leaseGuard.includes("ownerInstanceId"), "conversation leases must include the page-instance owner");
+assert.ok(leaseGuard.includes("ownerTabId: -1"), "older BFCache instances must see the newer instance as another executor");
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
 assert.ok(core.includes("canAdmit"));
 assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");
@@ -77,8 +82,6 @@ assert.ok(queue.includes('mode === "auto-execute" ? "auto" : "manual"'), "auto o
 assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
 assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");
 assert.ok(!queue.includes("window.prompt("));
-
-
 
 const privacy = fs.readFileSync(path.join(root, "PRIVACY.md"), "utf8");
 assert.ok(!privacy.includes("GPT 后台"));
