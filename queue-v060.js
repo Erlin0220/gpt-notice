@@ -3,7 +3,8 @@
   window.__CHATGPT_MESSAGE_QUEUE_V060_LOADED__ = true;
 
   const core = globalThis.ChatGPTQueueCore;
-  if (!core) return;
+  const leaseGuard = globalThis.ChatGPTQueueLeaseGuard;
+  if (!core || !leaseGuard) return;
 
   const INSPECT_INTERVAL_MS = 900;
   const SEND_CONFIRM_TIMEOUT_MS = 10_000;
@@ -1087,9 +1088,10 @@
     const ownerTabId = Number(lease.ownerTabId);
     const ownerInstanceId = String(lease.ownerInstanceId || "");
     const ownerQueueKey = String(lease.ownerQueueKey || "");
+    const leaseId = String(lease.leaseId || "");
     const expiresAt = Number(lease.expiresAt || 0);
     return Number.isInteger(ownerTabId) && ownerInstanceId && ownerQueueKey && expiresAt
-      ? { ownerTabId, ownerInstanceId, ownerQueueKey, expiresAt }
+      ? { ownerTabId, ownerInstanceId, ownerQueueKey, leaseId, expiresAt }
       : null;
   }
 
@@ -1099,9 +1101,13 @@
     return normalizeConversationLease(leases[conversationKey]);
   }
 
+  function isCurrentLeaseOwner(lease) {
+    return Boolean(lease && lease.ownerTabId === runtime.tabId && lease.ownerInstanceId === runtime.instanceId && lease.ownerQueueKey === runtime.queueKey);
+  }
+
   function hasOtherConversationLease(now = Date.now()) {
     const lease = runtime.conversationLease;
-    return Boolean(lease && lease.ownerTabId !== runtime.tabId && lease.expiresAt > now);
+    return Boolean(lease && !isCurrentLeaseOwner(lease) && lease.expiresAt > now);
   }
 
   async function acquireLease() {
@@ -1112,7 +1118,14 @@
       const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
       const leases = { ...stored };
       const current = normalizeConversationLease(leases[runtime.conversationKey]);
-      if (current && current.ownerTabId !== runtime.tabId && current.expiresAt > now) {
+      const samePageOwner = Boolean(current && current.ownerTabId === runtime.tabId && current.ownerInstanceId === runtime.instanceId);
+      const newerPageInSameTab = Boolean(
+        current &&
+        current.ownerTabId === runtime.tabId &&
+        current.ownerInstanceId !== runtime.instanceId &&
+        leaseGuard.compareInstanceAge(runtime.instanceId, current.ownerInstanceId) > 0
+      );
+      if (current && !samePageOwner && !newerPageInSameTab && current.expiresAt > now) {
         runtime.conversationLease = current;
         return;
       }
@@ -1120,6 +1133,7 @@
         ownerTabId: runtime.tabId,
         ownerInstanceId: runtime.instanceId,
         ownerQueueKey: runtime.queueKey,
+        leaseId: core.createId("lease"),
         expiresAt: now + LEASE_TTL_MS
       };
       leases[runtime.conversationKey] = next;
@@ -1130,7 +1144,7 @@
     if (!claimed) return false;
     const verified = await loadConversationLease(runtime.conversationKey);
     runtime.conversationLease = verified;
-    return Boolean(verified && verified.ownerTabId === runtime.tabId && verified.ownerQueueKey === runtime.queueKey && verified.expiresAt > Date.now());
+    return Boolean(verified && isCurrentLeaseOwner(verified) && verified.expiresAt > Date.now());
   }
 
   async function refreshLease() {
@@ -1139,7 +1153,7 @@
       if (runtime.conversationLease?.ownerTabId === runtime.tabId) await releaseLease(runtime.conversationKey);
       return;
     }
-    if (runtime.conversationLease?.ownerTabId !== runtime.tabId) return;
+    if (!isCurrentLeaseOwner(runtime.conversationLease)) return;
     if (Date.now() - runtime.lastLeaseRefreshAt < LEASE_REFRESH_MS - 250) return;
     runtime.lastLeaseRefreshAt = Date.now();
     await withStorageLock(async () => {
@@ -1147,7 +1161,7 @@
       const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
       const leases = { ...stored };
       const current = normalizeConversationLease(leases[runtime.conversationKey]);
-      if (!current || current.ownerTabId !== runtime.tabId) {
+      if (!isCurrentLeaseOwner(current)) {
         runtime.conversationLease = current;
         return;
       }
@@ -1165,7 +1179,7 @@
       const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
       const leases = { ...stored };
       const current = normalizeConversationLease(leases[conversationKey]);
-      if (!current || current.ownerTabId !== runtime.tabId) return;
+      if (!isCurrentLeaseOwner(current)) return;
       delete leases[conversationKey];
       await chrome.storage.local.set({ [LEASE_STORAGE_KEY]: leases });
       if (conversationKey === runtime.conversationKey) runtime.conversationLease = null;
