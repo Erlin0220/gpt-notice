@@ -56,8 +56,14 @@ assert.ok(queue.includes("acquireFallbackStorageLock"), "queue writes need a sto
 assert.ok(queue.includes("migrateLegacyQueue"), "legacy queues must be removed after migration");
 assert.ok(queue.includes("runtime.queueCache"), "long item bodies must be cached by metadata revision");
 assert.ok(queue.includes("textsById"), "metadata-only updates must reuse cached long item bodies");
-assert.ok(queue.includes("let claimed = false"), "lease acquisition must re-check ownership while holding the storage lock");
-assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a second tab must not reset a valid active lease");
+assert.ok(queue.includes("messageQueueConversationLeasesV1"), "conversation execution leases must be stored separately from tab queues");
+assert.ok(queue.includes("resolveQueueKey"), "queue storage must be scoped by tab and conversation");
+assert.ok(!queue.includes("loadQueue(runtime.conversationKey)"), "tab queue operations must never load the shared conversation key");
+assert.ok(queue.includes("ownerTabId"), "queue metadata must record its owning tab");
+assert.ok(queue.includes("hasOtherConversationLease"), "waiting tabs must recognize another tab's conversation lease");
+assert.ok(queue.includes("shouldRecoverInterruptedQueue"), "a refreshed tab must safely recover its own interrupted queue");
+assert.ok(background.includes('case "GET_TAB_CONTEXT"'), "content scripts must obtain the real Chrome tab id from the service worker");
+assert.ok(background.includes("cleanupQueueStateForClosedTab"), "closing a tab must clean its queue and lease state");
 assert.ok(queue.includes("if (runtime.sendConfirmation || runtime.dispatching) return;"), "manual reconciliation must not race an unconfirmed send");
 assert.ok(queue.includes("#composer-submit-button"), "current ChatGPT composer submit button id must be supported");
 assert.ok(queue.includes("waitForSendButton"), "queue submission must wait for the React send button to render");

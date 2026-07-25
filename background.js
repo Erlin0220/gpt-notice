@@ -3,6 +3,12 @@ const STORAGE_KEYS = {
   TASKS: "tasks"
 };
 
+const QUEUE_STORAGE_KEYS = {
+  INDEX: "messageQueueIndexV3",
+  ITEM_PREFIX: "messageQueueItemV3:",
+  LEASES: "messageQueueConversationLeasesV1"
+};
+
 const DEFAULT_SETTINGS = {
   notifyCompleted: true,
   notifyAttention: true,
@@ -28,7 +34,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
   return true;
 });
-chrome.tabs.onRemoved.addListener((tabId) => void stopTasksForClosedTab(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void stopTasksForClosedTab(tabId);
+  void cleanupQueueStateForClosedTab(tabId);
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (!changeInfo.url) return;
   if (!isChatUrl(changeInfo.url)) void stopTasksForClosedTab(tabId, "页面已离开 ChatGPT，已停止监控");
@@ -75,6 +84,7 @@ async function migrateState() {
 
 async function handleMessage(message, sender) {
   switch (message?.type) {
+    case "GET_TAB_CONTEXT": return getTabContext(sender);
     case "PAGE_READY": return handlePageReady(message, sender);
     case "PAGE_CHANGED": return handlePageChanged(message, sender);
     case "PAGE_PROMOTED": return handlePagePromoted(message, sender);
@@ -90,6 +100,12 @@ async function handleMessage(message, sender) {
     case "CLEAR_HISTORY": await clearHistory(); return { ok: true };
     default: return { ok: false, error: "Unknown message type" };
   }
+}
+
+function getTabContext(sender) {
+  const tab = sender.tab;
+  if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
+  return { ok: true, tabId: tab.id, windowId: Number.isInteger(tab.windowId) ? tab.windowId : null };
 }
 
 async function handlePageReady(message, sender) {
@@ -358,6 +374,38 @@ async function stopTasksForClosedTab(tabId, reason = "页面已关闭，已停�
       changed = true;
     }
     if (changed) await writeTasks(pruneTasks(state.tasks));
+  });
+}
+
+async function cleanupQueueStateForClosedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  return enqueueMutation(async () => {
+    const stored = await chrome.storage.local.get([QUEUE_STORAGE_KEYS.INDEX, QUEUE_STORAGE_KEYS.LEASES]);
+    const index = { ...(stored[QUEUE_STORAGE_KEYS.INDEX] || {}) };
+    const leases = { ...(stored[QUEUE_STORAGE_KEYS.LEASES] || {}) };
+    const itemKeys = [];
+    let indexChanged = false;
+    let leasesChanged = false;
+
+    for (const [key, metadata] of Object.entries(index)) {
+      if (Number(metadata?.ownerTabId) !== tabId && !key.startsWith(`tab:${tabId}:`)) continue;
+      for (const item of metadata?.items || []) {
+        if (item?.id) itemKeys.push(`${QUEUE_STORAGE_KEYS.ITEM_PREFIX}${item.id}`);
+      }
+      delete index[key];
+      indexChanged = true;
+    }
+    for (const [conversationKey, lease] of Object.entries(leases)) {
+      if (Number(lease?.ownerTabId) !== tabId) continue;
+      delete leases[conversationKey];
+      leasesChanged = true;
+    }
+
+    const updates = {};
+    if (indexChanged) updates[QUEUE_STORAGE_KEYS.INDEX] = index;
+    if (leasesChanged) updates[QUEUE_STORAGE_KEYS.LEASES] = leases;
+    if (Object.keys(updates).length) await chrome.storage.local.set(updates);
+    if (itemKeys.length) await chrome.storage.local.remove([...new Set(itemKeys)]);
   });
 }
 

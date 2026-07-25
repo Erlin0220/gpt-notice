@@ -11,6 +11,10 @@ assert.equal(core.getNextPendingItem(queue).text, "第一条消息");
 assert.equal(core.getConversationKey("https://chatgpt.com/c/abc?x=1"), "c:abc");
 assert.match(core.getConversationKey("https://chatgpt.com/", "tab-1"), /^temp:/);
 assert.equal(core.getConversationKey("https://chatgpt.com/g/g-p-demo/project", "tab-1"), "project-draft:g-p-demo:tab-1");
+assert.equal(core.getTabQueueKey(7, "c:abc", "page-a"), "tab:7:page-a:c:abc");
+assert.notEqual(core.getTabQueueKey(7, "c:abc", "page-a"), core.getTabQueueKey(8, "c:abc", "page-a"), "the same conversation must keep separate queues per tab");
+assert.notEqual(core.getTabQueueKey(7, "c:abc", "page-a"), core.getTabQueueKey(7, "c:abc", "page-b"), "a reused tab id must not inherit another browser-page queue");
+assert.equal(core.normalizeQueue({}, "tab:7:page-a:c:abc").ownerTabId, null, "an empty queue must not invent tab 0 as its owner");
 assert.equal(core.shouldMigrateQueue("temp:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("project-draft:g-p-demo:tab-1", "c:abc"), true);
 assert.equal(core.shouldMigrateQueue("c:old", "c:new"), false);
@@ -43,13 +47,9 @@ assert.equal(core.isItemCompleted(active, {
   stopVisible: false, waitingAction: false, busy: false, visibleError: false, stableForMs: 700
 }), false, "without a copy action the four-second text stability fallback must remain");
 
-const otherLeaseQueue = core.normalizeQueue({
-  ...runningQueue,
-  lease: { ownerId: "other-tab", expiresAt: Date.now() + 10_000 }
-}, "c:test");
-assert.equal(core.shouldRecoverInterruptedQueue(otherLeaseQueue, "this-tab"), false, "a second tab must not reset an actively leased queue");
-assert.equal(core.shouldRecoverInterruptedQueue(otherLeaseQueue, "other-tab"), true, "the reloaded owner tab may recover its interrupted queue");
-assert.equal(core.shouldRecoverInterruptedQueue({ ...otherLeaseQueue, lease: { ownerId: "other-tab", expiresAt: Date.now() - 1 } }, "this-tab"), true, "an expired lease must be recoverable");
+assert.equal(core.shouldRecoverInterruptedQueue(runningQueue), true, "a tab-scoped interrupted active item must be recovered by its own tab");
+assert.equal(core.hasLeaseWork(runningQueue), true);
+assert.equal(core.hasLeaseWork(core.normalizeQueue({ items: [itemB], paused: true }, "tab:7:c:test")), false, "a paused queue without an active item must release the conversation lease");
 
 const recovered = core.resetInterruptedItems(runningQueue);
 assert.equal(recovered.activeItemId, null);
@@ -61,4 +61,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.4 tests passed");
+console.log("queue v0.6.5 tests passed");

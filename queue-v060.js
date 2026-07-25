@@ -11,13 +11,14 @@
   const SEND_BUTTON_POLL_MS = 100;
   const DUPLICATE_ENQUEUE_WINDOW_MS = 5_000;
   const COMPLETION_TO_NEXT_DELAY_MS = 2_500;
-  const LEASE_TTL_MS = 15_000;
-  const LEASE_REFRESH_MS = 5_000;
+  const LEASE_TTL_MS = 120_000;
+  const LEASE_REFRESH_MS = 20_000;
   const WRITE_LOCK_TTL_MS = 5_000;
   const WRITE_LOCK_ATTEMPTS = 12;
   const STORAGE_LOCK_NAME = "gpt-notice-queue-storage-v3";
   const INDEX_STORAGE_KEY = "messageQueueIndexV3";
   const ITEM_STORAGE_PREFIX = "messageQueueItemV3:";
+  const LEASE_STORAGE_KEY = "messageQueueConversationLeasesV1";
   const LEGACY_STORAGE_KEY = core.QUEUE_STORAGE_KEY;
   const UI_ID = "chatgpt-message-queue-root";
   const STYLE_ID = "chatgpt-message-queue-style";
@@ -27,8 +28,11 @@
   const runtime = {
     instanceId: getStableInstanceId(),
     temporaryKey: getTemporaryKey(),
+    tabId: null,
     conversationKey: "",
+    queueKey: "",
     queue: null,
+    conversationLease: null,
     assistantHash: "",
     assistantText: "",
     assistantHasCopyAction: false,
@@ -47,6 +51,7 @@
     storageWrite: Promise.resolve(),
     queueCache: new Map(),
     lastLeaseRefreshAt: 0,
+    blockedLeaseNoticeAt: 0,
     suppressComposerMutations: 0,
     observer: null
   };
@@ -54,9 +59,14 @@
   boot().catch((error) => console.warn("[ChatGPT Message Queue] boot failed", error));
 
   async function boot() {
+    const tabContext = await getTabContext();
+    runtime.tabId = tabContext.tabId;
     runtime.conversationKey = resolveConversationKey();
+    runtime.queueKey = resolveQueueKey(runtime.conversationKey);
+    await migrateSharedQueueToTab(runtime.conversationKey, runtime.queueKey);
     resetAssistantTracking();
-    runtime.queue = await loadQueue(runtime.conversationKey);
+    runtime.queue = await loadQueue(runtime.queueKey);
+    runtime.conversationLease = await loadConversationLease(runtime.conversationKey);
     await recoverInterruptedQueue();
     installStyles();
     ensureUi();
@@ -74,11 +84,18 @@
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "local") return;
       const itemChanged = Object.keys(changes).some((key) => key.startsWith(ITEM_STORAGE_PREFIX));
-      if (!changes[INDEX_STORAGE_KEY] && !itemChanged) return;
-      void loadQueue(runtime.conversationKey, { forceTexts: itemChanged }).then((queue) => {
-        runtime.queue = queue;
-        scheduleUiRender();
-      });
+      if (changes[INDEX_STORAGE_KEY] || itemChanged) {
+        void loadQueue(runtime.queueKey, { forceTexts: itemChanged }).then((queue) => {
+          runtime.queue = queue;
+          scheduleUiRender();
+        });
+      }
+      if (changes[LEASE_STORAGE_KEY]) {
+        void loadConversationLease(runtime.conversationKey).then((lease) => {
+          runtime.conversationLease = lease;
+          scheduleUiRender();
+        });
+      }
     });
   }
 
@@ -118,8 +135,9 @@
       snapshot.taskRunning = resolveEffectiveTaskRunning(snapshot);
       snapshot.manualHold = isManualHoldActive(snapshot, now);
       runtime.lastSnapshot = snapshot;
-      runtime.queue = await loadQueue(runtime.conversationKey);
+      runtime.queue = await loadQueue(runtime.queueKey);
       await handleSendConfirmation(snapshot, now);
+      await refreshLease();
 
       const activeItem = getActiveItem(runtime.queue);
       if (activeItem) {
@@ -254,19 +272,25 @@
 
   async function handleNavigationChange() {
     const currentUrl = location.href;
-    const nextKey = resolveConversationKey();
-    if (!nextKey || (currentUrl === runtime.lastUrl && nextKey === runtime.conversationKey)) return;
-    if (nextKey === runtime.conversationKey) {
+    const nextConversationKey = resolveConversationKey();
+    if (!nextConversationKey || (currentUrl === runtime.lastUrl && nextConversationKey === runtime.conversationKey)) return;
+    if (nextConversationKey === runtime.conversationKey) {
       runtime.lastUrl = currentUrl;
       return;
     }
-    const previousKey = runtime.conversationKey;
+    const previousConversationKey = runtime.conversationKey;
+    const previousQueueKey = runtime.queueKey;
     const previousUrl = runtime.lastUrl;
-    if (core.shouldMigrateQueue(previousKey, nextKey)) await migrateQueue(previousKey, nextKey, previousUrl);
-    else await releaseLease(previousKey);
+    const nextQueueKey = resolveQueueKey(nextConversationKey);
+    if (core.shouldMigrateQueue(previousConversationKey, nextConversationKey)) await migrateQueue(previousQueueKey, nextQueueKey, previousUrl);
+    await releaseLease(previousConversationKey);
     runtime.lastUrl = currentUrl;
-    runtime.conversationKey = nextKey;
-    runtime.queue = await loadQueue(nextKey);
+    runtime.conversationKey = nextConversationKey;
+    runtime.queueKey = nextQueueKey;
+    await migrateSharedQueueToTab(nextConversationKey, nextQueueKey);
+    runtime.queue = await loadQueue(nextQueueKey);
+    runtime.conversationLease = await loadConversationLease(nextConversationKey);
+    if (core.hasLeaseWork(runtime.queue)) await acquireLease();
     runtime.sendConfirmation = null;
     runtime.dispatching = false;
     runtime.manualSubmissionPendingUntil = 0;
@@ -285,7 +309,7 @@
       target.activeItemId = source.activeItemId || target.activeItemId;
       target.nextDispatchAt = Math.max(source.nextDispatchAt, target.nextDispatchAt);
       target.conversationUrl = location.href;
-      target.lease = null;
+      target.ownerTabId = runtime.tabId;
       return target;
     });
     await deleteQueue(fromKey, source);
@@ -293,13 +317,12 @@
   }
 
   async function recoverInterruptedQueue() {
-    if (!runtime.queue || !core.shouldRecoverInterruptedQueue(runtime.queue, runtime.instanceId, Date.now())) return;
+    if (!runtime.queue || !core.shouldRecoverInterruptedQueue(runtime.queue)) return;
     runtime.queue = await mutateCurrentQueue((current) => {
-      if (!core.shouldRecoverInterruptedQueue(current, runtime.instanceId, Date.now())) return current;
-      const recovered = core.resetInterruptedItems(current);
-      recovered.lease = null;
-      return recovered;
+      if (!core.shouldRecoverInterruptedQueue(current)) return current;
+      return core.resetInterruptedItems(current);
     });
+    await releaseLease(runtime.conversationKey);
   }
 
   async function enqueueComposerText() {
@@ -310,7 +333,7 @@
     snapshot.taskRunning = resolveEffectiveTaskRunning(snapshot);
     snapshot.manualHold = isManualHoldActive(snapshot, now);
     runtime.lastSnapshot = snapshot;
-    runtime.queue = await loadQueue(runtime.conversationKey);
+    runtime.queue = await loadQueue(runtime.queueKey);
     if (!core.canAdmit(runtime.queue, snapshot)) {
       showUiNotice("当前没有正在进行的会话，不能加入队列");
       return;
@@ -351,7 +374,7 @@
 
   async function dispatchNextItem(snapshot) {
     if (runtime.dispatching || runtime.sendConfirmation) return;
-    runtime.queue = await loadQueue(runtime.conversationKey);
+    runtime.queue = await loadQueue(runtime.queueKey);
     const now = Date.now();
     const fresh = collectSnapshot(now);
     updateAssistantTracking(fresh.assistant, now);
@@ -371,7 +394,7 @@
   }
 
   function canPrepareQueueDispatch(queue, snapshot, now = Date.now()) {
-    const normalized = core.normalizeQueue(queue, runtime.conversationKey);
+    const normalized = core.normalizeQueue(queue, runtime.queueKey);
     if (normalized.paused || normalized.activeItemId || !core.getNextPendingItem(normalized) || normalized.nextDispatchAt > now) return false;
     if (!snapshot.composerReady || snapshot.domRunning || snapshot.taskRunning || snapshot.visibleError || snapshot.manualHold) return false;
     return snapshot.stableForMs >= 4_000;
@@ -383,7 +406,7 @@
 
   async function requestImmediateExecution(root, itemId) {
     await reconcilePageStateForAction();
-    const queue = await loadQueue(runtime.conversationKey);
+    const queue = await loadQueue(runtime.queueKey);
     const item = queue.items.find((candidate) => candidate.id === itemId);
     if (!item || !["pending", "failed"].includes(item.status)) {
       showUiNotice("该消息当前无法立即执行");
@@ -419,11 +442,11 @@
     if (snapshot.domRunning || !snapshot.composerReady || snapshot.visibleError || snapshot.stableForMs < 500) return;
     runtime.manualTaskObserved = false;
     runtime.manualSubmissionPendingUntil = 0;
-    const queue = await loadQueue(runtime.conversationKey);
+    const queue = await loadQueue(runtime.queueKey);
     const active = getActiveItem(queue);
     if (!active) return;
     const responseAdvanced = Number(snapshot.assistantCount || 0) > Number(active.baselineAssistantCount || 0) || (snapshot.assistantHash && snapshot.assistantHash !== active.baselineAssistantHash);
-    await mutateCurrentQueue((current) => {
+    const updated = await mutateCurrentQueue((current) => {
       const item = current.items.find((candidate) => candidate.id === active.id);
       if (!item || !["dispatching", "running"].includes(item.status)) return current;
       if (responseAdvanced) {
@@ -439,11 +462,12 @@
       current.nextDispatchAt = Date.now() + 500;
       return current;
     });
+    if (!core.hasLeaseWork(updated)) await releaseLease(runtime.conversationKey);
   }
 
   async function dispatchQueueItem(itemId, { allowOverwrite = false, source = "auto" } = {}) {
     if (!itemId || runtime.dispatching || runtime.sendConfirmation) return false;
-    let queue = await loadQueue(runtime.conversationKey);
+    let queue = await loadQueue(runtime.queueKey);
     const candidate = queue.items.find((item) => item.id === itemId);
     if (!candidate || !["pending", "failed"].includes(candidate.status) || queue.activeItemId) return false;
     const now = Date.now();
@@ -460,7 +484,11 @@
     const previousComposerText = getComposerTextRaw();
     if (previousComposerText.trim() && !allowOverwrite) return false;
     if (!(await acquireLease())) {
-      showUiNotice("其他相同会话标签页正在处理队列");
+      const nowNotice = Date.now();
+      if (nowNotice - runtime.blockedLeaseNoticeAt > 4_000) {
+        runtime.blockedLeaseNoticeAt = nowNotice;
+        showUiNotice("同一会话正在其他标签页执行，本标签队列将等待");
+      }
       return false;
     }
     runtime.dispatching = true;
@@ -500,7 +528,7 @@
       if (claimed && !runtime.sendConfirmation) await writeComposerText(previousComposerText);
       if (claimed) await handleDispatchFailure(itemId, error?.message || "消息发送失败", { retryable: error?.retryable !== false });
       if (source !== "auto" || error?.retryable === false) showUiNotice(`发送失败：${error?.message || "未知错误"}`);
-      if (error?.retryable === false) await releaseLease(runtime.conversationKey);
+      if (error?.retryable === false || !core.hasLeaseWork(runtime.queue)) await releaseLease(runtime.conversationKey);
       return false;
     } finally {
       runtime.dispatching = false;
@@ -598,7 +626,7 @@
   }
 
   async function completeActiveItem(item, now) {
-    await mutateCurrentQueue((queue) => {
+    const updated = await mutateCurrentQueue((queue) => {
       const current = queue.items.find((candidate) => candidate.id === item.id);
       if (!current || !["dispatching", "running"].includes(current.status)) return queue;
       current.status = "completed";
@@ -608,10 +636,11 @@
       queue.nextDispatchAt = now + COMPLETION_TO_NEXT_DELAY_MS;
       return queue;
     });
+    if (!core.hasLeaseWork(updated)) await releaseLease(runtime.conversationKey);
   }
 
   async function requestRestoreToComposer(root, itemId) {
-    const queue = await loadQueue(runtime.conversationKey);
+    const queue = await loadQueue(runtime.queueKey);
     const item = queue.items.find((candidate) => candidate.id === itemId);
     if (!item || !["pending", "failed"].includes(item.status)) return showUiNotice("该消息当前不可编辑");
     if (!findComposer()) return showUiNotice("未找到当前输入框");
@@ -623,7 +652,7 @@
   }
 
   async function restoreItemToComposer(itemId) {
-    const queue = await loadQueue(runtime.conversationKey);
+    const queue = await loadQueue(runtime.queueKey);
     const item = queue.items.find((candidate) => candidate.id === itemId);
     if (!item || !["pending", "failed"].includes(item.status)) return showUiNotice("该消息状态已变化，无法取回");
     const previousComposerText = getComposerTextRaw();
@@ -741,7 +770,7 @@
         if (button.classList.contains("gptq-trigger")) root.querySelector(".gptq-panel").hidden = !root.querySelector(".gptq-panel").hidden;
         else if (action === "close") root.querySelector(".gptq-panel").hidden = true;
         else if (action === "enqueue") await enqueueComposerText();
-        else if (action === "pause") await mutateCurrentQueue((queue) => ({ ...queue, paused: !queue.paused }));
+        else if (action === "pause") await toggleQueuePause();
         else if (action === "clear-completed") await mutateCurrentQueue((queue) => ({ ...queue, items: queue.items.filter((item) => item.status !== "completed") }));
         else if (action === "delete") await deleteItem(button.dataset.id);
         else if (action === "up" || action === "down") await moveItem(button.dataset.id, action);
@@ -763,6 +792,11 @@
     }, true);
   }
 
+  async function toggleQueuePause() {
+    const queue = await mutateCurrentQueue((current) => ({ ...current, paused: !current.paused }));
+    if (queue.paused && !queue.activeItemId) await releaseLease(runtime.conversationKey);
+  }
+
   function setUiBusy(root, busy) {
     root.dataset.busy = busy ? "true" : "false";
     for (const button of root.querySelectorAll("button")) button.disabled = busy;
@@ -770,7 +804,7 @@
 
   function renderUi(root = document.getElementById(UI_ID)) {
     if (!root) return;
-    const queue = core.normalizeQueue(runtime.queue, runtime.conversationKey);
+    const queue = core.normalizeQueue(runtime.queue, runtime.queueKey);
     const snapshot = runtime.lastSnapshot || collectSnapshot();
     const canAdmit = core.canAdmit(queue, snapshot);
     const composerText = getComposerText();
@@ -789,6 +823,7 @@
     if (runtime.uiNotice) status.textContent = runtime.uiNotice;
     else if (queue.paused) status.textContent = "队列已暂停，请处理提示后点击继续";
     else if (queue.activeItemId) status.textContent = "正在执行队列消息";
+    else if (hasOtherConversationLease()) status.textContent = "同一会话正在其他标签页执行，本标签队列等待中";
     else if (confirmationMode === "auto-execute") status.textContent = "等待确认：是否覆盖当前草稿并执行下一条";
     else if (!snapshot.composerEmpty && waitingCount) status.textContent = "输入框有草稿，队列等待确认";
     else if (waitingCount) status.textContent = `等待执行 ${waitingCount} 条`;
@@ -919,13 +954,13 @@
       activeItemId: metadata?.activeItemId || "",
       paused: Boolean(metadata?.paused),
       nextDispatchAt: Number(metadata?.nextDispatchAt || 0),
-      lease: metadata?.lease || null,
+      ownerTabId: metadata?.ownerTabId !== null && metadata?.ownerTabId !== undefined && Number.isInteger(Number(metadata.ownerTabId)) ? Number(metadata.ownerTabId) : null,
       items: (metadata?.items || []).map((item) => [item.id, item.status, item.retryCount, item.startedAt, item.finishedAt, item.error])
     });
   }
 
   async function mutateCurrentQueue(mutator) {
-    const result = await mutateQueueByKey(runtime.conversationKey, mutator);
+    const result = await mutateQueueByKey(runtime.queueKey, mutator);
     runtime.queue = result;
     return result;
   }
@@ -937,7 +972,8 @@
       const next = core.normalizeQueue(mutator(working) || working, key);
       next.revision = previous.revision + 1;
       next.updatedAt = Date.now();
-      if (!next.conversationUrl) next.conversationUrl = key === runtime.conversationKey ? location.href : previous.conversationUrl;
+      next.ownerTabId = runtime.tabId;
+      if (!next.conversationUrl) next.conversationUrl = key === runtime.queueKey ? location.href : previous.conversationUrl;
       return persistQueueUnlocked(key, next, previous);
     }));
     runtime.storageWrite = run.catch(() => {});
@@ -949,7 +985,7 @@
   }
 
   async function persistQueueUnlocked(key, queue, previous = core.normalizeQueue({}, key)) {
-    const normalized = core.normalizeQueue(queue, key);
+    const normalized = core.normalizeQueue({ ...queue, ownerTabId: runtime.tabId }, key);
     const oldById = new Map(previous.items.map((item) => [item.id, item]));
     const setValues = {};
     for (const item of normalized.items) {
@@ -1046,37 +1082,93 @@
 
   function itemStorageKey(id) { return `${ITEM_STORAGE_PREFIX}${id}`; }
 
+  function normalizeConversationLease(lease) {
+    if (!lease || typeof lease !== "object") return null;
+    const ownerTabId = Number(lease.ownerTabId);
+    const ownerInstanceId = String(lease.ownerInstanceId || "");
+    const ownerQueueKey = String(lease.ownerQueueKey || "");
+    const expiresAt = Number(lease.expiresAt || 0);
+    return Number.isInteger(ownerTabId) && ownerInstanceId && ownerQueueKey && expiresAt
+      ? { ownerTabId, ownerInstanceId, ownerQueueKey, expiresAt }
+      : null;
+  }
+
+  async function loadConversationLease(conversationKey) {
+    if (!conversationKey) return null;
+    const { [LEASE_STORAGE_KEY]: leases = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
+    return normalizeConversationLease(leases[conversationKey]);
+  }
+
+  function hasOtherConversationLease(now = Date.now()) {
+    const lease = runtime.conversationLease;
+    return Boolean(lease && lease.ownerTabId !== runtime.tabId && lease.expiresAt > now);
+  }
+
   async function acquireLease() {
+    if (!runtime.conversationKey || !Number.isInteger(runtime.tabId)) return false;
     let claimed = false;
-    await mutateCurrentQueue((current) => {
+    await withStorageLock(async () => {
       const now = Date.now();
-      if (current.lease && current.lease.ownerId !== runtime.instanceId && current.lease.expiresAt > now) return current;
-      current.lease = { ownerId: runtime.instanceId, expiresAt: now + LEASE_TTL_MS };
+      const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
+      const leases = { ...stored };
+      const current = normalizeConversationLease(leases[runtime.conversationKey]);
+      if (current && current.ownerTabId !== runtime.tabId && current.expiresAt > now) {
+        runtime.conversationLease = current;
+        return;
+      }
+      const next = {
+        ownerTabId: runtime.tabId,
+        ownerInstanceId: runtime.instanceId,
+        ownerQueueKey: runtime.queueKey,
+        expiresAt: now + LEASE_TTL_MS
+      };
+      leases[runtime.conversationKey] = next;
+      await chrome.storage.local.set({ [LEASE_STORAGE_KEY]: leases });
+      runtime.conversationLease = next;
       claimed = true;
-      return current;
     });
     if (!claimed) return false;
-    const verified = await loadQueue(runtime.conversationKey);
-    return verified.lease?.ownerId === runtime.instanceId && verified.lease.expiresAt > Date.now();
+    const verified = await loadConversationLease(runtime.conversationKey);
+    runtime.conversationLease = verified;
+    return Boolean(verified && verified.ownerTabId === runtime.tabId && verified.ownerQueueKey === runtime.queueKey && verified.expiresAt > Date.now());
   }
 
   async function refreshLease() {
     const queue = runtime.queue;
-    if (!queue || queue.lease?.ownerId !== runtime.instanceId || !core.hasActiveWork(queue)) return;
+    if (!queue || !core.hasLeaseWork(queue)) {
+      if (runtime.conversationLease?.ownerTabId === runtime.tabId) await releaseLease(runtime.conversationKey);
+      return;
+    }
+    if (runtime.conversationLease?.ownerTabId !== runtime.tabId) return;
     if (Date.now() - runtime.lastLeaseRefreshAt < LEASE_REFRESH_MS - 250) return;
     runtime.lastLeaseRefreshAt = Date.now();
-    await mutateCurrentQueue((current) => {
-      if (current.lease?.ownerId === runtime.instanceId) current.lease.expiresAt = Date.now() + LEASE_TTL_MS;
-      return current;
+    await withStorageLock(async () => {
+      const now = Date.now();
+      const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
+      const leases = { ...stored };
+      const current = normalizeConversationLease(leases[runtime.conversationKey]);
+      if (!current || current.ownerTabId !== runtime.tabId) {
+        runtime.conversationLease = current;
+        return;
+      }
+      const next = { ...current, ownerInstanceId: runtime.instanceId, ownerQueueKey: runtime.queueKey, expiresAt: now + LEASE_TTL_MS };
+      leases[runtime.conversationKey] = next;
+      await chrome.storage.local.set({ [LEASE_STORAGE_KEY]: leases });
+      runtime.conversationLease = next;
     });
   }
 
   function releaseCurrentLease() { void releaseLease(runtime.conversationKey); }
-  async function releaseLease(key) {
-    if (!key) return;
-    await mutateQueueByKey(key, (current) => {
-      if (current.lease?.ownerId === runtime.instanceId) current.lease = null;
-      return current;
+  async function releaseLease(conversationKey) {
+    if (!conversationKey || !Number.isInteger(runtime.tabId)) return;
+    await withStorageLock(async () => {
+      const { [LEASE_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(LEASE_STORAGE_KEY);
+      const leases = { ...stored };
+      const current = normalizeConversationLease(leases[conversationKey]);
+      if (!current || current.ownerTabId !== runtime.tabId) return;
+      delete leases[conversationKey];
+      await chrome.storage.local.set({ [LEASE_STORAGE_KEY]: leases });
+      if (conversationKey === runtime.conversationKey) runtime.conversationLease = null;
     });
   }
 
@@ -1108,8 +1200,44 @@
     }
   }
 
+  async function getTabContext() {
+    const response = await chrome.runtime.sendMessage({ type: "GET_TAB_CONTEXT" });
+    if (!response?.ok || !Number.isInteger(response.tabId)) throw new Error("无法识别当前 Chrome 标签页");
+    return response;
+  }
+
   function resolveConversationKey() {
     return core.getConversationKey(location.href, runtime.temporaryKey, discoverConversationId());
+  }
+
+  function resolveQueueKey(conversationKey = runtime.conversationKey) {
+    return core.getTabQueueKey(runtime.tabId, conversationKey, runtime.temporaryKey);
+  }
+
+  async function migrateSharedQueueToTab(conversationKey, queueKey) {
+    if (!conversationKey || !queueKey || conversationKey === queueKey) return;
+    const legacyResult = await chrome.storage.local.get(LEGACY_STORAGE_KEY);
+    if (legacyResult[LEGACY_STORAGE_KEY]?.[conversationKey]) {
+      await migrateLegacyQueue(conversationKey, legacyResult[LEGACY_STORAGE_KEY][conversationKey]);
+    }
+    await withStorageLock(async () => {
+      const { [INDEX_STORAGE_KEY]: stored = {} } = await chrome.storage.local.get(INDEX_STORAGE_KEY);
+      if (stored[queueKey] || !stored[conversationKey]) return;
+      const index = { ...stored };
+      index[queueKey] = {
+        ...index[conversationKey],
+        version: core.QUEUE_SCHEMA_VERSION,
+        revision: Number(index[conversationKey].revision || 0) + 1,
+        conversationKey: queueKey,
+        ownerTabId: runtime.tabId,
+        updatedAt: Date.now()
+      };
+      delete index[queueKey].lease;
+      delete index[conversationKey];
+      await chrome.storage.local.set({ [INDEX_STORAGE_KEY]: index });
+      runtime.queueCache.delete(conversationKey);
+      runtime.queueCache.delete(queueKey);
+    });
   }
 
   function discoverConversationId() {

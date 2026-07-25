@@ -35,7 +35,10 @@ const chrome = {
         if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, storage[key]]));
         return { ...storage };
       },
-      async set(values) { Object.assign(storage, values); }
+      async set(values) { Object.assign(storage, values); },
+      async remove(keys) {
+        for (const key of Array.isArray(keys) ? keys : [keys]) delete storage[key];
+      }
     }
   },
   tabs: {
@@ -88,6 +91,10 @@ async function send(message, tab = tabs.get(7)) {
 
 (async () => {
   await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const tabContext = await send({ type: "GET_TAB_CONTEXT" });
+  assert.equal(tabContext.tabId, 7);
+  assert.equal(tabContext.windowId, 3);
 
   const promotedStart = await send({
     type: "TASK_STARTED",
@@ -143,6 +150,16 @@ async function send(message, tab = tabs.get(7)) {
 
   tabs.get(7).url = "https://chatgpt.com/c/close";
   const second = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "关闭测试" });
+  storage.messageQueueIndexV3 = {
+    "tab:7:page-7:c:close": { ownerTabId: 7, items: [{ id: "queued-close" }] },
+    "tab:8:page-8:c:close": { ownerTabId: 8, items: [{ id: "queued-other" }] }
+  };
+  storage["messageQueueItemV3:queued-close"] = "close me";
+  storage["messageQueueItemV3:queued-other"] = "keep me";
+  storage.messageQueueConversationLeasesV1 = {
+    "c:close": { ownerTabId: 7, ownerInstanceId: "page-7", ownerQueueKey: "tab:7:page-7:c:close", expiresAt: Date.now() + 60_000 },
+    "c:other": { ownerTabId: 8, ownerInstanceId: "page-8", ownerQueueKey: "tab:8:page-8:c:other", expiresAt: Date.now() + 60_000 }
+  };
   tabs.delete(7);
   await tabRemoved.emit(7, { windowId: 3 });
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -150,8 +167,14 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(storage.tasks[second.task.id].observerMode, "none");
   assert.match(storage.tasks[second.task.id].stopReason, /页面已关闭/);
   assert.equal(calls.tabsCreate.length, 0, "closing a task tab must never recreate it");
+  assert.equal(storage.messageQueueIndexV3["tab:7:page-7:c:close"], undefined, "closed tab queue metadata must be removed");
+  assert.ok(storage.messageQueueIndexV3["tab:8:page-8:c:close"], "another tab queue must remain intact");
+  assert.equal(storage["messageQueueItemV3:queued-close"], undefined, "closed tab queue text must be removed");
+  assert.equal(storage["messageQueueItemV3:queued-other"], "keep me");
+  assert.equal(storage.messageQueueConversationLeasesV1["c:close"], undefined, "closed tab lease must be released");
+  assert.ok(storage.messageQueueConversationLeasesV1["c:other"]);
 
-  console.log("background v0.6.4 tests passed");
+  console.log("background v0.6.5 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

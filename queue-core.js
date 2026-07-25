@@ -3,7 +3,7 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   root.ChatGPTQueueCore = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createQueueCore() {
-  const QUEUE_SCHEMA_VERSION = 3;
+  const QUEUE_SCHEMA_VERSION = 4;
   const QUEUE_STORAGE_KEY = "messageQueues";
   const WRITE_LOCK_STORAGE_KEY = "messageQueueWriteLocks";
   const ITEM_STATUSES = new Set(["pending", "dispatching", "running", "completed", "failed"]);
@@ -41,13 +41,6 @@
     };
   }
 
-  function normalizeLease(lease) {
-    if (!lease || typeof lease !== "object") return null;
-    const ownerId = String(lease.ownerId || "");
-    const expiresAt = Number(lease.expiresAt || 0);
-    return ownerId && expiresAt ? { ownerId, expiresAt } : null;
-  }
-
   function pruneItems(items) {
     const normalized = (Array.isArray(items) ? items : []).map(normalizeItem).filter((item) => item.text);
     const protectedItems = normalized.filter((item) => item.status !== "completed");
@@ -68,10 +61,10 @@
       revision: Math.max(0, Number(queue.revision || 0)),
       conversationKey: String(conversationKey || queue.conversationKey || ""),
       conversationUrl: String(queue.conversationUrl || ""),
+      ownerTabId: queue.ownerTabId !== null && queue.ownerTabId !== undefined && Number.isInteger(Number(queue.ownerTabId)) ? Number(queue.ownerTabId) : null,
       paused: Boolean(queue.paused),
       activeItemId: activeItem && ["dispatching", "running"].includes(activeItem.status) ? activeItem.id : null,
       nextDispatchAt: Math.max(0, Number(queue.nextDispatchAt || 0)),
-      lease: normalizeLease(queue.lease),
       items,
       createdAt: Number(queue.createdAt || Date.now()),
       updatedAt: Number(queue.updatedAt || Date.now())
@@ -107,6 +100,13 @@
     return temporaryKey ? `temp:${temporaryKey}` : "";
   }
 
+  function getTabQueueKey(tabId, conversationKey, tabInstanceKey = "") {
+    const normalizedTabId = Number(tabId);
+    const instanceKey = String(tabInstanceKey || "page").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 120) || "page";
+    const key = String(conversationKey || "");
+    return Number.isInteger(normalizedTabId) && normalizedTabId >= 0 && key ? `tab:${normalizedTabId}:${instanceKey}:${key}` : "";
+  }
+
   function shouldMigrateQueue(fromKey, toKey) {
     return Boolean(fromKey && toKey && fromKey !== toKey && toKey.startsWith("c:") && (fromKey.startsWith("temp:") || fromKey.startsWith("project-draft:")));
   }
@@ -117,6 +117,11 @@
   function hasActiveWork(queue) {
     const normalized = normalizeQueue(queue);
     return Boolean(normalized.activeItemId || normalized.items.some((item) => item.status === "pending"));
+  }
+
+  function hasLeaseWork(queue) {
+    const normalized = normalizeQueue(queue);
+    return Boolean(normalized.activeItemId || (!normalized.paused && normalized.items.some((item) => item.status === "pending")));
   }
 
   function canAdmit(queue, snapshot) {
@@ -159,12 +164,8 @@
     return next;
   }
 
-  function shouldRecoverInterruptedQueue(queue, instanceId, now = Date.now()) {
-    const normalized = normalizeQueue(queue);
-    const lease = normalized.lease;
-    const validOtherLease = Boolean(lease && lease.ownerId !== String(instanceId || "") && lease.expiresAt > now);
-    if (normalized.activeItemId && validOtherLease) return false;
-    return Boolean(normalized.activeItemId || (lease && lease.expiresAt <= now));
+  function shouldRecoverInterruptedQueue(queue) {
+    return Boolean(normalizeQueue(queue).activeItemId);
   }
 
   function resetInterruptedItems(queue) {
@@ -183,7 +184,7 @@
   return {
     QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
     cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId,
-    getConversationKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
-    hasActiveWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue, resetInterruptedItems
+    getConversationKey, getTabQueueKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
+    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue, resetInterruptedItems
   };
 });
