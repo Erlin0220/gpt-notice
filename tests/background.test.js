@@ -112,6 +112,20 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(calls.notifications.length, 1);
   assert.equal(calls.tabsCreate.length, 0, "completion must not create a tab");
 
+  tabs.get(7).url = "https://chatgpt.com/c/same-thread";
+  const sameTask = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "同一会话路径变化", baselineCopyActionCount: 4 });
+  tabs.get(7).url = "https://chatgpt.com/g/g-p-demo/c/same-thread";
+  const sameReady = await send({ type: "PAGE_READY", url: tabs.get(7).url });
+  assert.equal(sameReady.task.id, sameTask.task.id, "project path wrappers with the same conversation id must keep monitoring");
+  assert.equal(storage.tasks[sameTask.task.id].status, "running");
+  assert.equal(storage.tasks[sameTask.task.id].baselineCopyActionCount, 4);
+  const transientReady = await send({ type: "PAGE_READY", url: "https://chatgpt.com/" });
+  assert.equal(transientReady.task.id, sameTask.task.id, "temporary root routes during tab restoration must not immediately cancel monitoring");
+  const transientHeartbeat = await send({ type: "HEARTBEAT", taskId: sameTask.task.id, url: "https://chatgpt.com/" });
+  assert.equal(transientHeartbeat.task.id, sameTask.task.id, "a heartbeat from a temporary route must retain the original conversation binding");
+  assert.match(storage.tasks[sameTask.task.id].url, /same-thread/);
+  await send({ type: "TASK_STATE", taskId: sameTask.task.id, status: "completed", url: tabs.get(7).url, assistantFirstLine: "完成" });
+
   tabs.get(7).url = "https://chatgpt.com/c/old";
   const oldTask = await send({ type: "TASK_STARTED", url: tabs.get(7).url, prompt: "旧会话" });
   tabs.get(7).url = "https://chatgpt.com/c/new";
@@ -137,7 +151,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.match(storage.tasks[second.task.id].stopReason, /页面已关闭/);
   assert.equal(calls.tabsCreate.length, 0, "closing a task tab must never recreate it");
 
-  console.log("background v0.6.3 tests passed");
+  console.log("background v0.6.4 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

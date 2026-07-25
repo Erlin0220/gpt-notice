@@ -26,11 +26,18 @@ assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop th
 assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
 assert.ok(content.includes("PAGE_PROMOTED"), "draft-to-conversation navigation must preserve the active task");
 assert.ok(content.includes("isConversationPromotion"), "URL promotion must be explicitly constrained");
+assert.ok(content.includes('copy-turn-action-button'), "task completion must recognize the reply copy action");
+assert.ok(content.includes("COPY_ACTION_STABLE_MS"), "copy action completion needs a short settling interval");
+assert.ok(content.includes("isAmbiguousConversationTransition"), "temporary navigation during tab restoration must use a grace period");
+assert.ok(content.includes("clearNavigationCandidate"), "temporary-route confirmation must use one cleanup-aware timer");
+assert.ok(background.includes("aConversationId === bConversationId"), "background navigation must compare conversation ids before paths");
 
 const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
 const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
 assert.ok(core.includes("canAdmit"));
+assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");
+assert.ok(queue.includes('copy-turn-action-button'), "queue completion must recognize the reply copy action");
 assert.ok(queue.includes("messageQueueIndexV3"), "queue metadata must be stored separately");
 assert.ok(queue.includes("messageQueueItemV3:"), "long item text must use independent storage entries");
 assert.ok(queue.includes("PREVIEW_LENGTH = 240"));

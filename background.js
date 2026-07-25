@@ -16,6 +16,8 @@ const ALLOWED_STATUSES = new Set([...ACTIVE_STATUSES, ...FINISHED_STATUSES]);
 const NOTIFICATION_ICON = "icons/chatgpt.png";
 const MAX_TASK_HISTORY = 40;
 const URL_PROMOTION_WINDOW_MS = 60_000;
+const NAVIGATION_CONFIRM_MS = 2_000;
+const navigationCheckTimers = new Map();
 let mutationQueue = Promise.resolve();
 
 chrome.runtime.onInstalled.addListener(() => void migrateState());
@@ -104,8 +106,14 @@ async function handlePageReady(message, sender) {
         promoteTaskUrl(task, nextUrl, tab);
         state.tasks[task.id] = task;
         await writeTasks(state.tasks);
+      } else if (isAmbiguousConversationTransition(task.url, nextUrl)) {
+        task.windowId = tab.windowId;
+        task.observerMode = "current_page";
+        task.updatedAt = Date.now();
+        state.tasks[task.id] = task;
+        await writeTasks(state.tasks);
       } else {
-        cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
+        cancelTaskRecord(task, "页面已明确进入其他 ChatGPT 会话，旧任务监控已停止");
         state.tasks[task.id] = task;
         await writeTasks(pruneTasks(state.tasks));
         task = null;
@@ -132,13 +140,18 @@ async function handlePagePromoted(message, sender) {
       .filter((item) => ACTIVE_STATUSES.has(item.status) && item.tabId === tab.id)
       .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
     if (!task) return { ok: true, task: null };
-    if (!samePage(task.url, nextUrl) && !canPromoteTaskUrl(task, nextUrl)) {
-      cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
-      state.tasks[task.id] = task;
-      await writeTasks(pruneTasks(state.tasks));
-      return { ok: true, task: null };
+    if (!samePage(task.url, nextUrl)) {
+      if (canPromoteTaskUrl(task, nextUrl)) promoteTaskUrl(task, nextUrl, tab);
+      else if (isAmbiguousConversationTransition(task.url, nextUrl)) return { ok: true, task: publicTask(task) };
+      else {
+        cancelTaskRecord(task, "页面已明确进入其他 ChatGPT 会话，旧任务监控已停止");
+        state.tasks[task.id] = task;
+        await writeTasks(pruneTasks(state.tasks));
+        return { ok: true, task: null };
+      }
+    } else {
+      promoteTaskUrl(task, nextUrl, tab);
     }
-    promoteTaskUrl(task, nextUrl, tab);
     state.tasks[task.id] = task;
     await writeTasks(state.tasks);
     return { ok: true, task: publicTask(task) };
@@ -148,7 +161,7 @@ async function handlePagePromoted(message, sender) {
 async function handlePageChanged(message, sender) {
   const tab = sender.tab;
   if (!Number.isInteger(tab?.id)) return { ok: false, error: "Missing tab" };
-  await cancelActiveTasksForTab(tab.id, cleanText(message.reason || "已切换到其他 ChatGPT 会话，旧任务监控已停止", 160));
+  await cancelActiveTasksForTab(tab.id, cleanText(message.reason || "已明确进入其他 ChatGPT 会话，旧任务监控已停止", 160));
   return { ok: true };
 }
 
@@ -162,12 +175,14 @@ async function handleTaskStarted(message, sender) {
     if (!task || task.tabId !== tab.id) {
       task = Object.values(state.tasks).find((item) => item.tabId === tab.id && ACTIVE_STATUSES.has(item.status)) || null;
     }
-    const nextUrl = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
+    let nextUrl = sanitizeChatUrl(message.url || tab.url || "https://chatgpt.com/");
     if (task && !samePage(task.url, nextUrl)) {
       if (canPromoteTaskUrl(task, nextUrl, now)) {
         promoteTaskUrl(task, nextUrl, tab);
+      } else if (isAmbiguousConversationTransition(task.url, nextUrl)) {
+        nextUrl = task.url;
       } else {
-        cancelTaskRecord(task, "页面已导航到其他 ChatGPT 会话，旧任务监控已停止");
+        cancelTaskRecord(task, "页面已明确进入其他 ChatGPT 会话，旧任务监控已停止");
         state.tasks[task.id] = task;
         task = null;
       }
@@ -181,6 +196,7 @@ async function handleTaskStarted(message, sender) {
     task.title = cleanText(message.questionTitle || message.prompt || "ChatGPT 任务", 80);
     task.prompt = cleanText(message.prompt || task.title, 240);
     task.baselineAssistantHash = String(message.baselineAssistantHash || "");
+    task.baselineCopyActionCount = Math.max(0, Number(message.baselineCopyActionCount || 0));
     task.latestAssistantHash = String(message.latestAssistantHash || task.latestAssistantHash || "");
     task.lastHeartbeatAt = now;
     task.startedAt = task.finishedAt ? now : task.startedAt || now;
@@ -206,9 +222,10 @@ async function handleTaskState(message, sender) {
     const now = Date.now();
     const nextStatus = String(message.status || task.status);
     if (!ALLOWED_STATUSES.has(nextStatus)) return { ok: false, error: "Invalid task status" };
-    const nextUrl = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
+    let nextUrl = sanitizeChatUrl(message.url || sender.tab?.url || task.url);
     if (!samePage(task.url, nextUrl)) {
       if (canPromoteTaskUrl(task, nextUrl, now)) promoteTaskUrl(task, nextUrl, sender.tab);
+      else if (isAmbiguousConversationTransition(task.url, nextUrl)) nextUrl = task.url;
       else {
         cancelTaskRecord(task, "任务状态来自其他 ChatGPT 会话，旧任务监控已停止");
         state.tasks[task.id] = task;
@@ -249,9 +266,10 @@ async function handleHeartbeat(message, sender) {
     const task = message.taskId ? state.tasks[message.taskId] : null;
     if (!task || !ACTIVE_STATUSES.has(task.status)) return { ok: true, task: null };
     if (!Number.isInteger(sender.tab?.id) || sender.tab.id !== task.tabId) return { ok: true, task: null };
-    const nextUrl = sanitizeChatUrl(message.url || sender.tab.url || task.url);
+    let nextUrl = sanitizeChatUrl(message.url || sender.tab.url || task.url);
     if (!samePage(task.url, nextUrl)) {
       if (canPromoteTaskUrl(task, nextUrl)) promoteTaskUrl(task, nextUrl, sender.tab);
+      else if (isAmbiguousConversationTransition(task.url, nextUrl)) nextUrl = task.url;
       else {
         cancelTaskRecord(task, "心跳来自其他 ChatGPT 会话，旧任务监控已停止");
         state.tasks[task.id] = task;
@@ -271,7 +289,7 @@ async function handleHeartbeat(message, sender) {
   });
 }
 
-async function stopTasksForNavigatedTab(tabId, nextUrl) {
+async function stopTasksForNavigatedTab(tabId, nextUrl, { confirmed = false } = {}) {
   return enqueueMutation(async () => {
     const state = await readState();
     const current = Object.values(state.tasks).find((task) => task.tabId === tabId && ACTIVE_STATUSES.has(task.status));
@@ -282,7 +300,20 @@ async function stopTasksForNavigatedTab(tabId, nextUrl) {
       await writeTasks(state.tasks);
       return;
     }
-    cancelTaskRecord(current, "已切换到其他 ChatGPT 会话，旧任务监控已停止");
+    if (!confirmed && isAmbiguousConversationTransition(current.url, nextUrl)) {
+      const existing = navigationCheckTimers.get(tabId);
+      if (existing) clearTimeout(existing);
+      const timer = setTimeout(async () => {
+        navigationCheckTimers.delete(tabId);
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          if (isChatUrl(tab.url)) await stopTasksForNavigatedTab(tabId, tab.url, { confirmed: true });
+        } catch {}
+      }, NAVIGATION_CONFIRM_MS);
+      navigationCheckTimers.set(tabId, timer);
+      return;
+    }
+    cancelTaskRecord(current, "已明确进入其他 ChatGPT 会话，旧任务监控已停止");
     state.tasks[current.id] = current;
     await writeTasks(pruneTasks(state.tasks));
   });
@@ -309,6 +340,9 @@ async function cancelActiveTasksForTab(tabId, reason) {
 }
 
 async function stopTasksForClosedTab(tabId, reason = "页面已关闭，已停止监控") {
+  const pendingTimer = navigationCheckTimers.get(tabId);
+  if (pendingTimer) clearTimeout(pendingTimer);
+  navigationCheckTimers.delete(tabId);
   return enqueueMutation(async () => {
     const state = await readState();
     let changed = false;
@@ -458,6 +492,7 @@ function normalizeTask(task = {}) {
     title: cleanText(task.title || task.prompt || "ChatGPT 任务", 80),
     prompt: cleanText(task.prompt || "ChatGPT 任务", 240),
     baselineAssistantHash: String(task.baselineAssistantHash || ""),
+    baselineCopyActionCount: Math.max(0, Number(task.baselineCopyActionCount || 0)),
     latestAssistantHash: String(task.latestAssistantHash || ""),
     lastHeartbeatAt: Number(task.lastHeartbeatAt || 0),
     assistantFirstLine: cleanText(task.assistantFirstLine || "", 240),
@@ -483,6 +518,7 @@ function publicTask(task) {
     updatedAt: task.updatedAt,
     finishedAt: task.finishedAt,
     baselineAssistantHash: task.baselineAssistantHash,
+    baselineCopyActionCount: task.baselineCopyActionCount,
     latestAssistantHash: task.latestAssistantHash,
     lastHeartbeatAt: task.lastHeartbeatAt,
     assistantFirstLine: task.assistantFirstLine,
@@ -526,10 +562,17 @@ function samePage(left, right) {
   try {
     const a = new URL(sanitizeChatUrl(left));
     const b = new URL(sanitizeChatUrl(right));
+    const aConversationId = getConversationId(a.href);
+    const bConversationId = getConversationId(b.href);
+    if (aConversationId && bConversationId) return aConversationId === bConversationId;
     return a.pathname.replace(/\/+$/, "") === b.pathname.replace(/\/+$/, "");
   } catch {
     return false;
   }
+}
+
+function isAmbiguousConversationTransition(left, right) {
+  return Boolean(getConversationId(left)) !== Boolean(getConversationId(right));
 }
 
 function cancelTaskRecord(task, reason) {

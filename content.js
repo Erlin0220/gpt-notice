@@ -3,6 +3,8 @@
   window.__CHATGPT_TASK_NOTIFIER_LOADED__ = true;
 
   const COMPLETION_STABLE_MS = 4_000;
+  const COPY_ACTION_STABLE_MS = 600;
+  const NAVIGATION_CONFIRM_MS = 2_000;
   const RECOVERY_IDLE_GRACE_MS = 10_000;
   const INSPECT_INTERVAL_MS = 800;
   const HEARTBEAT_INTERVAL_MS = 5_000;
@@ -15,13 +17,16 @@
     running: false,
     remoteStatus: null,
     baselineAssistantHash: "",
+    baselineCopyActionCount: 0,
     latestAssistantHash: "",
     latestAssistantChangedAt: Date.now(),
     lastAssistantText: "",
+    lastAssistantHasCopyAction: false,
     lastSettledAssistantHash: "",
     lastUserCount: 0,
     pendingPrompt: "",
     pendingBaselineHash: "",
+    pendingBaselineCopyActionCount: 0,
     pendingAt: 0,
     pendingConfirmed: false,
     nextStartAttemptAt: 0,
@@ -36,7 +41,10 @@
     inspectRunning: false,
     restoredAt: 0,
     restoredAssistantHash: "",
-    restoredObservedRunning: false
+    restoredObservedRunning: false,
+    navigationCandidateUrl: "",
+    navigationCandidateSince: 0,
+    navigationCandidateTimer: null
   };
 
   globalThis.ChatGPTTaskNotifierBridge = {
@@ -56,6 +64,7 @@
     state.lastUserCount = getUserMessages().length;
     const assistant = getLatestAssistant();
     state.lastAssistantText = assistant.text;
+    state.lastAssistantHasCopyAction = assistant.hasCopyAction;
     state.latestAssistantHash = assistant.hash;
     state.lastSettledAssistantHash = assistant.hash;
 
@@ -94,8 +103,10 @@
     state.running = true;
     state.remoteStatus = task.status;
     state.baselineAssistantHash = task.baselineAssistantHash || "";
+    state.baselineCopyActionCount = Math.max(0, Number(task.baselineCopyActionCount || 0));
     state.latestAssistantHash = assistant.hash;
     state.lastAssistantText = assistant.text;
+    state.lastAssistantHasCopyAction = assistant.hasCopyAction;
     state.startedAt = task.startedAt || Date.now();
     state.lastReportedStatus = task.status;
     state.latestAssistantChangedAt = Date.now();
@@ -129,6 +140,7 @@
     const assistant = getLatestAssistant();
     state.pendingPrompt = prompt;
     state.pendingBaselineHash = assistant.hash || state.lastSettledAssistantHash || "";
+    state.pendingBaselineCopyActionCount = getCopyTurnActionCount();
     state.pendingAt = Date.now();
     state.pendingConfirmed = false;
     state.nextStartAttemptAt = 0;
@@ -151,16 +163,16 @@
     try {
       await handleNavigationChange();
       const now = Date.now();
-      const snapshot = collectSnapshot(now);
-      const assistant = snapshot.assistant;
-      const userCount = getUserMessages().length;
-
-      if (assistant.text !== state.lastAssistantText) {
+      const assistant = getLatestAssistant();
+      if (assistant.text !== state.lastAssistantText || assistant.hasCopyAction !== state.lastAssistantHasCopyAction) {
         state.lastAssistantText = assistant.text;
+        state.lastAssistantHasCopyAction = assistant.hasCopyAction;
         state.latestAssistantHash = assistant.hash;
         state.latestAssistantChangedAt = now;
         state.lastContentChangeAt = now;
       }
+      const snapshot = collectSnapshot(now, assistant);
+      const userCount = getUserMessages().length;
       if (state.restoredAt && snapshot.domRunning) state.restoredObservedRunning = true;
 
       const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS);
@@ -205,10 +217,28 @@
   async function handleNavigationChange() {
     const currentUrl = location.href;
     const currentPageKey = getPageKey(currentUrl);
-    if (currentUrl === state.lastUrl && currentPageKey === state.lastPageKey) return;
+    if (currentUrl === state.lastUrl && currentPageKey === state.lastPageKey) {
+      clearNavigationCandidate();
+      return;
+    }
     const previousUrl = state.lastUrl;
     const previousPageKey = state.lastPageKey;
     const promoted = isConversationPromotion(previousUrl, currentUrl);
+    if (previousPageKey && currentPageKey !== previousPageKey && !promoted && isAmbiguousConversationTransition(previousUrl, currentUrl)) {
+      if (state.navigationCandidateUrl !== currentUrl) {
+        clearNavigationCandidate();
+        state.navigationCandidateUrl = currentUrl;
+        state.navigationCandidateSince = Date.now();
+        state.navigationCandidateTimer = setTimeout(() => {
+          state.navigationCandidateTimer = null;
+          void inspect();
+        }, NAVIGATION_CONFIRM_MS);
+      }
+      if (Date.now() - state.navigationCandidateSince < NAVIGATION_CONFIRM_MS) return;
+      clearNavigationCandidate();
+    } else {
+      clearNavigationCandidate();
+    }
     state.lastUrl = currentUrl;
     state.lastPageKey = currentPageKey;
 
@@ -233,7 +263,7 @@
         type: "PAGE_CHANGED",
         url: currentUrl,
         previousUrl,
-        reason: "已切换到其他 ChatGPT 会话，旧任务监控已停止"
+        reason: "已明确进入其他 ChatGPT 会话，旧任务监控已停止"
       }, 3);
       finishLocalTask();
       state.lastUserCount = getUserMessages().length;
@@ -245,22 +275,33 @@
     }
   }
 
-  function collectSnapshot(now = Date.now()) {
-    const assistant = getLatestAssistant();
+  function clearNavigationCandidate() {
+    if (state.navigationCandidateTimer) clearTimeout(state.navigationCandidateTimer);
+    state.navigationCandidateUrl = "";
+    state.navigationCandidateSince = 0;
+    state.navigationCandidateTimer = null;
+  }
+
+  function collectSnapshot(now = Date.now(), assistant = getLatestAssistant()) {
     const stopVisible = hasStopControl();
     const waitingAction = hasApprovalControl();
     const visibleError = findVisibleError();
     const busy = hasBusyIndicator();
     const domRunning = stopVisible || waitingAction || busy;
     const responseChanged = Boolean(assistant.hash && assistant.hash !== state.baselineAssistantHash && assistant.text.trim());
-    const stableLongEnough = now - state.latestAssistantChangedAt >= COMPLETION_STABLE_MS;
+    const copyActionCount = getCopyTurnActionCount();
+    const copyActionAdvanced = Boolean(
+      responseChanged && assistant.hasCopyAction && copyActionCount >= state.baselineCopyActionCount
+    );
+    const copyActionStable = copyActionAdvanced && now - state.latestAssistantChangedAt >= COPY_ACTION_STABLE_MS;
+    const textStable = responseChanged && now - state.latestAssistantChangedAt >= COMPLETION_STABLE_MS;
     const ranLongEnough = !state.startedAt || now - state.startedAt >= 1_800;
     const composerReady = isComposerReady();
     const recoveryReady = !state.restoredAt || state.restoredObservedRunning || assistant.hash !== state.restoredAssistantHash || now - state.restoredAt >= RECOVERY_IDLE_GRACE_MS;
     const completed = Boolean(
-      state.running && !domRunning && !visibleError && responseChanged && stableLongEnough && ranLongEnough && composerReady && recoveryReady
+      state.running && !domRunning && !visibleError && ranLongEnough && composerReady && recoveryReady && (copyActionStable || textStable)
     );
-    return { assistant, stopVisible, waitingAction, visibleError, busy, domRunning, composerReady, completed };
+    return { assistant, stopVisible, waitingAction, visibleError, busy, domRunning, composerReady, copyActionCount, copyActionAdvanced, completed };
   }
 
   function buildProbe() {
@@ -295,6 +336,7 @@
         questionTitle: getQuestionTitle(resolvedPrompt),
         prompt: cleanText(resolvedPrompt, 240),
         baselineAssistantHash: baselineHash || state.lastSettledAssistantHash || "",
+        baselineCopyActionCount: state.pendingBaselineCopyActionCount,
         latestAssistantHash: getLatestAssistant().hash
       }, 3);
       if (!response?.task?.id) {
@@ -306,6 +348,7 @@
       state.remoteStatus = "running";
       state.startedAt = response.task.startedAt || startedAt;
       state.baselineAssistantHash = response.task.baselineAssistantHash || baselineHash || state.lastSettledAssistantHash || "";
+      state.baselineCopyActionCount = Math.max(0, Number(response.task.baselineCopyActionCount ?? state.pendingBaselineCopyActionCount));
       state.lastReportedStatus = "running";
       state.latestAssistantChangedAt = Date.now();
       state.lastContentChangeAt = Date.now();
@@ -353,6 +396,7 @@
   function clearPendingSubmission() {
     state.pendingPrompt = "";
     state.pendingBaselineHash = "";
+    state.pendingBaselineCopyActionCount = 0;
     state.pendingAt = 0;
     state.pendingConfirmed = false;
     state.nextStartAttemptAt = 0;
@@ -365,6 +409,7 @@
     state.startedAt = 0;
     state.lastReportedStatus = null;
     state.baselineAssistantHash = state.latestAssistantHash;
+    state.baselineCopyActionCount = getCopyTurnActionCount();
     state.restoredAt = 0;
     state.restoredAssistantHash = "";
     state.restoredObservedRunning = false;
@@ -387,7 +432,29 @@
     const node = nodes.at(-1);
     const rawText = String(node?.innerText || node?.textContent || "");
     const text = cleanText(rawText, 50_000);
-    return { node, text, hash: text ? hashText(text) : "", firstLine: getAssistantFirstLine(node, rawText), thinkingTimeText: getThinkingTimeText(node) };
+    return {
+      node,
+      text,
+      hash: text ? hashText(text) : "",
+      hasCopyAction: hasCopyTurnAction(node),
+      firstLine: getAssistantFirstLine(node, rawText),
+      thinkingTimeText: getThinkingTimeText(node)
+    };
+  }
+
+  function getCopyTurnActionCount() {
+    return document.querySelectorAll('button[data-testid="copy-turn-action-button"]').length;
+  }
+
+  function hasCopyTurnAction(node) {
+    if (!node) return false;
+    const turn = node.closest?.('[data-testid^="conversation-turn-"], article');
+    if (turn?.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
+    let parent = node.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+      if (parent.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
+    }
+    return false;
   }
 
   function getUserMessages() { return [...document.querySelectorAll('[data-message-author-role="user"]')]; }
@@ -451,6 +518,8 @@
   function getPageKey(value) {
     try {
       const url = new URL(value, location.origin);
+      const conversationId = getConversationId(url.href);
+      if (conversationId) return `${url.origin}/c/${conversationId}`;
       return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`;
     } catch {
       return String(value || "");
@@ -474,6 +543,11 @@
   function isConversationPromotion(previousUrl, currentUrl, now = Date.now()) {
     const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= URL_PROMOTION_WINDOW_MS);
     return isDraftChatUrl(previousUrl) && Boolean(getConversationId(currentUrl)) && (state.running || recentSubmission);
+  }
+  function isAmbiguousConversationTransition(previousUrl, currentUrl) {
+    const previousId = getConversationId(previousUrl);
+    const currentId = getConversationId(currentUrl);
+    return Boolean(previousId) !== Boolean(currentId);
   }
   function getQuestionTitle(value) {
     const raw = String(value || "").replace(/\r/g, "").trim();

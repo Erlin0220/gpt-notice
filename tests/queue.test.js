@@ -27,13 +27,21 @@ assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }),
 
 const runningQueue = core.normalizeQueue({
   activeItemId: itemA.id,
-  items: [{ ...itemA, status: "running", startedAt: Date.now() - 10_000, baselineAssistantHash: "same", baselineAssistantCount: 2 }, itemB]
+  items: [{ ...itemA, status: "running", startedAt: Date.now() - 10_000, baselineAssistantHash: "same", baselineAssistantCount: 2, baselineCopyActionCount: 2 }, itemB]
 }, "c:test");
 const active = runningQueue.items[0];
 assert.equal(core.isItemCompleted(active, {
   assistantHash: "new", assistantText: "回复完成", assistantCount: 3, composerReady: true,
   stopVisible: false, waitingAction: false, busy: false, visibleError: false, stableForMs: 4_500
 }), true);
+assert.equal(core.isItemCompleted(active, {
+  assistantHash: "new-copy", assistantText: "回复完成", assistantCount: 3, assistantHasCopyAction: true, copyActionCount: 3, composerReady: true,
+  stopVisible: false, waitingAction: false, busy: false, visibleError: false, stableForMs: 700
+}), true, "new reply copy action should complete faster than the text-stability fallback");
+assert.equal(core.isItemCompleted(active, {
+  assistantHash: "new-no-copy", assistantText: "仍在输出", assistantCount: 3, assistantHasCopyAction: false, copyActionCount: 2, composerReady: true,
+  stopVisible: false, waitingAction: false, busy: false, visibleError: false, stableForMs: 700
+}), false, "without a copy action the four-second text stability fallback must remain");
 
 const otherLeaseQueue = core.normalizeQueue({
   ...runningQueue,
@@ -53,4 +61,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.3 tests passed");
+console.log("queue v0.6.4 tests passed");
