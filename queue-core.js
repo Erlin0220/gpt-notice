@@ -35,6 +35,7 @@
       finishedAt: item.finishedAt ? Number(item.finishedAt) : null,
       baselineAssistantHash: String(item.baselineAssistantHash || ""),
       baselineAssistantCount: Math.max(0, Number(item.baselineAssistantCount || 0)),
+      baselineCopyActionCount: Math.max(0, Number(item.baselineCopyActionCount || 0)),
       baselineUserCount: Math.max(0, Number(item.baselineUserCount || 0)),
       error: cleanText(item.error || "", 240)
     };
@@ -138,9 +139,13 @@
     if (!item || !["dispatching", "running"].includes(item.status)) return false;
     if (snapshot?.stopVisible || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.visibleError || !snapshot?.composerReady) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
-    if (stableForMs < 4_000 || (item.startedAt && now - item.startedAt < 1_800)) return false;
+    if (item.startedAt && now - item.startedAt < 1_800) return false;
     const responseAdvanced = Boolean(Number(snapshot.assistantCount || 0) > Number(item.baselineAssistantCount || 0) || (snapshot.assistantHash && snapshot.assistantHash !== item.baselineAssistantHash));
     if (!responseAdvanced || !String(snapshot.assistantText || "").trim()) return false;
+    const copyActionAdvanced = Boolean(
+      snapshot.assistantHasCopyAction && Number(snapshot.copyActionCount || 0) >= Number(item.baselineCopyActionCount || 0)
+    );
+    if (stableForMs < (copyActionAdvanced ? 600 : 4_000)) return false;
     if (snapshot.busy && stableForMs < 8_000) return false;
     return true;
   }

@@ -31,6 +31,7 @@
     queue: null,
     assistantHash: "",
     assistantText: "",
+    assistantHasCopyAction: false,
     assistantChangedAt: Date.now(),
     lastUrl: location.href,
     lastSnapshot: null,
@@ -147,6 +148,8 @@
       assistantHash: assistant.hash,
       assistantText: assistant.text,
       assistantCount: assistant.count,
+      assistantHasCopyAction: assistant.hasCopyAction,
+      copyActionCount: getCopyTurnActionCount(),
       stopVisible,
       waitingAction,
       busy,
@@ -171,9 +174,10 @@
   }
 
   function updateAssistantTracking(assistant, now) {
-    if (assistant.hash === runtime.assistantHash && assistant.text === runtime.assistantText) return;
+    if (assistant.hash === runtime.assistantHash && assistant.text === runtime.assistantText && assistant.hasCopyAction === runtime.assistantHasCopyAction) return;
     runtime.assistantHash = assistant.hash;
     runtime.assistantText = assistant.text;
+    runtime.assistantHasCopyAction = assistant.hasCopyAction;
     runtime.assistantChangedAt = now;
   }
 
@@ -181,6 +185,7 @@
     const assistant = getLatestAssistant();
     runtime.assistantHash = assistant.hash;
     runtime.assistantText = assistant.text;
+    runtime.assistantHasCopyAction = assistant.hasCopyAction;
     runtime.assistantChangedAt = Date.now();
   }
 
@@ -472,6 +477,7 @@
         item.finishedAt = null;
         item.baselineAssistantHash = snapshot.assistantHash;
         item.baselineAssistantCount = snapshot.assistantCount;
+        item.baselineCopyActionCount = snapshot.copyActionCount;
         item.baselineUserCount = snapshot.userCount;
         item.error = "";
         current.activeItemId = item.id;
@@ -1145,7 +1151,22 @@
     const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')].filter((node) => isVisible(node) || node.textContent?.trim());
     const node = nodes.at(-1);
     const text = core.cleanText(node?.innerText || node?.textContent || "", 50_000);
-    return { node, text, hash: text ? hashText(text) : "", count: nodes.length };
+    return { node, text, hash: text ? hashText(text) : "", count: nodes.length, hasCopyAction: hasCopyTurnAction(node) };
+  }
+
+  function getCopyTurnActionCount() {
+    return document.querySelectorAll('button[data-testid="copy-turn-action-button"]').length;
+  }
+
+  function hasCopyTurnAction(node) {
+    if (!node) return false;
+    const turn = node.closest?.('[data-testid^="conversation-turn-"], article');
+    if (turn?.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
+    let parent = node.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
+      if (parent.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
+    }
+    return false;
   }
 
   function getUserMessages() { return [...document.querySelectorAll('[data-message-author-role="user"]')]; }
