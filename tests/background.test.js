@@ -137,7 +137,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.match(storage.tasks[second.task.id].stopReason, /页面已关闭/);
   assert.equal(calls.tabsCreate.length, 0, "closing a task tab must never recreate it");
 
-  console.log("background v0.6.2 tests passed");
+  console.log("background v0.6.3 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
