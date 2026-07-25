@@ -8,8 +8,7 @@ assert.ok(guard.compareInstanceAge(newerInstance, olderInstance) > 0);
 assert.ok(guard.compareInstanceAge(olderInstance, newerInstance) < 0);
 assert.equal(guard.compareInstanceAge(newerInstance, newerInstance), 0);
 
-function createRoot() {
-  const values = new Map();
+function createRoot(values = new Map()) {
   return {
     sessionStorage: {
       setItem(key, value) { values.set(key, String(value)); },
@@ -18,7 +17,8 @@ function createRoot() {
   };
 }
 
-const firstDocument = createRoot();
+const sharedSession = new Map();
+const firstDocument = createRoot(sharedSession);
 const firstPrepared = guard.preparePageInstance(firstDocument, 10_000, 0.31);
 assert.equal(firstPrepared, firstDocument.sessionStorage.getItem(guard.INSTANCE_STORAGE_KEY));
 assert.equal(
@@ -27,10 +27,13 @@ assert.equal(
   "the same document must keep one stable page-instance id"
 );
 
-const refreshedDocument = createRoot();
-const refreshedPrepared = guard.preparePageInstance(refreshedDocument, 20_000, 0.41);
+const refreshedDocument = createRoot(sharedSession);
+const refreshedPrepared = guard.preparePageInstance(refreshedDocument, 10_000, 0.41);
 assert.notEqual(refreshedPrepared, firstPrepared, "a refreshed document must receive a new page-instance id");
-assert.ok(guard.compareInstanceAge(refreshedPrepared, firstPrepared) > 0);
+assert.ok(
+  guard.compareInstanceAge(refreshedPrepared, firstPrepared) > 0,
+  "a same-millisecond reload must still receive a strictly newer instance identity"
+);
 
 const identity = { tabId: 7, instanceId: refreshedPrepared, queueKey: "tab:7:session:c:test" };
 const lease = { ...identity, ownerTabId: identity.tabId, ownerInstanceId: identity.instanceId, ownerQueueKey: identity.queueKey, leaseId: "lease-new" };
