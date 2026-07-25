@@ -4,7 +4,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 class FakeElement {
-  constructor({ text = "", attrs = {}, tag = "div", copyAction = false } = {}) {
+  constructor({ text = "", attrs = {}, tag = "div", copyAction = false, visible = true } = {}) {
     this.innerText = text;
     this.textContent = text;
     this.value = text;
@@ -14,10 +14,11 @@ class FakeElement {
     this.hidden = false;
     this.title = "";
     this.copyAction = copyAction;
+    this.visible = visible;
     this.parentElement = null;
   }
   getAttribute(name) { return this.attrs[name] ?? null; }
-  getBoundingClientRect() { return { width: 100, height: 30 }; }
+  getBoundingClientRect() { return this.visible ? { width: 100, height: 30 } : { width: 0, height: 0 }; }
   closest(selector) {
     if (selector === "button" && this.tag === "button") return this;
     if ((selector.includes("article") || selector.includes("conversation-turn")) && this.tag === "article") return this;
@@ -29,23 +30,27 @@ class FakeElement {
     return null;
   }
   querySelectorAll() { return []; }
+  contains(node) { return node === this; }
 }
 
 const listeners = new Map();
 const intervals = [];
 const userMessages = [];
 const assistantMessages = [];
-const composer = new FakeElement({ text: "测试发送", tag: "textarea" });
+const staleProjectComposer = new FakeElement({ text: "", tag: "textarea", visible: false });
+const composer = new FakeElement({ text: "测试发送", tag: "textarea", visible: true });
 const sendButton = new FakeElement({ tag: "button", attrs: { id: "composer-submit-button" } });
 const document = {
   readyState: "complete",
   documentElement: new FakeElement(),
+  activeElement: composer,
   addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); },
   querySelector(selector) {
-    if (selector === "#prompt-textarea" || selector === "textarea[placeholder]") return composer;
+    if (selector === "#prompt-textarea" || selector === "textarea[placeholder]") return staleProjectComposer;
     return null;
   },
   querySelectorAll(selector) {
+    if (selector === "#prompt-textarea" || selector === "textarea[placeholder]") return [staleProjectComposer, composer];
     if (selector.includes('data-message-author-role="user"')) return userMessages;
     if (selector.includes('data-message-author-role="assistant"')) return assistantMessages;
     if (selector.includes('copy-turn-action-button')) return assistantMessages.filter((item) => item.copyAction).map(() => new FakeElement({ tag: "button" }));
@@ -67,42 +72,46 @@ const chrome = {
     }
   }
 };
-const location = { href: "https://chatgpt.com/", origin: "https://chatgpt.com" };
+const projectDraftUrl = "https://chatgpt.com/g/g-p-6a5f1944d2a88191bdee52564ce3a883-qing-gan-shi-pin-ji-neng/project";
+const projectConversationUrl = "https://chatgpt.com/g/g-p-6a60d644663c8191ae735ee9173602dd-windowszhong-duan/c/6a641d0e-bbb0-83e8-995e-14b42efe9c71";
+const location = { href: projectDraftUrl, origin: "https://chatgpt.com" };
 class MutationObserver { observe() {} }
 const context = vm.createContext({
   window: {}, globalThis: null, document, chrome, location, console, URL, Date, Math, Promise,
   Element: FakeElement, MutationObserver,
-  getComputedStyle() { return { display: "block", visibility: "visible", opacity: "1" }; },
+  getComputedStyle(element) { return { display: element.visible ? "block" : "none", visibility: "visible", opacity: "1" }; },
   setTimeout, clearTimeout,
   setInterval(fn) { intervals.push(fn); return intervals.length; }
 });
 context.window = context;
 context.globalThis = context;
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "chatgpt-dom.js"), "utf8"), context, { filename: "chatgpt-dom.js" });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"), context, { filename: "content.js" });
 
 (async () => {
   await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(document.querySelector("#prompt-textarea"), composer, "the adapter must replace the stale hidden project composer with the active conversation composer");
   const click = listeners.get("click")[0];
   click({ target: sendButton, defaultPrevented: false });
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 0, "click intent alone must not create a task");
 
   userMessages.push(new FakeElement({ text: "测试发送" }));
-  location.href = "https://chatgpt.com/c/new-thread";
+  location.href = projectConversationUrl;
   await intervals[0]();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "root-to-conversation promotion must not cancel the pending task");
-  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "the first task must start after ChatGPT assigns a conversation URL");
-  assert.match(calls.find((call) => call.type === "TASK_STARTED").url, /\/c\/new-thread/);
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "project-draft-to-conversation promotion must not cancel the pending task");
+  assert.equal(calls.filter((call) => call.type === "TASK_STARTED").length, 1, "the first task must start after ChatGPT assigns a project conversation URL");
+  assert.match(calls.find((call) => call.type === "TASK_STARTED").url, /\/c\/6a641d0e-bbb0-83e8-995e-14b42efe9c71/);
 
-  location.href = "https://chatgpt.com/g/g-p-demo/c/new-thread";
+  location.href = "https://chatgpt.com/g/g-p-another-wrapper/c/6a641d0e-bbb0-83e8-995e-14b42efe9c71";
   await intervals[0]();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "same conversation id inside a project path must not stop monitoring");
+  assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "same conversation id inside a changed project path must not stop monitoring");
 
   location.href = "https://chatgpt.com/";
   await intervals[0]();
-  location.href = "https://chatgpt.com/g/g-p-demo/c/new-thread";
+  location.href = projectConversationUrl;
   await intervals[0]();
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 0, "a short temporary route during tab restoration must be ignored");
 
@@ -128,7 +137,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.6.5 lifecycle tests passed");
+  console.log("content v0.6.7 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

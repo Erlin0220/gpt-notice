@@ -11,6 +11,11 @@ assert.equal(core.getNextPendingItem(queue).text, "第一条消息");
 assert.equal(core.getConversationKey("https://chatgpt.com/c/abc?x=1"), "c:abc");
 assert.match(core.getConversationKey("https://chatgpt.com/", "tab-1"), /^temp:/);
 assert.equal(core.getConversationKey("https://chatgpt.com/g/g-p-demo/project", "tab-1"), "project-draft:g-p-demo:tab-1");
+const realProjectDraftKey = core.getConversationKey("https://chatgpt.com/g/g-p-6a5f1944d2a88191bdee52564ce3a883-qing-gan-shi-pin-ji-neng/project", "project-tab");
+const realProjectConversationKey = core.getConversationKey("https://chatgpt.com/g/g-p-6a60d644663c8191ae735ee9173602dd-windowszhong-duan/c/6a641d0e-bbb0-83e8-995e-14b42efe9c71", "project-tab");
+assert.equal(realProjectDraftKey, "project-draft:g-p-6a5f1944d2a88191bdee52564ce3a883-qing-gan-shi-pin-ji-neng:project-tab");
+assert.equal(realProjectConversationKey, "c:6a641d0e-bbb0-83e8-995e-14b42efe9c71");
+assert.equal(core.shouldMigrateQueue(realProjectDraftKey, realProjectConversationKey), true, "a project draft queue must migrate after ChatGPT assigns the project conversation URL");
 assert.equal(core.getTabQueueKey(7, "c:abc", "page-a"), "tab:7:page-a:c:abc");
 assert.notEqual(core.getTabQueueKey(7, "c:abc", "page-a"), core.getTabQueueKey(8, "c:abc", "page-a"), "the same conversation must keep separate queues per tab");
 assert.notEqual(core.getTabQueueKey(7, "c:abc", "page-a"), core.getTabQueueKey(7, "c:abc", "page-b"), "a reused tab id must not inherit another browser-page queue");
@@ -61,4 +66,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.5 tests passed");
+console.log("queue v0.6.7 tests passed");
