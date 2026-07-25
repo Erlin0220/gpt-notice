@@ -55,6 +55,7 @@ assert.ok(queue.includes("expectedLeaseId"), "refresh and release operations mus
 assert.ok(queue.includes("runtime.conversationLease?.leaseId"), "the caller must provide the lease id it actually owns");
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
 assert.ok(core.includes("canAdmit"));
+assert.ok(core.includes("snapshot?.bridgeRunning"), "queue admission must trust the tracked task during transient DOM-idle gaps");
 assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");
 assert.ok(queue.includes('copy-turn-action-button'), "queue completion must recognize the reply copy action");
 assert.ok(queue.includes("messageQueueIndexV3"), "queue metadata must be stored separately");
