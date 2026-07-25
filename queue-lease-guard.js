@@ -26,6 +26,15 @@
     return String(leftId || "").localeCompare(String(rightId || ""));
   }
 
+  function isLeaseOwner(lease, identity, expectedLeaseId = "") {
+    if (!lease || typeof lease !== "object" || !identity) return false;
+    const sameOwner = Number(lease.ownerTabId) === Number(identity.tabId) &&
+      String(lease.ownerInstanceId || "") === String(identity.instanceId || "") &&
+      String(lease.ownerQueueKey || "") === String(identity.queueKey || "");
+    if (!sameOwner) return false;
+    return !expectedLeaseId || String(lease.leaseId || "") === String(expectedLeaseId);
+  }
+
   function preparePageInstance(root = globalThis, now = Date.now(), randomValue = Math.random()) {
     if (root[PREPARED_MARKER]) return root[PREPARED_MARKER];
     const session = root.sessionStorage;
@@ -41,6 +50,7 @@
     createPageInstanceId,
     parsePageInstanceTimestamp,
     compareInstanceAge,
+    isLeaseOwner,
     preparePageInstance
   };
 });
