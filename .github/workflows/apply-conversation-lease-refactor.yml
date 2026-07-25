@@ -4,13 +4,18 @@ on:
   push:
     branches:
       - fix/conversation-lease-instance-guard
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.event.head_commit.message == 'chore: apply conversation lease refactor'
+    if: >-
+      (github.event_name == 'push' && github.event.head_commit.message == 'chore: apply conversation lease refactor') ||
+      (github.event_name == 'pull_request' && github.head_ref == 'fix/conversation-lease-instance-guard')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
