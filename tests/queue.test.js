@@ -31,6 +31,7 @@ assert.equal(core.createQueueItem("超".repeat(220_000)).text.length, core.MAX_T
 const idleSnapshot = { composerReady: true, composerEmpty: true, stopVisible: false, waitingAction: false, busy: false, visibleError: false, manualHold: false, stableForMs: 5_000 };
 assert.equal(core.canAdmit(queue, idleSnapshot), false);
 assert.equal(core.canAdmit(queue, { ...idleSnapshot, busy: true }), true);
+assert.equal(core.canAdmit(queue, { ...idleSnapshot, bridgeRunning: true }), true, "tracked tasks must remain admissible during temporary DOM-idle gaps");
 assert.equal(core.canDispatch(queue, idleSnapshot), true);
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }), false);
 
@@ -66,4 +67,4 @@ assert.equal(moved[0].id, itemB.id);
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.8 tests passed");
+console.log("queue v0.6.9 tests passed");

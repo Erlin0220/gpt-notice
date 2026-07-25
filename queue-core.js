@@ -126,7 +126,7 @@
 
   function canAdmit(queue, snapshot) {
     const normalized = normalizeQueue(queue);
-    return Boolean(normalized.activeItemId || snapshot?.stopVisible || snapshot?.busy || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.manualHold);
+    return Boolean(normalized.activeItemId || snapshot?.stopVisible || snapshot?.busy || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.bridgeRunning || snapshot?.manualHold);
   }
 
   function canDispatch(queue, snapshot, now = Date.now()) {
