@@ -11,12 +11,14 @@ class FakeComposer {
     };
   }
   getAttribute(name) { return this.attributes[name] ?? null; }
+  getBoundingClientRect() { return this.visible ? { width: 100, height: 30 } : { width: 0, height: 0 }; }
   contains(node) { return node === this; }
 }
 
 function createDocument(selectorMap, activeElement = null) {
   return {
     activeElement,
+    querySelector(selector) { return (selectorMap.get(selector) || [])[0] || null; },
     querySelectorAll(selector) { return selectorMap.get(selector) || []; }
   };
 }
@@ -61,5 +63,15 @@ assert.equal(
   activeConversationComposer,
   "a disabled stale composer must not override an enabled visible composer"
 );
+
+const patchedDocument = createDocument(selectorMap, activeConversationComposer);
+const root = {
+  getComputedStyle(node) {
+    return { display: node.visible ? "block" : "none", visibility: "visible", opacity: "1" };
+  }
+};
+assert.equal(dom.install(patchedDocument, root), true);
+assert.equal(patchedDocument.querySelector("#prompt-textarea"), activeConversationComposer);
+assert.equal(dom.install(patchedDocument, root), false, "the adapter must only patch one document once");
 
 console.log("ChatGPT active composer adapter tests passed");
