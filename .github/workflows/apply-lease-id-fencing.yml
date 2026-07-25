@@ -51,6 +51,26 @@ jobs:
                   raise SystemExit(f'expected exactly one match, found {count}: {old[:100]!r}')
               source = source.replace(old, new, 1)
           path.write_text(source, encoding='utf-8')
+
+          test_path = Path('tests/static.test.js')
+          test_source = test_path.read_text(encoding='utf-8')
+          old = '''assert.ok(queue.includes("isCurrentLeaseOwner"), "lease refresh and release must verify the exact page owner");
+          assert.ok(queue.includes("lease.ownerInstanceId === runtime.instanceId"), "lease ownership must include the page instance id");
+          assert.ok(queue.includes("lease.ownerQueueKey === runtime.queueKey"), "lease ownership must include the tab-scoped queue key");
+          assert.ok(queue.includes("leaseGuard.compareInstanceAge"), "only a newer page document may take over a same-tab lease");
+          assert.ok(queue.includes('leaseId: core.createId("lease")'), "each new conversation lease must receive a unique id");'''.replace('          ', '')
+          new = '''assert.ok(leaseGuard.includes("isLeaseOwner"), "lease identity checks must be centralized and testable");
+          assert.ok(leaseGuard.includes("ownerInstanceId"), "lease identity must include the page instance id");
+          assert.ok(leaseGuard.includes("ownerQueueKey"), "lease identity must include the tab-scoped queue key");
+          assert.ok(queue.includes("isCurrentLeaseOwner"), "lease refresh and release must verify the exact page owner");
+          assert.ok(queue.includes("leaseGuard.isLeaseOwner"), "queue lease checks must use the shared exact-owner helper");
+          assert.ok(queue.includes("leaseGuard.compareInstanceAge"), "only a newer page document may take over a same-tab lease");
+          assert.ok(queue.includes('leaseId: core.createId("lease")'), "each new conversation lease must receive a unique id");
+          assert.ok(queue.includes("expectedLeaseId"), "refresh and release operations must fence stale lease calls");
+          assert.ok(queue.includes("runtime.conversationLease?.leaseId"), "the caller must provide the lease id it actually owns");'''.replace('          ', '')
+          if test_source.count(old) != 1:
+              raise SystemExit('static lease assertion block was not found exactly once')
+          test_path.write_text(test_source.replace(old, new, 1), encoding='utf-8')
           PY
 
       - name: Validate extension
@@ -68,6 +88,6 @@ jobs:
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git rm .github/workflows/apply-lease-id-fencing.yml
-          git add queue-v060.js
+          git add queue-v060.js tests/static.test.js
           git commit -m "fix: fence stale conversation lease operations [skip ci]"
           git push origin HEAD:fix/conversation-lease-instance-guard
