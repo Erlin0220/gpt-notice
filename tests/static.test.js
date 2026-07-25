@@ -36,9 +36,13 @@ const leaseGuard = fs.readFileSync(path.join(root, "queue-lease-guard.js"), "utf
 const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
 const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
 assert.ok(leaseGuard.includes("chatgpt-message-queue-instance-v060"), "each document must create a fresh queue page-instance identity");
-assert.ok(leaseGuard.includes("reconcileLeaseMaps"), "lease writes must be reconciled against the current owner");
-assert.ok(leaseGuard.includes("ownerInstanceId"), "conversation leases must include the page-instance owner");
-assert.ok(leaseGuard.includes("ownerTabId: -1"), "older BFCache instances must see the newer instance as another executor");
+assert.ok(leaseGuard.includes("preparePageInstance"), "the lease guard must prepare identity before the queue script starts");
+assert.ok(leaseGuard.includes("compareInstanceAge"), "same-tab takeover must distinguish old and new page documents");
+assert.ok(queue.includes("isCurrentLeaseOwner"), "lease refresh and release must verify the exact page owner");
+assert.ok(queue.includes("lease.ownerInstanceId === runtime.instanceId"), "lease ownership must include the page instance id");
+assert.ok(queue.includes("lease.ownerQueueKey === runtime.queueKey"), "lease ownership must include the tab-scoped queue key");
+assert.ok(queue.includes("leaseGuard.compareInstanceAge"), "only a newer page document may take over a same-tab lease");
+assert.ok(queue.includes('leaseId: core.createId("lease")'), "each new conversation lease must receive a unique id");
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
 assert.ok(core.includes("canAdmit"));
 assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");
