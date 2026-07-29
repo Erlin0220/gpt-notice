@@ -3,7 +3,7 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   root.ChatGPTQueueCore = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createQueueCore() {
-  const QUEUE_SCHEMA_VERSION = 4;
+  const QUEUE_SCHEMA_VERSION = 5;
   const QUEUE_STORAGE_KEY = "messageQueues";
   const WRITE_LOCK_STORAGE_KEY = "messageQueueWriteLocks";
   const ITEM_STATUSES = new Set(["pending", "dispatching", "running", "completed", "failed"]);
@@ -64,6 +64,7 @@
       ownerTabId: queue.ownerTabId !== null && queue.ownerTabId !== undefined && Number.isInteger(Number(queue.ownerTabId)) ? Number(queue.ownerTabId) : null,
       ownerInstanceId: String(queue.ownerInstanceId || ""),
       paused: Boolean(queue.paused),
+      pauseReason: cleanText(queue.pauseReason || "", 120),
       activeItemId: activeItem && ["dispatching", "running"].includes(activeItem.status) ? activeItem.id : null,
       nextDispatchAt: Math.max(0, Number(queue.nextDispatchAt || 0)),
       items,
@@ -133,15 +134,18 @@
     return Boolean(normalized.activeItemId || (!normalized.paused && normalized.items.some((item) => item.status === "pending")));
   }
 
-  function canAdmit(queue, snapshot) {
-    const normalized = normalizeQueue(queue);
-    return Boolean(normalized.activeItemId || snapshot?.stopVisible || snapshot?.busy || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.bridgeRunning || snapshot?.manualHold);
+  function canAdmit(_queue, snapshot) {
+    if (!snapshot || snapshot.supportStatus === "unsupported") return false;
+    if (snapshot.capabilities) return Boolean(snapshot.capabilities.canAdmitQueue);
+    return Boolean(snapshot.composerReady);
   }
 
   function canDispatch(queue, snapshot, now = Date.now()) {
     const normalized = normalizeQueue(queue);
     if (normalized.paused || normalized.activeItemId || !getNextPendingItem(normalized)) return false;
     if (normalized.nextDispatchAt > now) return false;
+    if (snapshot?.supportStatus && snapshot.supportStatus !== "supported") return false;
+    if (snapshot?.compatibility === "blocked" || snapshot?.capabilities?.canDispatchQueue === false) return false;
     if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.bridgeRunning || snapshot.visibleError) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
     if (snapshot.busy && stableForMs < 8_000) return false;
@@ -151,6 +155,8 @@
 
   function isItemCompleted(item, snapshot, now = Date.now()) {
     if (!item || !["dispatching", "running"].includes(item.status)) return false;
+    if (snapshot?.supportStatus && snapshot.supportStatus !== "supported") return false;
+    if (snapshot?.compatibility === "blocked" || snapshot?.capabilities?.canDetectCompletion === false) return false;
     if (snapshot?.stopVisible || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.visibleError || !snapshot?.composerReady) return false;
     const stableForMs = Number(snapshot.stableForMs || 0);
     if (item.startedAt && now - item.startedAt < 1_800) return false;
@@ -164,13 +170,22 @@
     return true;
   }
 
-  function moveItem(items, itemId, direction) {
-    const next = (items || []).map(normalizeItem);
-    const index = next.findIndex((item) => item.id === itemId);
-    const target = direction === "up" ? index - 1 : index + 1;
-    if (index < 0 || target < 0 || target >= next.length) return next;
-    [next[index], next[target]] = [next[target], next[index]];
-    return next;
+  function pauseForCompatibility(queue, reason = "页面兼容性受阻") {
+    const normalized = normalizeQueue(queue);
+    normalized.paused = true;
+    normalized.pauseReason = cleanText(reason, 120);
+    normalized.nextDispatchAt = 0;
+    normalized.updatedAt = Date.now();
+    return normalized;
+  }
+
+  function resumeQueue(queue) {
+    const normalized = normalizeQueue(queue);
+    normalized.paused = false;
+    normalized.pauseReason = "";
+    normalized.nextDispatchAt = Date.now() + 1_000;
+    normalized.updatedAt = Date.now();
+    return normalized;
   }
 
   function shouldRecoverInterruptedQueue(queue) {
@@ -200,6 +215,7 @@
       : item);
     normalized.activeItemId = null;
     normalized.paused = normalized.items.some((item) => item.status === "pending");
+    normalized.pauseReason = normalized.paused ? "页面已刷新" : "";
     normalized.nextDispatchAt = now + 2_000;
     normalized.updatedAt = now;
     return normalized;
@@ -213,6 +229,7 @@
       : item);
     normalized.activeItemId = null;
     normalized.paused = normalized.items.some((item) => item.status === "pending");
+    normalized.pauseReason = normalized.paused ? "页面已关闭或刷新" : "";
     normalized.nextDispatchAt = now + 2_000;
     normalized.updatedAt = now;
     return normalized;
@@ -222,7 +239,7 @@
     QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
     cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId, isProvisionalConversationId,
     getConversationKey, getTabQueueKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
-    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, moveItem, shouldRecoverInterruptedQueue,
+    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, pauseForCompatibility, resumeQueue, shouldRecoverInterruptedQueue,
     shouldPauseQueueAfterPageReload, pauseQueueAfterPageReload, resetInterruptedItems
   };
 });

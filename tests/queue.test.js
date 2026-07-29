@@ -31,13 +31,14 @@ const longText = "长".repeat(150_000);
 assert.equal(core.createQueueItem(longText).text.length, 150_000, "long queue messages must not be truncated to 20k");
 assert.equal(core.createQueueItem("超".repeat(220_000)).text.length, core.MAX_TEXT_LENGTH);
 
-const idleSnapshot = { composerReady: true, composerEmpty: true, stopVisible: false, waitingAction: false, busy: false, visibleError: false, manualHold: false, stableForMs: 5_000 };
-assert.equal(core.canAdmit(queue, idleSnapshot), false);
-assert.equal(core.canAdmit(queue, { ...idleSnapshot, busy: true }), true);
-assert.equal(core.canAdmit(queue, { ...idleSnapshot, bridgeRunning: true }), true, "tracked tasks must remain admissible during temporary DOM-idle gaps");
+const idleSnapshot = { supportStatus: "supported", compatibility: "healthy", capabilities: { canAdmitQueue: true, canDispatchQueue: true, canDetectCompletion: true }, composerReady: true, composerEmpty: true, stopVisible: false, waitingAction: false, busy: false, visibleError: false, manualHold: false, stableForMs: 5_000 };
+assert.equal(core.canAdmit(queue, idleSnapshot), true, "idle work pages must allow users to pre-save queue items");
+assert.equal(core.canAdmit(queue, { ...idleSnapshot, supportStatus: "unsupported" }), false);
+assert.equal(core.canAdmit(queue, { ...idleSnapshot, compatibility: "blocked", capabilities: { ...idleSnapshot.capabilities, canAdmitQueue: true, canDispatchQueue: false } }), true, "blocked pages may still save text when the active composer is unambiguous");
 assert.equal(core.canDispatch(queue, idleSnapshot), true);
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, bridgeRunning: true }), false, "automatic dispatch must wait for the notifier to finish the previous task and notification");
 assert.equal(core.canDispatch(queue, { ...idleSnapshot, composerEmpty: false }), false);
+assert.equal(core.canDispatch(queue, { ...idleSnapshot, compatibility: "blocked", capabilities: { ...idleSnapshot.capabilities, canDispatchQueue: false } }), false);
 
 const runningQueue = core.normalizeQueue({
   activeItemId: itemA.id,
@@ -80,9 +81,16 @@ assert.equal(recovered.activeItemId, null);
 assert.equal(recovered.items[0].status, "pending");
 assert.equal(recovered.paused, true, "interrupted queue must pause instead of resending automatically");
 
-const moved = core.moveItem(queue.items, itemB.id, "up");
-assert.equal(moved[0].id, itemB.id);
+const compatibilityPaused = core.pauseForCompatibility(queue, "页面兼容性受阻");
+assert.equal(compatibilityPaused.paused, true);
+assert.equal(compatibilityPaused.pauseReason, "页面兼容性受阻");
+assert.equal(core.getNextPendingItem(compatibilityPaused).id, itemA.id, "compatibility pauses must preserve FIFO order");
+const resumedQueue = core.resumeQueue(compatibilityPaused);
+assert.equal(resumedQueue.paused, false);
+assert.equal(resumedQueue.pauseReason, "");
+assert.equal(core.getNextPendingItem(resumedQueue).id, itemA.id);
+assert.equal(typeof core.moveItem, "undefined", "v0.7.0 removes manual queue reordering");
 const manyPending = Array.from({ length: 130 }, (_, index) => ({ id: `pending-${index}`, text: `pending ${index}`, status: "pending" }));
 assert.equal(core.normalizeQueue({ items: manyPending }, "c:pending").items.length, 130);
 
-console.log("queue v0.6.12 tests passed");
+console.log("queue v0.7.0 tests passed");

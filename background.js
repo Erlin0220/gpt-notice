@@ -1,3 +1,6 @@
+if (typeof importScripts === "function") importScripts("diagnostics.js");
+const diagnostics = globalThis.ChatGPTDiagnostics;
+
 const STORAGE_KEYS = {
   SETTINGS: "settings",
   TASKS: "tasks"
@@ -91,6 +94,9 @@ async function handleMessage(message, sender) {
     case "TASK_STARTED": return handleTaskStarted(message, sender);
     case "TASK_STATE": return handleTaskState(message, sender);
     case "HEARTBEAT": return handleHeartbeat(message, sender);
+    case "DIAGNOSTIC_EVENT": return recordDiagnosticEvent(message.event || {}, sender);
+    case "GET_DIAGNOSTIC_REPORT": return getDiagnosticReport();
+    case "CLEAR_DIAGNOSTICS": return clearDiagnostics();
     case "GET_POPUP_STATE": return getPopupState();
     case "UPDATE_SETTINGS": return updateSettings(message.settings || {});
     case "TEST_NOTIFICATION": await showTestNotification(); return { ok: true };
@@ -480,6 +486,110 @@ async function openChat() {
   } else {
     await chrome.tabs.create({ url: "https://chatgpt.com/", active: true });
   }
+}
+
+async function recordDiagnosticEvent(event, sender = {}) {
+  if (!diagnostics) return { ok: false, error: "Diagnostics unavailable" };
+  try {
+    const stored = await chrome.storage.local.get([
+      diagnostics.STORAGE_KEYS.EVENTS,
+      diagnostics.STORAGE_KEYS.SALT,
+      diagnostics.STORAGE_KEYS.LATEST_PAGES
+    ]);
+    const salt = stored[diagnostics.STORAGE_KEYS.SALT] || diagnostics.createSalt();
+    const tabId = Number.isInteger(sender.tab?.id) ? sender.tab.id : null;
+    const pageAlias = tabId === null ? "" : await diagnostics.hashIdentifier(salt, `tab:${tabId}`, "page");
+    const sessionAlias = event.sessionKey ? await diagnostics.hashIdentifier(salt, event.sessionKey, "session") : "";
+    const normalized = {
+      ...event,
+      pageAlias,
+      sessionAlias,
+      summary: diagnostics.sanitizeText(event.summary || "", 160)
+    };
+    const events = diagnostics.mergeEvent(stored[diagnostics.STORAGE_KEYS.EVENTS], normalized);
+    const updates = {
+      [diagnostics.STORAGE_KEYS.EVENTS]: events,
+      [diagnostics.STORAGE_KEYS.SALT]: salt,
+      [diagnostics.STORAGE_KEYS.META]: { schemaVersion: diagnostics.EVENT_SCHEMA_VERSION, updatedAt: Date.now() }
+    };
+    if (event.snapshot && pageAlias) {
+      const pages = { ...(stored[diagnostics.STORAGE_KEYS.LATEST_PAGES] || {}) };
+      pages[pageAlias] = {
+        alias: pageAlias,
+        snapshot: diagnostics.normalizePublicSnapshot(event.snapshot),
+        updatedAt: Date.now(),
+        expiresAt: Date.now() + 24 * 60 * 60 * 1000
+      };
+      for (const [key, value] of Object.entries(pages)) if (Number(value?.expiresAt || 0) < Date.now()) delete pages[key];
+      updates[diagnostics.STORAGE_KEYS.LATEST_PAGES] = pages;
+    }
+    await chrome.storage.local.set(updates);
+    return { ok: true };
+  } catch (error) {
+    console.debug("[gpt-notice diagnostics] event write failed", error);
+    return { ok: false, error: "diagnostic_write_failed" };
+  }
+}
+
+async function getDiagnosticReport() {
+  if (!diagnostics) return { ok: false, error: "Diagnostics unavailable" };
+  const state = await readState();
+  const permissionLevel = await chrome.notifications.getPermissionLevel();
+  const stored = await chrome.storage.local.get([
+    diagnostics.STORAGE_KEYS.EVENTS,
+    diagnostics.STORAGE_KEYS.LATEST_PAGES,
+    QUEUE_STORAGE_KEYS.INDEX,
+    QUEUE_STORAGE_KEYS.LEASES
+  ]);
+  let currentPage = null;
+  let pageProbeStatus = "no_page";
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs.find((candidate) => isChatUrl(candidate.url));
+    if (Number.isInteger(tab?.id) && typeof chrome.tabs.sendMessage === "function") {
+      const response = await chrome.tabs.sendMessage(tab.id, { type: "GET_PAGE_SNAPSHOT" });
+      if (response?.snapshot) {
+        currentPage = diagnostics.normalizePublicSnapshot(response.snapshot);
+        pageProbeStatus = "ok";
+      } else {
+        pageProbeStatus = "no_response";
+      }
+    }
+  } catch {
+    pageProbeStatus = "no_response";
+  }
+  const manifest = typeof chrome.runtime.getManifest === "function" ? chrome.runtime.getManifest() : { version: "0.0.0", manifest_version: 3 };
+  const userAgent = String(globalThis.navigator?.userAgent || "");
+  const browserMajorVersion = userAgent.match(/(?:Chrome|Chromium)\/(\d+)/)?.[1] || "unknown";
+  const platform = String(globalThis.navigator?.userAgentData?.platform || globalThis.navigator?.platform || "unknown");
+  const report = diagnostics.buildReport({
+    extensionVersion: manifest.version,
+    manifestVersion: manifest.manifest_version,
+    browserMajorVersion,
+    platform,
+    notificationPermission: permissionLevel,
+    tasks: Object.values(state.tasks).sort((a, b) => b.updatedAt - a.updatedAt).map(publicTask),
+    queueIndex: stored[QUEUE_STORAGE_KEYS.INDEX] || {},
+    leases: stored[QUEUE_STORAGE_KEYS.LEASES] || {},
+    currentPage,
+    events: stored[diagnostics.STORAGE_KEYS.EVENTS] || []
+  });
+  return {
+    ok: true,
+    report,
+    markdown: diagnostics.toMarkdown(report),
+    pageProbeStatus
+  };
+}
+
+async function clearDiagnostics() {
+  if (!diagnostics) return { ok: false, error: "Diagnostics unavailable" };
+  await chrome.storage.local.remove([
+    diagnostics.STORAGE_KEYS.EVENTS,
+    diagnostics.STORAGE_KEYS.META,
+    diagnostics.STORAGE_KEYS.LATEST_PAGES
+  ]);
+  return { ok: true };
 }
 
 async function getPopupState() {

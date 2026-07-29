@@ -2,6 +2,9 @@
   if (window.__CHATGPT_TASK_NOTIFIER_LOADED__) return;
   window.__CHATGPT_TASK_NOTIFIER_LOADED__ = true;
 
+  const pageAdapter = globalThis.ChatGPTPageAdapter;
+  if (!pageAdapter) return;
+
   const COMPLETION_STABLE_MS = 4_000;
   const COPY_ACTION_STABLE_MS = 600;
   const NAVIGATION_CONFIRM_MS = 2_000;
@@ -46,7 +49,10 @@
     restoredObservedRunning: false,
     navigationCandidateUrl: "",
     navigationCandidateSince: 0,
-    navigationCandidateTimer: null
+    navigationCandidateTimer: null,
+    documentStartedAt: Math.floor(globalThis.performance?.timeOrigin || Date.now()),
+    lastPageState: null,
+    lastCompatibilityKey: ""
   };
 
   globalThis.ChatGPTTaskNotifierBridge = {
@@ -55,16 +61,22 @@
         taskId: state.taskId,
         running: state.running,
         status: state.remoteStatus,
-        startedAt: state.startedAt
+        startedAt: state.startedAt,
+        compatibility: state.lastPageState?.compatibility || "initializing"
       };
+    },
+    getPublicPageSnapshot() {
+      return pageAdapter.toPublicSnapshot(state.lastPageState || collectPageState());
     }
   };
 
   boot().catch((error) => console.warn("[ChatGPT Task Notifier] boot failed", error));
 
   async function boot() {
-    state.lastUserCount = getUserMessages().length;
-    const assistant = getLatestAssistant();
+    const initial = collectPageState();
+    state.lastPageState = initial;
+    state.lastUserCount = initial.messages.userCount;
+    const assistant = assistantFromPage(initial);
     state.lastAssistantText = assistant.text;
     state.lastAssistantHasCopyAction = assistant.hasCopyAction;
     state.latestAssistantHash = assistant.hash;
@@ -73,8 +85,16 @@
     await bindCurrentPage();
     installSubmissionListeners();
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type !== "PROBE_TASK_STATE") return false;
-      sendResponse({ ok: true, ...buildProbe() });
+      if (message?.type === "PROBE_TASK_STATE") {
+        sendResponse({ ok: true, ...buildProbe() });
+        return false;
+      }
+      if (message?.type === "GET_PAGE_SNAPSHOT") {
+        const current = collectPageState();
+        state.lastPageState = current;
+        sendResponse({ ok: true, snapshot: pageAdapter.toPublicSnapshot(current) });
+        return false;
+      }
       return false;
     });
 
@@ -92,15 +112,19 @@
     await inspect();
   }
 
+  function collectPageState(now = Date.now()) {
+    return pageAdapter.collectPageState({ documentRef: document, locationRef: location, root: globalThis, now, documentStartedAt: state.documentStartedAt });
+  }
+
   async function bindCurrentPage() {
     const response = await sendWithRetry({ type: "PAGE_READY", url: location.href }, 2);
-    if (response?.task && ["running", "waiting_action"].includes(response.task.status)) {
-      attachExistingTask(response.task);
-    }
+    if (response?.task && ["running", "waiting_action"].includes(response.task.status)) attachExistingTask(response.task);
   }
 
   function attachExistingTask(task) {
-    const assistant = getLatestAssistant();
+    const page = collectPageState();
+    const assistant = assistantFromPage(page);
+    state.lastPageState = page;
     state.taskId = task.id;
     state.running = true;
     state.remoteStatus = task.status;
@@ -119,8 +143,8 @@
 
   function installSubmissionListeners() {
     document.addEventListener("click", (event) => {
-      const button = event.target.closest?.("button");
-      if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true" || !looksLikeSendButton(button)) return;
+      const button = event.target?.closest?.("button");
+      if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true" || !pageAdapter.looksLikeSendButton(button)) return;
       rememberPendingSubmission();
     }, true);
 
@@ -132,20 +156,21 @@
 
     document.addEventListener("submit", (event) => {
       if (event.defaultPrevented) return;
-      if (event.target?.querySelector?.("#prompt-textarea, textarea, [contenteditable='true']")) rememberPendingSubmission();
+      const composer = collectPageState().refs.composer;
+      if (composer && (event.target === composer || event.target?.contains?.(composer))) rememberPendingSubmission();
     }, true);
   }
 
   function rememberPendingSubmission() {
-    const prompt = getComposerText();
+    const page = collectPageState();
+    const prompt = cleanText(page.private.composerText, 240);
     if (!prompt) return;
-    const assistant = getLatestAssistant();
-    const latestUserText = getLatestUserText();
-    state.pendingBaselineUserCount = getUserMessages().length;
-    state.pendingBaselineUserHash = hashText(latestUserText);
+    const assistant = assistantFromPage(page);
+    state.pendingBaselineUserCount = page.messages.userCount;
+    state.pendingBaselineUserHash = hashText(page.private.latestUserText);
     state.pendingPrompt = prompt;
     state.pendingBaselineHash = assistant.hash || state.lastSettledAssistantHash || "";
-    state.pendingBaselineCopyActionCount = getCopyTurnActionCount();
+    state.pendingBaselineCopyActionCount = page.messages.copyActionCount;
     state.pendingAt = Date.now();
     state.pendingConfirmed = false;
     state.nextStartAttemptAt = 0;
@@ -168,7 +193,9 @@
     try {
       await handleNavigationChange();
       const now = Date.now();
-      const assistant = getLatestAssistant();
+      const page = collectPageState(now);
+      state.lastPageState = page;
+      const assistant = assistantFromPage(page);
       if (assistant.text !== state.lastAssistantText || assistant.hasCopyAction !== state.lastAssistantHasCopyAction) {
         state.lastAssistantText = assistant.text;
         state.lastAssistantHasCopyAction = assistant.hasCopyAction;
@@ -176,26 +203,34 @@
         state.latestAssistantChangedAt = now;
         state.lastContentChangeAt = now;
       }
-      const snapshot = collectSnapshot(now, assistant);
-      const userCount = getUserMessages().length;
+      const compatibilityKey = `${page.supportStatus}:${page.compatibility}:${page.reasonCodes.join(",")}`;
+      if (compatibilityKey !== state.lastCompatibilityKey) {
+        const previousKey = state.lastCompatibilityKey;
+        state.lastCompatibilityKey = compatibilityKey;
+        recordDiagnostic({
+          type: "page.compatibility_changed",
+          module: "task-monitor",
+          operation: "inspect",
+          result: page.compatibility === "blocked" ? "blocked" : previousKey ? "recovered" : "ok",
+          reasonCode: page.reasonCodes[0] || page.compatibility,
+          snapshot: pageAdapter.toPublicSnapshot(page)
+        });
+      }
+      const snapshot = collectTaskSnapshot(page, now, assistant);
+      const userCount = page.messages.userCount;
       if (state.restoredAt && snapshot.domRunning) state.restoredObservedRunning = true;
 
       const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS);
-      const latestUserText = getLatestUserText();
+      const latestUserText = page.private.latestUserText;
       const latestUserHash = hashText(latestUserText);
       const userMessageConfirmed = userCount > state.pendingBaselineUserCount || Boolean(
-        latestUserHash &&
-        latestUserHash !== state.pendingBaselineUserHash &&
-        samePromptText(latestUserText, state.pendingPrompt)
+        latestUserHash && latestUserHash !== state.pendingBaselineUserHash && samePromptText(latestUserText, state.pendingPrompt)
       );
       if (recentSubmission && userMessageConfirmed) state.pendingConfirmed = true;
       if (!recentSubmission && !state.running) clearPendingSubmission();
 
       if (!state.running && state.pendingConfirmed && now >= state.nextStartAttemptAt) {
-        await startTask({
-          prompt: getLatestUserText() || state.pendingPrompt,
-          baselineHash: state.pendingBaselineHash || state.lastSettledAssistantHash
-        });
+        await startTask({ prompt: latestUserText || state.pendingPrompt, baselineHash: state.pendingBaselineHash || state.lastSettledAssistantHash });
       }
       state.lastUserCount = userCount;
 
@@ -204,6 +239,7 @@
         return;
       }
 
+      if (page.compatibility === "blocked" || page.supportStatus !== "supported") return;
       if (snapshot.stopVisible && state.remoteStatus !== "running") await reportStatus("running", assistant);
       if (snapshot.waitingAction && !snapshot.stopVisible) {
         await reportStatus("waiting_action", assistant);
@@ -213,11 +249,9 @@
         if (await reportStatus("failed", assistant)) finishLocalTask();
         return;
       }
-      if (snapshot.completed) {
-        if (await reportStatus("completed", assistant)) {
-          state.lastSettledAssistantHash = assistant.hash;
-          finishLocalTask();
-        }
+      if (snapshot.completed && await reportStatus("completed", assistant)) {
+        state.lastSettledAssistantHash = assistant.hash;
+        finishLocalTask();
       }
     } catch (error) {
       console.debug("[ChatGPT Task Notifier] inspect failed", error);
@@ -256,12 +290,7 @@
 
     if (previousPageKey && currentPageKey !== previousPageKey && promoted) {
       if (state.running && state.taskId) {
-        const response = await sendWithRetry({
-          type: "PAGE_PROMOTED",
-          taskId: state.taskId,
-          url: currentUrl,
-          previousUrl
-        }, 3);
+        const response = await sendWithRetry({ type: "PAGE_PROMOTED", taskId: state.taskId, url: currentUrl, previousUrl }, 3);
         if (response?.task?.id) {
           state.taskId = response.task.id;
           state.remoteStatus = response.task.status || state.remoteStatus;
@@ -278,8 +307,9 @@
         reason: "已明确进入其他 ChatGPT 会话，旧任务监控已停止"
       }, 3);
       finishLocalTask();
-      state.lastUserCount = getUserMessages().length;
-      const assistant = getLatestAssistant();
+      const page = collectPageState();
+      state.lastUserCount = page.messages.userCount;
+      const assistant = assistantFromPage(page);
       state.lastSettledAssistantHash = assistant.hash;
       state.lastAssistantText = assistant.text;
       state.latestAssistantHash = assistant.hash;
@@ -294,43 +324,58 @@
     state.navigationCandidateTimer = null;
   }
 
-  function collectSnapshot(now = Date.now(), assistant = getLatestAssistant()) {
-    const stopVisible = hasStopControl();
-    const waitingAction = hasApprovalControl();
-    const visibleError = findVisibleError();
-    const busy = hasBusyIndicator();
+  function collectTaskSnapshot(page, now = Date.now(), assistant = assistantFromPage(page)) {
+    const stopVisible = page.controls.stopVisible;
+    const waitingAction = page.controls.waitingAction;
+    const visibleError = page.error.visible;
+    const busy = page.controls.busy;
     const domRunning = stopVisible || waitingAction || busy;
     const responseChanged = Boolean(assistant.hash && assistant.hash !== state.baselineAssistantHash && assistant.text.trim());
-    const copyActionCount = getCopyTurnActionCount();
-    const copyActionAdvanced = Boolean(
-      responseChanged && assistant.hasCopyAction && copyActionCount >= state.baselineCopyActionCount
-    );
+    const copyActionAdvanced = Boolean(responseChanged && assistant.hasCopyAction && page.messages.copyActionCount >= state.baselineCopyActionCount);
     const copyActionStable = copyActionAdvanced && now - state.latestAssistantChangedAt >= COPY_ACTION_STABLE_MS;
     const textStable = responseChanged && now - state.latestAssistantChangedAt >= COMPLETION_STABLE_MS;
     const ranLongEnough = !state.startedAt || now - state.startedAt >= 1_800;
-    const composerReady = isComposerReady();
     const recoveryReady = !state.restoredAt || state.restoredObservedRunning || assistant.hash !== state.restoredAssistantHash || now - state.restoredAt >= RECOVERY_IDLE_GRACE_MS;
     const completed = Boolean(
-      state.running && !domRunning && !visibleError && ranLongEnough && composerReady && recoveryReady && (copyActionStable || textStable)
+      state.running && page.capabilities.canDetectCompletion && !domRunning && !visibleError && ranLongEnough && page.composer.ready && recoveryReady && (copyActionStable || textStable)
     );
-    return { assistant, stopVisible, waitingAction, visibleError, busy, domRunning, composerReady, copyActionCount, copyActionAdvanced, completed };
+    return {
+      assistant,
+      stopVisible,
+      waitingAction,
+      visibleError,
+      busy,
+      domRunning,
+      composerReady: page.composer.ready,
+      copyActionCount: page.messages.copyActionCount,
+      copyActionAdvanced,
+      completed
+    };
   }
 
   function buildProbe() {
-    const snapshot = collectSnapshot();
+    const page = collectPageState();
+    state.lastPageState = page;
+    const snapshot = collectTaskSnapshot(page);
+    const assistant = assistantFromPage(page);
     return {
       taskId: state.taskId,
       url: location.href,
-      pageReady: document.readyState === "interactive" || document.readyState === "complete",
+      pageReady: page.pageReady,
+      supportStatus: page.supportStatus,
+      compatibility: page.compatibility,
+      reasonCodes: page.reasonCodes,
+      capabilities: page.capabilities,
       stopVisible: snapshot.stopVisible,
       waitingAction: snapshot.waitingAction,
       visibleError: snapshot.visibleError,
       busy: snapshot.busy,
       composerReady: snapshot.composerReady,
       completed: snapshot.completed,
-      latestAssistantHash: snapshot.assistant.hash,
-      assistantFirstLine: snapshot.assistant.firstLine,
-      thinkingTimeText: snapshot.assistant.thinkingTimeText,
+      latestAssistantHash: assistant.hash,
+      assistantFirstLine: assistant.firstLine,
+      thinkingTimeText: assistant.thinkingTimeText,
+      publicPageSnapshot: pageAdapter.toPublicSnapshot(page),
       checkedAt: Date.now()
     };
   }
@@ -340,7 +385,8 @@
     state.startInFlight = true;
     try {
       const startedAt = Date.now();
-      const resolvedPrompt = prompt || getLatestUserText() || state.pendingPrompt || "ChatGPT 任务";
+      const page = collectPageState();
+      const resolvedPrompt = prompt || page.private.latestUserText || state.pendingPrompt || "ChatGPT 任务";
       const response = await sendWithRetry({
         type: "TASK_STARTED",
         taskId: state.taskId,
@@ -349,7 +395,8 @@
         prompt: cleanText(resolvedPrompt, 240),
         baselineAssistantHash: baselineHash || state.lastSettledAssistantHash || "",
         baselineCopyActionCount: state.pendingBaselineCopyActionCount,
-        latestAssistantHash: getLatestAssistant().hash
+        latestAssistantHash: page.private.assistantHash,
+        compatibility: page.compatibility
       }, 3);
       if (!response?.task?.id) {
         state.nextStartAttemptAt = Date.now() + START_RETRY_MS;
@@ -368,13 +415,14 @@
       state.restoredAssistantHash = "";
       state.restoredObservedRunning = false;
       clearPendingSubmission();
+      recordDiagnostic({ type: "task.started", module: "task-monitor", operation: "start", result: "started", reasonCode: "user_message_confirmed" });
       return true;
     } finally {
       state.startInFlight = false;
     }
   }
 
-  async function reportStatus(status, assistant = getLatestAssistant(), extra = {}) {
+  async function reportStatus(status, assistant = assistantFromPage(collectPageState()), extra = {}) {
     if (!state.taskId) return false;
     if (state.lastReportedStatus === status) {
       state.remoteStatus = status;
@@ -383,22 +431,31 @@
     if (state.reportInFlight) return false;
     state.reportInFlight = true;
     try {
+      const page = state.lastPageState || collectPageState();
       const response = await sendWithRetry({
         type: "TASK_STATE",
         taskId: state.taskId,
         status,
         url: location.href,
-        prompt: getLatestUserText(),
-        questionTitle: getQuestionTitle(getLatestUserText()),
+        prompt: page.private.latestUserText,
+        questionTitle: getQuestionTitle(page.private.latestUserText),
         assistantFirstLine: assistant.firstLine || "",
         thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),
         latestAssistantHash: assistant.hash,
         lastContentChangeAt: state.lastContentChangeAt,
+        compatibility: page.compatibility,
         ...extra
       }, 3);
       if (!response?.ok) return false;
       state.lastReportedStatus = status;
       state.remoteStatus = status;
+      recordDiagnostic({
+        type: `task.${status}`,
+        module: "task-monitor",
+        operation: "state",
+        result: status === "failed" ? "failed" : status === "completed" ? "completed" : "ok",
+        reasonCode: page.compatibility || ""
+      });
       return true;
     } finally {
       state.reportInFlight = false;
@@ -423,7 +480,7 @@
     state.startedAt = 0;
     state.lastReportedStatus = null;
     state.baselineAssistantHash = state.latestAssistantHash;
-    state.baselineCopyActionCount = getCopyTurnActionCount();
+    state.baselineCopyActionCount = state.lastPageState?.messages.copyActionCount || 0;
     state.restoredAt = 0;
     state.restoredAssistantHash = "";
     state.restoredObservedRunning = false;
@@ -432,144 +489,65 @@
 
   async function sendHeartbeat() {
     if (!state.taskId || !state.running) return;
+    const page = collectPageState();
+    state.lastPageState = page;
     const response = await sendWithRetry({
       type: "HEARTBEAT",
       taskId: state.taskId,
       url: location.href,
-      latestAssistantHash: getLatestAssistant().hash
+      latestAssistantHash: page.private.assistantHash,
+      compatibility: page.compatibility
     }, 2);
     if (response?.task?.status) state.remoteStatus = response.task.status;
   }
 
-  function getLatestAssistant() {
-    const nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')].filter(isVisibleOrHasContent);
-    const node = nodes.at(-1);
-    const rawText = String(node?.innerText || node?.textContent || "");
-    const text = cleanText(rawText, 50_000);
+  function assistantFromPage(page) {
     return {
-      node,
-      text,
-      hash: text ? hashText(text) : "",
-      hasCopyAction: hasCopyTurnAction(node),
-      firstLine: getAssistantFirstLine(node, rawText),
-      thinkingTimeText: getThinkingTimeText(node)
+      node: page?.refs?.assistantNode || null,
+      text: String(page?.private?.assistantText || ""),
+      hash: String(page?.private?.assistantHash || ""),
+      count: Math.max(0, Number(page?.messages?.assistantCount || 0)),
+      hasCopyAction: Boolean(page?.messages?.latestAssistantHasCopyAction),
+      firstLine: String(page?.private?.assistantFirstLine || ""),
+      thinkingTimeText: String(page?.private?.thinkingTimeText || "")
     };
   }
 
-  function getCopyTurnActionCount() {
-    return document.querySelectorAll('button[data-testid="copy-turn-action-button"]').length;
-  }
-
-  function hasCopyTurnAction(node) {
-    if (!node) return false;
-    const turn = node.closest?.('[data-testid^="conversation-turn-"], article');
-    if (turn?.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
-    let parent = node.parentElement;
-    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
-      if (parent.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
-    }
-    return false;
-  }
-
-  function getUserMessages() { return [...document.querySelectorAll('[data-message-author-role="user"]')]; }
-  function getLatestUserText() {
-    const node = getUserMessages().at(-1);
-    return cleanText(node?.innerText || node?.textContent || "ChatGPT 任务", 240);
-  }
-  function getComposerText() {
-    const composer = findComposer();
-    return composer ? cleanText(composer.value || composer.innerText || composer.textContent || "", 240) : "";
-  }
-  function findComposer() {
-    return document.querySelector("#prompt-textarea") || document.querySelector("textarea[placeholder]") || document.querySelector('[contenteditable="true"][data-virtualkeyboard]') || document.querySelector('main [contenteditable="true"]');
-  }
   function isComposerElement(target) {
-    return target instanceof Element && Boolean(target.matches?.('#prompt-textarea, textarea, [contenteditable="true"]') || target.closest?.('#prompt-textarea, textarea, [contenteditable="true"]'));
+    const composer = collectPageState().refs.composer;
+    return Boolean(target && composer && (target === composer || composer.contains?.(target) || target.closest?.("#prompt-textarea, textarea, [contenteditable='true']") === composer));
   }
-  function isComposerReady() {
-    const composer = findComposer();
-    return Boolean(composer && isVisible(composer) && composer.getAttribute("aria-disabled") !== "true" && !composer.disabled);
-  }
-  function looksLikeSendButton(button) {
-    const id = (button.id || button.getAttribute("id") || "").toLowerCase();
-    const testId = (button.getAttribute("data-testid") || "").toLowerCase();
-    const label = combinedText(button).toLowerCase();
-    return id === "composer-submit-button" || testId.includes("send-button") || testId.includes("composer-submit") || /^(send|发送|傳送|提交)$/.test(label) || label.includes("send message") || label.includes("发送消息");
-  }
-  function hasStopControl() {
-    const selectors = ['button[data-testid*="stop"]', 'button[aria-label*="Stop"]', 'button[aria-label*="stop"]', 'button[aria-label*="停止"]', 'button[aria-label*="中止"]', 'button[aria-label*="取消生成"]'];
-    if (selectors.some((selector) => [...document.querySelectorAll(selector)].some(isVisible))) return true;
-    return getRelevantButtons().some((button) => ["stop generating", "stop responding", "停止生成", "停止响应", "中止生成", "取消生成"].some((keyword) => combinedText(button).toLowerCase().includes(keyword)));
-  }
-  function hasApprovalControl() {
-    const labels = new Set(["allow", "approve", "confirm", "continue", "run", "allow once", "always allow", "允许", "批准", "确认", "继续", "运行", "允许一次", "始终允许"]);
-    return getRelevantButtons().some((button) => labels.has(combinedText(button).toLowerCase()));
-  }
-  function findVisibleError() {
-    const words = ["something went wrong", "there was an error generating a response", "network error", "conversation not found", "出现错误", "发生错误", "网络错误", "生成回复时出错", "找不到对话"];
-    return [...document.querySelectorAll('[role="alert"], main [data-testid*="error"], main .text-red-500')].filter(isVisible).some((node) => {
-      const text = cleanText(node.innerText || node.textContent || "", 500).toLowerCase();
-      return words.some((word) => text.includes(word));
-    });
-  }
-  function hasBusyIndicator() {
-    const words = ["working", "thinking", "searching", "running", "generating", "正在处理", "正在思考", "正在搜索", "正在运行", "正在生成"];
-    return [...document.querySelectorAll('main [aria-live="polite"], main [role="status"], main [data-state="loading"]')].filter(isVisible).some((node) => {
-      const text = cleanText(node.innerText || node.textContent || "", 200).toLowerCase();
-      return words.some((word) => text.includes(word));
-    });
-  }
-  function getRelevantButtons() { return [...document.querySelectorAll("main button")].filter(isVisible); }
-  function combinedText(element) { return cleanText(`${element.getAttribute("aria-label") || ""} ${element.innerText || ""} ${element.title || ""}`, 120); }
-  function isVisible(element) {
-    if (!(element instanceof Element)) return false;
-    const style = getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-  function isVisibleOrHasContent(element) { return Boolean(element && (isVisible(element) || element.textContent?.trim())); }
+
   function getPageKey(value) {
     try {
       const url = new URL(value, location.origin);
-      const conversationId = getConversationId(url.href);
+      const conversationId = pageAdapter.getConversationId(url.href, location.origin);
       if (conversationId) return `${url.origin}/c/${conversationId}`;
       return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`;
     } catch {
       return String(value || "");
     }
   }
-  function getConversationId(value) {
-    try {
-      return new URL(value, location.origin).pathname.match(/(?:^|\/)c\/([^/?#]+)/)?.[1] || "";
-    } catch {
-      return "";
-    }
-  }
-  function isProvisionalConversationId(value) {
-    return /^WEB:/i.test(String(value || "").trim());
-  }
+
   function isDraftChatUrl(value) {
-    try {
-      const pathname = new URL(value, location.origin).pathname.replace(/\/+$/, "") || "/";
-      return !getConversationId(value) && (pathname === "/" || /(?:^|\/)g\/g-p-[^/]+\/project$/.test(pathname));
-    } catch {
-      return false;
-    }
+    return pageAdapter.classifyRoute(value, location.origin).routeType === "draft";
   }
+
   function isConversationPromotion(previousUrl, currentUrl, now = Date.now()) {
     const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= URL_PROMOTION_WINDOW_MS);
-    const previousId = getConversationId(previousUrl);
-    const currentId = getConversationId(currentUrl);
+    const previousId = pageAdapter.getConversationId(previousUrl, location.origin);
+    const currentId = pageAdapter.getConversationId(currentUrl, location.origin);
     const draftPromotion = isDraftChatUrl(previousUrl) && Boolean(currentId);
-    const provisionalPromotion = isProvisionalConversationId(previousId) && Boolean(currentId) && !isProvisionalConversationId(currentId);
+    const provisionalPromotion = pageAdapter.isProvisionalConversationId(previousId) && Boolean(currentId) && !pageAdapter.isProvisionalConversationId(currentId);
     return (draftPromotion || provisionalPromotion) && (state.running || recentSubmission);
   }
+
   function isAmbiguousConversationTransition(previousUrl, currentUrl) {
-    const previousId = getConversationId(previousUrl);
-    const currentId = getConversationId(currentUrl);
+    const previousId = pageAdapter.getConversationId(previousUrl, location.origin);
+    const currentId = pageAdapter.getConversationId(currentUrl, location.origin);
     return Boolean(previousId) !== Boolean(currentId);
   }
+
   function getQuestionTitle(value) {
     const raw = String(value || "").replace(/\r/g, "").trim();
     let title = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || "ChatGPT 任务";
@@ -577,56 +555,37 @@
     if (indexes.length) title = title.slice(0, Math.min(...indexes) + 1);
     return cleanText(title.replace(/^#+\s*/, ""), 80) || "ChatGPT 任务";
   }
-  function getAssistantFirstLine(node, rawText) {
-    const roots = [node?.querySelector?.("[data-message-content]"), node?.querySelector?.(".markdown"), node?.querySelector?.('[class*="prose"]'), node].filter(Boolean);
-    for (const root of roots) {
-      const blocks = root.matches?.("h1,h2,h3,h4,p,li,blockquote,pre") ? [root] : [...(root.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || [])];
-      for (const block of blocks) {
-        const line = String(block.innerText || block.textContent || "").split(/\n+/).map((item) => item.trim()).find((item) => item && !isAssistantUiLine(item));
-        if (line) return cleanText(line, 240);
-      }
-    }
-    const fallback = String(rawText || "").split(/\n+/).map((line) => line.trim()).find((line) => line && !isAssistantUiLine(line));
-    return cleanText(fallback || "", 240);
-  }
-  function isAssistantUiLine(line) {
-    const normalized = cleanText(line, 160).toLowerCase();
-    return /^(思考了\s*\d|thought for\s*\d|复制$|copy$|分享$|share$|重新生成$|regenerate$|good response$|bad response$)/i.test(normalized);
-  }
-  function getThinkingTimeText(node) {
-    const turn = node?.closest?.('[data-testid^="conversation-turn-"]') || node?.closest?.("article") || node?.parentElement;
-    const text = String(turn?.innerText || node?.innerText || node?.textContent || "");
-    const match = text.match(/(?:思考了|thought for)\s*((?:\d+\s*(?:h|小时|hours?|hrs?)\s*)?(?:\d+\s*(?:m|分钟|minutes?|mins?)\s*)?(?:\d+\s*(?:s|秒|seconds?|secs?))?)/i);
-    if (!match?.[1] || !/\d/.test(match[1])) return "";
-    const duration = match[1];
-    const hours = Number(duration.match(/(\d+)\s*(?:h|小时|hours?|hrs?)/i)?.[1] || 0);
-    const minutes = Number(duration.match(/(\d+)\s*(?:m|分钟|minutes?|mins?)/i)?.[1] || 0);
-    const seconds = Number(duration.match(/(\d+)\s*(?:s|秒|seconds?|secs?)/i)?.[1] || 0);
-    const totalMinutes = hours * 60 + minutes;
-    const parts = [];
-    if (totalMinutes) parts.push(`${totalMinutes}m`);
-    if (seconds || !totalMinutes) parts.push(`${seconds}s`);
-    return `思考了 ${parts.join(" ")}`;
-  }
+
   function formatThinkingTime(elapsedMs) {
     const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
   }
+
   function samePromptText(left, right) {
     const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
     const normalizedLeft = normalize(left);
     const normalizedRight = normalize(right);
     return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
   }
-  function cleanText(value, maxLength) { return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength); }
-  function hashText(text) {
-    let hash = 2166136261;
-    for (let index = 0; index < text.length; index += 1) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 16777619); }
-    return (hash >>> 0).toString(36);
+
+  function cleanText(value, maxLength) {
+    return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
   }
+
+  function hashText(text) {
+    return pageAdapter.hashText(String(text || ""));
+  }
+
+  function recordDiagnostic(event) {
+    try {
+      void chrome.runtime.sendMessage({ type: "DIAGNOSTIC_EVENT", event }).catch(() => {});
+    } catch {}
+  }
+
   function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
   async function sendWithRetry(message, attempts = 3) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {

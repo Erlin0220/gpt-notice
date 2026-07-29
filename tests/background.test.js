@@ -26,7 +26,8 @@ const chrome = {
     onInstalled: createEvent(),
     onStartup: createEvent(),
     onMessage: runtimeMessages,
-    getURL(value) { return `chrome-extension://test/${value}`; }
+    getURL(value) { return `chrome-extension://test/${value}`; },
+    getManifest() { return { version: "0.7.0", manifest_version: 3 }; }
   },
   storage: {
     local: {
@@ -49,6 +50,27 @@ const chrome = {
       return { ...tabs.get(id) };
     },
     async query() { return [...tabs.values()].map((tab) => ({ ...tab })); },
+    async sendMessage(id, message) {
+      if (!tabs.has(id)) throw new Error("tab not found");
+      if (message.type === "GET_PAGE_SNAPSHOT") return {
+        ok: true,
+        snapshot: {
+          schemaVersion: 1,
+          observedAt: Date.now(),
+          pageReady: true,
+          supportStatus: "supported",
+          routeType: "conversation",
+          compatibility: "healthy",
+          reasonCodes: [],
+          capabilities: { canTrackTask: true, canDetectCompletion: true, canAdmitQueue: true, canDispatchQueue: true, canWriteComposer: true, canClickSend: true },
+          composer: { exists: true, ready: true, empty: true, textLengthBucket: "empty", visibleCount: 1, ambiguous: false },
+          controls: { send: { exists: true, enabled: true }, stopVisible: false, waitingAction: false, busy: false },
+          error: { visible: false },
+          messages: { userCount: 1, assistantCount: 1, latestAssistantHasCopyAction: true, copyActionCount: 1 }
+        }
+      };
+      return null;
+    },
     async update(id, patch) {
       calls.tabsUpdate.push({ id, patch });
       Object.assign(tabs.get(id), patch);
@@ -78,7 +100,11 @@ const chrome = {
   }
 };
 
-const context = vm.createContext({ chrome, console, crypto: webcrypto, URL, Date, Math, setTimeout, clearTimeout, Promise });
+const context = vm.createContext({
+  chrome, console, crypto: webcrypto, URL, Date, Math, setTimeout, clearTimeout, Promise,
+  TextEncoder, navigator: { userAgent: "Mozilla/5.0 Chrome/150.0.0.0", platform: "Win32" }
+});
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "diagnostics.js"), "utf8"), context, { filename: "diagnostics.js" });
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8"), context, { filename: "background.js" });
 
 async function send(message, tab = tabs.get(7)) {
@@ -95,6 +121,19 @@ async function send(message, tab = tabs.get(7)) {
   const tabContext = await send({ type: "GET_TAB_CONTEXT" });
   assert.equal(tabContext.tabId, 7);
   assert.equal(tabContext.windowId, 3);
+
+  const diagnosticEvent = await send({
+    type: "DIAGNOSTIC_EVENT",
+    event: { type: "page.compatibility_changed", result: "ok", reasonCode: "healthy", sessionKey: "c:secret", summary: "https://chatgpt.com/c/secret" }
+  });
+  assert.equal(diagnosticEvent.ok, true);
+  assert.equal(storage.diagnosticEventsV1.length, 1);
+  assert.ok(!JSON.stringify(storage.diagnosticEventsV1).includes("c:secret"));
+  const diagnosticReport = await send({ type: "GET_DIAGNOSTIC_REPORT" });
+  assert.equal(diagnosticReport.ok, true);
+  assert.equal(diagnosticReport.report.extension.version, "0.7.0");
+  assert.equal(diagnosticReport.report.currentPage.compatibility, "healthy");
+  assert.ok(!JSON.stringify(diagnosticReport.report).includes("secret"));
 
   const promotedStart = await send({
     type: "TASK_STARTED",
@@ -185,7 +224,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(storage.messageQueueConversationLeasesV1["c:close"], undefined, "closed tab lease must be released");
   assert.ok(storage.messageQueueConversationLeasesV1["c:other"]);
 
-  console.log("background v0.6.12 tests passed");
+  console.log("background v0.7.0 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

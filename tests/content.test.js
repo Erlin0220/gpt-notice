@@ -91,7 +91,8 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
 
 (async () => {
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(document.querySelector("#prompt-textarea"), composer, "the adapter must replace the stale hidden project composer with the active conversation composer");
+  assert.equal(document.querySelector("#prompt-textarea"), staleProjectComposer, "the adapter must not patch the page's native querySelector");
+  assert.equal(context.ChatGPTPageAdapter.findActiveComposer(document, (node) => node.visible), composer, "the shared adapter must select the active composer explicitly");
   const click = listeners.get("click")[0];
   click({ target: sendButton, defaultPrevented: false });
   await new Promise((resolve) => setTimeout(resolve, 30));
@@ -151,7 +152,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.6.12 lifecycle tests passed");
+  console.log("content v0.7.0 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

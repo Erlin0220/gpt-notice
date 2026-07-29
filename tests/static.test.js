@@ -3,126 +3,143 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.join(__dirname, "..");
-const manifest = JSON.parse(fs.readFileSync(path.join(root, "manifest.json"), "utf8"));
+const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+const manifest = JSON.parse(read("manifest.json"));
 assert.match(manifest.version, /^\d+\.\d+\.\d+(?:\.\d+)?$/);
-assert.ok(!manifest.permissions.includes("tabGroups"), "current-page mode must not request tabGroups");
-assert.ok(!manifest.permissions.includes("alarms"), "current-page mode must not request alarms");
-assert.deepEqual(manifest.content_scripts[0].js, ["queue-lease-guard.js", "chatgpt-dom.js", "queue-core.js", "content.js", "queue-v060.js"]);
+assert.ok(!manifest.permissions.includes("tabGroups"));
+assert.ok(!manifest.permissions.includes("alarms"));
+assert.ok(!manifest.permissions.includes("downloads"));
+assert.ok(!manifest.permissions.includes("clipboardWrite"));
+assert.deepEqual(manifest.content_scripts[0].js, [
+  "queue-lease-guard.js",
+  "chatgpt-dom.js",
+  "queue-core.js",
+  "queue-ui.js",
+  "content.js",
+  "queue-v060.js"
+]);
 
-const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+const background = read("background.js");
+const pageAdapter = read("chatgpt-dom.js");
+const content = read("content.js");
+const core = read("queue-core.js");
+const queue = read("queue-v060.js");
+const queueUi = read("queue-ui.js");
+const diagnostics = read("diagnostics.js");
+const popup = read("popup.js");
+const popupHtml = read("popup.html");
+
+assert.ok(background.includes('importScripts("diagnostics.js")'));
+assert.ok(background.includes('case "DIAGNOSTIC_EVENT"'));
+assert.ok(background.includes('case "GET_DIAGNOSTIC_REPORT"'));
+assert.ok(background.includes('case "CLEAR_DIAGNOSTICS"'));
 assert.ok(background.includes("stopTasksForClosedTab"));
-assert.ok(background.includes("页面已关闭，已停止监控"));
+assert.ok(background.includes("cleanupQueueStateForClosedTab"));
 assert.ok(!background.includes("chrome.tabs.group"));
 assert.ok(!background.includes("chrome.alarms"));
-assert.ok(!background.includes("active: false"), "service worker must not create background monitor tabs");
+assert.ok(!background.includes("active: false"));
 
-const domAdapter = fs.readFileSync(path.join(root, "chatgpt-dom.js"), "utf8");
-const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
-assert.ok(domAdapter.includes("findActiveComposer"), "project and conversation pages must share active-composer selection");
-assert.ok(domAdapter.includes("documentRef.activeElement"), "the focused composer must be preferred after SPA navigation");
-assert.ok(domAdapter.includes("documentRef.querySelector = function activeComposerQuerySelector"), "the adapter must guard existing composer lookups without duplicating queue logic");
-assert.ok(content.includes("ChatGPTTaskNotifierBridge"));
+assert.ok(pageAdapter.includes("collectPageState"));
+assert.ok(pageAdapter.includes("evaluatePageFacts"));
+assert.ok(pageAdapter.includes("toPublicSnapshot"));
+assert.ok(pageAdapter.includes('supportStatus: "initializing"'));
+assert.ok(pageAdapter.includes('blocked.length ? "blocked"'));
+assert.ok(pageAdapter.includes("canDispatchQueue"));
+assert.ok(pageAdapter.includes('reasonCodes: ["page_initializing"]'));
+assert.ok(pageAdapter.includes("findActiveComposer"));
+assert.ok(!pageAdapter.includes("documentRef.querySelector ="), "the adapter must not monkey-patch document.querySelector");
+
+assert.ok(content.includes("ChatGPTPageAdapter"));
+assert.ok(content.includes('message?.type === "GET_PAGE_SNAPSHOT"'));
+assert.ok(content.includes("page.compatibility_changed"));
+assert.ok(content.includes("pendingConfirmed"));
+assert.ok(content.includes("pendingBaselineUserHash"));
+assert.ok(content.includes("PAGE_PROMOTED"));
+assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"));
 assert.ok(!content.includes("location.reload()"));
-assert.ok(!content.includes("isMonitor"), "obsolete background-monitor mode must be removed");
-assert.ok(content.includes("pendingConfirmed"), "task creation must wait for send confirmation");
-assert.ok(content.includes("pendingBaselineUserHash"), "task creation must require evidence of a new user message");
-assert.ok(!content.includes("userCount > state.lastUserCount || snapshot.domRunning"), "busy DOM alone must not create a task");
-assert.ok(content.includes("sendWithRetry"), "task state messages must retry transient failures");
-assert.ok(content.includes('type: "PAGE_CHANGED"'), "SPA navigation must stop the previous task");
-assert.ok(content.includes("RECOVERY_IDLE_GRACE_MS"), "refresh recovery must use a hydration grace period");
-assert.ok(content.includes("PAGE_PROMOTED"), "draft-to-conversation navigation must preserve the active task");
-assert.ok(content.includes("isConversationPromotion"), "URL promotion must be explicitly constrained");
-assert.ok(content.includes("isProvisionalConversationId"), "temporary WEB conversation ids must be promoted instead of cancelled");
-assert.ok(background.includes("isPromotableTaskUrl"), "the background task must keep a promotion window for WEB routes");
-assert.ok(content.includes('copy-turn-action-button'), "task completion must recognize the reply copy action");
-assert.ok(content.includes("COPY_ACTION_STABLE_MS"), "copy action completion needs a short settling interval");
-assert.ok(content.includes("isAmbiguousConversationTransition"), "temporary navigation during tab restoration must use a grace period");
-assert.ok(content.includes("clearNavigationCandidate"), "temporary-route confirmation must use one cleanup-aware timer");
-assert.ok(background.includes("aConversationId === bConversationId"), "background navigation must compare conversation ids before paths");
+assert.ok(!content.includes('button[data-testid*="stop"]'), "task monitoring must not duplicate page selectors");
+assert.ok(!content.includes("something went wrong"), "task monitoring must not duplicate page error keywords");
 
-const leaseGuard = fs.readFileSync(path.join(root, "queue-lease-guard.js"), "utf8");
-const core = fs.readFileSync(path.join(root, "queue-core.js"), "utf8");
-const queue = fs.readFileSync(path.join(root, "queue-v060.js"), "utf8");
-assert.ok(leaseGuard.includes("chatgpt-message-queue-instance-v060"), "each document must create a fresh queue page-instance identity");
-assert.ok(leaseGuard.includes("preparePageInstance"), "the lease guard must prepare identity before the queue script starts");
-assert.ok(leaseGuard.includes("compareInstanceAge"), "same-tab takeover must distinguish old and new page documents");
-assert.ok(leaseGuard.includes("isLeaseOwner"), "lease identity checks must be centralized and testable");
-assert.ok(leaseGuard.includes("ownerInstanceId"), "lease identity must include the page instance id");
-assert.ok(leaseGuard.includes("ownerQueueKey"), "lease identity must include the tab-scoped queue key");
-assert.ok(queue.includes("isCurrentLeaseOwner"), "lease refresh and release must verify the exact page owner");
-assert.ok(queue.includes("leaseGuard.isLeaseOwner"), "queue lease checks must use the shared exact-owner helper");
-assert.ok(queue.includes("leaseGuard.compareInstanceAge"), "only a newer page document may take over a same-tab lease");
-assert.ok(queue.includes('leaseId: core.createId("lease")'), "each new conversation lease must receive a unique id");
-assert.ok(queue.includes("expectedLeaseId"), "refresh and release operations must fence stale lease calls");
-assert.ok(queue.includes("runtime.conversationLease?.leaseId"), "the caller must provide the lease id it actually owns");
+assert.ok(core.includes("QUEUE_SCHEMA_VERSION = 5"));
+assert.ok(core.includes("pauseReason"));
+assert.ok(core.includes("pauseForCompatibility"));
+assert.ok(core.includes("resumeQueue"));
+assert.ok(!core.includes("function moveItem"));
 assert.ok(core.includes("MAX_TEXT_LENGTH = 200_000"));
-assert.ok(core.includes("isProvisionalConversationId"), "queue keys must recognize temporary WEB conversation ids");
-assert.ok(core.includes("canAdmit"));
-assert.ok(core.includes("snapshot?.bridgeRunning"), "queue admission must trust the tracked task during transient DOM-idle gaps");
-assert.ok(core.includes("baselineCopyActionCount"), "queue items must persist the pre-send copy-action baseline");
-assert.ok(queue.includes('copy-turn-action-button'), "queue completion must recognize the reply copy action");
-assert.ok(queue.includes("messageQueueIndexV3"), "queue metadata must be stored separately");
-assert.ok(queue.includes("messageQueueItemV3:"), "long item text must use independent storage entries");
-assert.ok(queue.includes("PREVIEW_LENGTH = 240"));
-assert.ok(queue.includes("item.text.slice(0, PREVIEW_LENGTH)"));
-assert.ok(queue.includes("replaceChildren(document.createTextNode(text))"), "composer writes must be atomic");
-assert.ok(queue.includes("suppressComposerMutations"), "programmatic writes must suppress observer churn");
-assert.ok(queue.includes("reconcilePageStateForAction"), "manual execution must repair stale state");
-assert.ok(queue.includes("resolveEffectiveTaskRunning"), "cached notifier state must be corrected with live DOM state");
-assert.ok(queue.includes("snapshot.bridgeRunning || snapshot.visibleError"), "automatic queue dispatch must wait for the previous notifier task and notification to finish");
-assert.ok(core.includes("shouldPauseQueueAfterPageReload"), "pending queue work must be recognized across full page reloads");
-assert.ok(core.includes("pauseQueueAfterPageReload"), "reload recovery must pause unfinished queue items instead of auto-sending them");
-assert.ok(queue.includes("ownerInstanceId"), "queue metadata must record the page document that last owned it");
-assert.ok(queue.includes('data-action="execute-now"'));
-assert.ok(queue.includes('class="gptq-confirm"'));
-assert.ok(queue.includes("event.stopImmediatePropagation()"));
-assert.ok(queue.includes("previousComposerText"));
-assert.ok(queue.includes("runtime.uiActionInFlight"));
-assert.ok(queue.includes("navigator.locks.request"), "cross-tab writes must use Web Locks when available");
-assert.ok(queue.includes("acquireFallbackStorageLock"), "queue writes need a storage-lock fallback");
-assert.ok(queue.includes("migrateLegacyQueue"), "legacy queues must be removed after migration");
-assert.ok(queue.includes("runtime.queueCache"), "long item bodies must be cached by metadata revision");
-assert.ok(queue.includes("textsById"), "metadata-only updates must reuse cached long item bodies");
-assert.ok(queue.includes("messageQueueConversationLeasesV1"), "conversation execution leases must be stored separately from tab queues");
-assert.ok(queue.includes("resolveQueueKey"), "queue storage must be scoped by tab and conversation");
-assert.ok(!queue.includes("loadQueue(runtime.conversationKey)"), "tab queue operations must never load the shared conversation key");
-assert.ok(queue.includes("ownerTabId"), "queue metadata must record its owning tab");
-assert.ok(queue.includes("hasOtherConversationLease"), "waiting tabs must recognize another tab's conversation lease");
-assert.ok(queue.includes("shouldPauseQueueAfterPageReload"), "a refreshed tab must pause unfinished queue work from the previous page document");
-assert.ok(background.includes('case "GET_TAB_CONTEXT"'), "content scripts must obtain the real Chrome tab id from the service worker");
-assert.ok(background.includes("cleanupQueueStateForClosedTab"), "closing a tab must clean its queue and lease state");
-assert.ok(queue.includes("if (runtime.sendConfirmation || runtime.dispatching) return;"), "manual reconciliation must not race an unconfirmed send");
-assert.ok(queue.includes("#composer-submit-button"), "current ChatGPT composer submit button id must be supported");
-assert.ok(queue.includes("waitForSendButton"), "queue submission must wait for the React send button to render");
-assert.ok(queue.includes("DUPLICATE_ENQUEUE_WINDOW_MS"), "rapid identical queue additions must be deduplicated");
-assert.ok(queue.includes("发送按钮仍不可用，队列已暂停"), "disabled composer controls need a specific paused error");
-assert.ok(queue.includes("if (claimed && !runtime.sendConfirmation) await writeComposerText(previousComposerText);"), "failed submission must restore the original draft exactly once");
-assert.ok(queue.includes('handleDispatchFailure(itemId, error?.message || "消息发送失败", { retryable: error?.retryable !== false })'), "non-retryable DOM failures must pause instead of looping");
-assert.ok(queue.indexOf('else if (queue.paused) status.textContent') < queue.indexOf('else if (!canAdmit) status.textContent'), "queue state must take priority over the enqueue admission hint");
-assert.ok(content.includes('id === "composer-submit-button"'), "task tracking must recognize the current send button id");
-assert.ok(queue.includes('mode === "auto-execute" ? "auto" : "manual"'), "auto overwrite confirmation must retain automatic dispatch safety checks");
-assert.ok(queue.includes("输入框清空失败，内容未加入队列"), "enqueue must rollback when composer clearing fails");
-assert.ok(queue.includes("输入框内容已变化，未加入队列"), "enqueue must preserve text typed while the async action is pending");
-assert.ok(queue.includes("timer = setTimeout(finish, 100)"), "background tabs need a timer fallback when requestAnimationFrame is suspended");
-assert.ok(queue.includes("void nextFrame().then"), "UI rendering must not depend on requestAnimationFrame alone");
-const enqueueSection = queue.slice(queue.indexOf("async function enqueueComposerText"), queue.indexOf("async function dispatchNextItem"));
-assert.ok(enqueueSection.indexOf("const text = getComposerTextRaw();") < enqueueSection.indexOf("runtime.queue = await loadQueue(runtime.queueKey);"), "enqueue must snapshot the composer before its first async queue read");
-assert.ok(!queue.includes("document.execCommand"), "large composer writes must not use execCommand");
-assert.ok(!queue.includes("window.prompt("));
+assert.ok(core.includes("shouldPauseQueueAfterPageReload"));
 
-const updater = fs.readFileSync(path.join(root, "scripts", "update-installed-extension.ps1"), "utf8");
-assert.ok(updater.includes("backupPath"), "Windows updater must back up the installed directory");
-assert.ok(updater.includes("chrome://extensions/"), "Windows updater must remind the user to reload Chrome");
+assert.ok(queue.includes("ChatGPTPageAdapter"));
+assert.ok(queue.includes("ChatGPTQueueUI"));
+assert.ok(queue.includes("enforceCompatibilityPause"));
+assert.ok(queue.includes("空闲页面预存队列"));
+assert.ok(queue.includes("页面兼容性受阻"));
+assert.ok(queue.includes("输入框为空，请先输入要加入队列的内容"));
+assert.ok(queue.includes("runtime.ui.render"));
+assert.ok(queue.includes("MutationObserver"));
+assert.ok(!queue.includes('data-action="up"'));
+assert.ok(!queue.includes('data-action="down"'));
+assert.ok(!queue.includes("moveItem("));
+assert.ok(!queue.includes('button[data-testid*="stop"]'), "queue runtime must not duplicate page selectors");
+assert.ok(!queue.includes("something went wrong"), "queue runtime must not duplicate page error keywords");
+assert.ok(queue.includes("messageQueueIndexV3"));
+assert.ok(queue.includes("messageQueueItemV3:"));
+assert.ok(queue.includes("messageQueueConversationLeasesV1"));
+assert.ok(queue.includes("navigator.locks.request"));
+assert.ok(queue.includes("withStorageLock"));
+assert.ok(queue.includes("replaceChildren(document.createTextNode(text))"));
+assert.ok(queue.includes("textLength: text.length"));
 
-const privacy = fs.readFileSync(path.join(root, "PRIVACY.md"), "utf8");
+assert.ok(queueUi.includes("lastSignature"));
+assert.ok(queueUi.includes("syncItems"));
+assert.ok(queueUi.includes("node.dataset.id"));
+assert.ok(queueUi.includes("list.insertBefore"));
+assert.ok(queueUi.includes("actions.replaceChildren"));
+assert.ok(!queueUi.includes('data-action="up"'));
+assert.ok(!queueUi.includes('data-action="down"'));
+
+assert.match(diagnostics, /MAX_EVENTS\s*=\s*200/);
+assert.ok(diagnostics.includes("MAX_EVENT_AGE_MS"));
+assert.ok(diagnostics.includes("sanitizeText"));
+assert.ok(diagnostics.includes("hashIdentifier"));
+assert.ok(diagnostics.includes("buildReport"));
+assert.ok(diagnostics.includes("toMarkdown"));
+assert.ok(diagnostics.includes("diagnosticEventsV1"));
+
+assert.ok(popupHtml.includes('id="pageHealth"'));
+assert.ok(popupHtml.includes('id="copyDiagnosticsButton"'));
+assert.ok(popupHtml.includes('id="downloadDiagnosticsButton"'));
+assert.ok(popupHtml.includes('id="clearDiagnosticsButton"'));
+assert.ok(popup.includes('send("GET_DIAGNOSTIC_REPORT")'));
+assert.ok(popup.includes("navigator.clipboard.writeText"));
+assert.ok(popup.includes("new Blob"));
+assert.ok(popup.includes('send("CLEAR_DIAGNOSTICS")'));
+
+const runtimeTextFiles = [
+  "manifest.json", "background.js", "chatgpt-dom.js", "content.js", "diagnostics.js",
+  "popup.html", "popup.css", "popup.js", "queue-core.js", "queue-lease-guard.js", "queue-ui.js", "queue-v060.js", "queue.css"
+];
+const runtimeBytes = runtimeTextFiles.reduce((sum, file) => sum + fs.statSync(path.join(root, file)).size, 0);
+assert.ok(runtimeBytes <= 175_000, `runtime text resources exceed the v0.7.0 target; current=${runtimeBytes} bytes`);
+for (const file of runtimeTextFiles.filter((file) => file.endsWith(".js"))) {
+  const size = fs.statSync(path.join(root, file)).size;
+  assert.ok(size <= 50_000, `${file} is too large (${size} bytes); split responsibilities before release`);
+}
+
+const updater = read("scripts/update-installed-extension.ps1");
+assert.ok(updater.includes("backupPath"));
+assert.ok(updater.includes("chrome://extensions/"));
+for (const file of ["diagnostics.js", "queue-ui.js", "queue.css"]) assert.ok(updater.includes(`"${file}"`), `${file} must be copied by the fixed-directory updater`);
+const privacy = read("PRIVACY.md");
 assert.ok(!privacy.includes("GPT 后台"));
-assert.ok(!privacy.includes("Chrome Alarms API"));
-const ci = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+const ci = read(".github/workflows/ci.yml");
 assert.ok(ci.includes("pull_request:"));
-const release = fs.readFileSync(path.join(root, ".github/workflows/auto-release.yml"), "utf8");
-assert.ok(!release.includes("types: [closed]"));
-assert.ok(!/Validate extension\n\s+if:/.test(release), "release validation must never be skipped");
-assert.ok(release.includes("--exclude='playwright.config.js'"), "release packages must exclude Playwright-only development files");
-assert.ok(ci.includes("--exclude='package-lock.json'"), "CI extension artifacts must exclude npm development metadata");
+const release = read(".github/workflows/auto-release.yml");
+assert.ok(release.includes("--exclude='playwright.config.js'"));
+assert.ok(ci.includes("--exclude='package-lock.json'"));
+for (const workflow of [ci, release]) {
+  assert.ok(workflow.includes("npm ci"), "CI and release must install locked test dependencies");
+  assert.ok(workflow.includes("playwright install --with-deps chromium"), "CI and release must install the Chromium runtime");
+  assert.ok(workflow.includes("npm run e2e:smoke"), "CI and release must gate on the no-login browser smoke suite");
+}
 
-console.log(`static v${manifest.version} tests passed`);
+console.log(`static v${manifest.version} tests passed; runtime text=${runtimeBytes} bytes`);

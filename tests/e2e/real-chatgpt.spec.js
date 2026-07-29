@@ -45,6 +45,6 @@ test.describe("real ChatGPT Team smoke", () => {
       "utf8"
     );
 
-    expect(diagnostic.extensionVersion).toBe("0.6.12");
+    expect(diagnostic.extensionVersion).toBe("0.7.0");
   });
 });

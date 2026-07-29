@@ -17,12 +17,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install test dependencies
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
       - name: Validate extension
         shell: bash
         run: |
           set -euo pipefail
           while IFS= read -r -d '' file; do node --check "$file"; done < <(find . -maxdepth 1 -type f -name '*.js' -print0 | sort -z)
-          for test_file in tests/*.test.js; do node "$test_file"; done
+          npm test
+          npm run e2e:smoke
           python3 -m json.tool manifest.json >/dev/null
           test -s icons/chatgpt.png
       - name: Package tested source

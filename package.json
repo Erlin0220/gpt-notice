@@ -1,11 +1,11 @@
 {
   "name": "gpt-notice",
-  "version": "0.6.12",
+  "version": "0.7.0",
   "private": true,
   "description": "ChatGPT task notification extension with Playwright E2E coverage.",
   "scripts": {
     "test": "npm run test:unit",
-    "test:unit": "node tests/static.test.js && node tests/background.test.js && node tests/content.test.js && node tests/queue.test.js && node tests/lease-guard.test.js && node tests/dom-adapter.test.js",
+    "test:unit": "node tests/static.test.js && node tests/background.test.js && node tests/content.test.js && node tests/queue.test.js && node tests/lease-guard.test.js && node tests/dom-adapter.test.js && node tests/diagnostics.test.js",
     "e2e:install": "playwright install chromium",
     "e2e": "playwright test",
     "e2e:smoke": "playwright test tests/e2e/extension-load.spec.js",
