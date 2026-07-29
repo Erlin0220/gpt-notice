@@ -1,6 +1,6 @@
 {
   "name": "gpt-notice",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "ChatGPT task notification extension with Playwright E2E coverage.",
   "scripts": {
@@ -9,15 +9,14 @@
     "e2e:install": "playwright install chromium",
     "e2e": "playwright test",
     "e2e:smoke": "playwright test tests/e2e/extension-load.spec.js",
+    "e2e:chrome:prepare": "node scripts/e2e-current-chrome.mjs prepare",
+    "e2e:chrome:endpoint": "node scripts/e2e-current-chrome.mjs endpoint",
+    "e2e:chrome:probe": "node scripts/e2e-current-chrome.mjs probe",
     "e2e:profile2:prepare": "node scripts/e2e-profile2.mjs",
-    "e2e:profile2:attach": "playwright-cli attach --cdp=chrome -s=gpt-notice-profile2",
-    "e2e:profile2:snapshot": "playwright-cli -s=gpt-notice-profile2 snapshot",
-    "e2e:profile2:screenshot": "playwright-cli -s=gpt-notice-profile2 screenshot --filename=test-results/profile2-current.png",
-    "e2e:profile2:close": "playwright-cli -s=gpt-notice-profile2 close",
+    "e2e:profile2:attach": "npm run e2e:chrome:probe",
     "e2e:headed": "set PW_HEADLESS=0&& playwright test"
   },
   "devDependencies": {
-    "@playwright/cli": "^0.1.17",
     "@playwright/test": "1.62.0"
   }
 }

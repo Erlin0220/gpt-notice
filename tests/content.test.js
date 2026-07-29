@@ -152,7 +152,7 @@ vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "content.js"), "utf8"
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.filter((call) => call.type === "PAGE_CHANGED").length, 1, "switching between established conversations must cancel the previous task");
 
-  console.log("content v0.7.0 lifecycle tests passed");
+  console.log("content v0.7.1 lifecycle tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

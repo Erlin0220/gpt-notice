@@ -7,99 +7,95 @@
 使用 Playwright Chromium 和 `.test-profile/automation`，验证：
 
 - Manifest V3 Service Worker 加载。
-- Popup 页面加载。
-- Content Script 在 ChatGPT 域名页面注入队列 UI。
-- Trace、视频、截图和控制台日志生成。
+- Popup 与诊断中心加载。
+- Content Script 和队列 UI 注入。
+- 流式 DOM 更新期间插件按钮节点稳定。
+- 空闲入队默认暂停和固定 FIFO 入口。
 
-该层不登录 ChatGPT，不受账号验证影响。
-
-### 真实 Team 页面验收
-
-真实 ChatGPT 测试不再使用 Playwright Chromium 独立登录。OpenAI 可能将自动化浏览器识别为新设备或异常环境，并持续触发真人验证。
-
-改为将 Playwright CLI 附加到用户已经登录、已经安装 gpt-notice 的 Chrome Profile 2。该方式复用现有 Cookie、Team 工作区、标签页和扩展，不复制 Profile 文件，也不重新输入账号凭据。
-
-## 首次安装
+运行：
 
 ```bash
 npm install
 npm run e2e:install
-```
-
-## 无登录冒烟测试
-
-```bash
 npm test
 npm run e2e:smoke
 ```
 
-## 连接 Chrome Profile 2
+### 当前已登录 Chrome 真实验收
 
-1. 保持 Chrome Profile 2 正常登录 ChatGPT Team。
+真实 ChatGPT 测试复用用户当前正在使用、已经登录 ChatGPT 并安装 gpt-notice 的 Chrome 配置，不复制 Cookie，不启动独立 Playwright 登录浏览器，也不再假设配置目录名为 `Profile 2`。
+
+Chrome 150 下，`playwright-cli attach --cdp=chrome` 可能丢失浏览器会话 ID。项目改用 Playwright 原生 `chromium.connectOverCDP()`，从 Chrome 生成的 `DevToolsActivePort` 读取完整 WebSocket 地址。
+
+## 启用当前 Chrome 远程调试
+
+1. 保持当前 Chrome 正常运行并登录 ChatGPT。
 2. 运行：
 
 ```bash
-npm run e2e:profile2:prepare
+npm run e2e:chrome:prepare
 ```
 
-3. 脚本会在 Profile 2 打开：
+3. 脚本会在当前 Chrome 地址栏打开：
 
 ```text
 chrome://inspect/#remote-debugging
 ```
 
 4. 启用“允许对此浏览器实例进行远程调试”。
-5. 运行：
+5. 发起连接时，Chrome 会显示“要允许远程调试吗？”确认，点击“允许”。
+6. 检查当前连接和标签页：
 
 ```bash
-npm run e2e:profile2:attach
+npm run e2e:chrome:endpoint
+npm run e2e:chrome:probe
 ```
 
-6. Chrome 弹出连接授权时点击“允许”。
-7. 获取当前页面快照或截图：
+旧命令 `npm run e2e:profile2:prepare` 和 `npm run e2e:profile2:attach` 仅作为兼容别名保留，内部转到当前 Chrome 流程。
 
-```bash
-npm run e2e:profile2:snapshot
-npm run e2e:profile2:screenshot
-```
+## 真实验收范围
 
-8. 完成后断开：
+真实验收至少覆盖：
 
-```bash
-npm run e2e:profile2:close
-```
+- 普通首页空闲入队、默认暂停和人工继续。
+- 首页 → `WEB:` 临时会话 → 正式会话的队列迁移。
+- 多条消息固定 FIFO 自动发送与逐条完成。
+- 项目主页入队和正式项目会话提升。
+- 多输入框冲突触发兼容性暂停，恢复后仍需人工继续。
+- 流式回复期间插件根节点和按钮节点不被替换。
+- Popup 四维诊断与 Markdown/JSON 脱敏。
+- Windows 通知标题、正文、思考时间和“打开任务”动作。
+- 从其他页面触发“打开任务”后聚焦原有 ChatGPT 标签。
 
-连接只在本机进行。附加期间自动化工具可以访问当前 Chrome 会话中的页面和登录状态，因此只应在受信任的本机环境使用，测试完成后关闭连接。
+## Windows 通知验证
 
-## 目录约定
+Playwright 能验证扩展 API、任务状态、队列和标签聚焦。Windows 横幅可能被“请勿打扰”或系统策略静默收纳；此时应同时检查：
 
-- `.test-profile/automation`：无账号扩展冒烟测试配置。
-- `.test-profile/team`：已弃用，不再用于登录 ChatGPT。
-- `test-results/`：报告、截图、视频、Trace 和脱敏诊断。
-- `.playwright-cli/`：Playwright CLI 会话输出，禁止提交到 Git。
+- Chrome 通知权限。
+- Windows 中 Google Chrome 的通知开关。
+- Windows 通知数据库中实际生成的标题、正文与动作。
+- `OPEN_TASK` 动作能否聚焦原标签。
 
-## Windows 通知边界
+不得仅凭 `chrome.notifications.create()` 返回成功声称用户看到了横幅；也不得因横幅被系统静默隐藏而误判扩展未发送通知。
 
-Playwright 可以验证页面、扩展 UI、Storage、任务状态和队列执行。Windows 通知是否真正弹出、正文是否正确以及点击后是否聚焦原标签，仍需在 Profile 2 中进行有界面验收。
+## 安全边界
+
+- 远程调试仅在本机开启。
+- 测试完成后可在 `chrome://inspect/#remote-debugging` 关闭远程调试。
+- 不复制浏览器配置、Cookie 或登录凭据。
+- 只在新建测试会话中发送验收消息，不操作用户现有工作会话。
+- `.test-profile/`、`test-results/` 和临时连接信息不得提交到 Git。
 
 ## 故障处理
 
-### Profile 2 无法附加
+### 找不到 `DevToolsActivePort`
 
-确认：
+先运行 `npm run e2e:chrome:prepare` 并启用远程调试。确认连接请求已点击“允许”。
 
-- Chrome 版本支持现有会话远程调试。
-- `chrome://inspect/#remote-debugging` 已启用。
-- Chrome 的连接授权弹窗已点击“允许”。
-- 没有残留的同名 Playwright CLI 会话。
+### 连接超时
 
-可先运行：
+重新读取 `npm run e2e:chrome:endpoint` 的完整地址。不要只连接 `ws://127.0.0.1:9222/`，必须包含 `/devtools/browser/<id>`。
 
-```bash
-npm run e2e:profile2:close
-npm run e2e:profile2:attach
-```
+### OpenAI 真人验证循环
 
-### 出现 OpenAI 真人验证循环
-
-不要继续刷新或重复验证，也不要尝试复制 Profile 2 的 Cookie。关闭 Playwright Chromium，改用上述 Profile 2 附加流程。
+不要复制 Profile 或重复登录。关闭独立 Playwright Chromium，改为附加当前已登录 Chrome。

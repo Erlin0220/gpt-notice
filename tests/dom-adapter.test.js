@@ -93,6 +93,17 @@ assert.equal(healthy.capabilities.canDispatchQueue, true);
 assert.equal(page.toPublicSnapshot(healthy).private, undefined);
 assert.equal(page.toPublicSnapshot(healthy).refs, undefined);
 
+const emptyWithoutSend = page.collectPageState({
+  documentRef: createDocument(baseMap([active], { send: false }), active),
+  locationRef: { href: "https://chatgpt.com/", origin: "https://chatgpt.com" },
+  root,
+  documentStartedAt: Date.now() - 10_000
+});
+assert.equal(emptyWithoutSend.compatibility, "healthy", "an empty composer may legitimately hide the send control");
+assert.equal(emptyWithoutSend.capabilities.canWriteComposer, true);
+assert.equal(emptyWithoutSend.capabilities.canDispatchQueue, true, "the queue may write text before the send control appears");
+assert.equal(emptyWithoutSend.capabilities.canClickSend, false, "the current page still cannot click send before text is written");
+
 const provisional = page.classifyRoute("https://chatgpt.com/c/WEB:temporary");
 assert.equal(provisional.routeType, "provisional_conversation");
 assert.equal(page.classifyRoute("https://chatgpt.com/g/g-p-demo/project").routeType, "draft");
@@ -153,4 +164,4 @@ assert.equal(degraded.capabilities.canTrackTask, true);
 assert.equal(page.install(documentAfterProjectNavigation, root), false, "v0.7.0 must not patch document.querySelector globally");
 assert.equal(documentAfterProjectNavigation.querySelector("#prompt-textarea"), stale, "the native querySelector result must remain untouched");
 
-console.log("ChatGPT page adapter v0.7.0 tests passed");
+console.log("ChatGPT page adapter v0.7.1 tests passed");

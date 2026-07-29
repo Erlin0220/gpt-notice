@@ -79,6 +79,7 @@ assert.ok(queue.includes("MutationObserver"));
 assert.ok(!queue.includes('data-action="up"'));
 assert.ok(!queue.includes('data-action="down"'));
 assert.ok(!queue.includes("moveItem("));
+assert.match(queue, /deleteQueue\(fromKey,\s*\{items:\[\]\}\)/, "queue promotion must preserve shared item bodies");
 assert.ok(!queue.includes('button[data-testid*="stop"]'), "queue runtime must not duplicate page selectors");
 assert.ok(!queue.includes("something went wrong"), "queue runtime must not duplicate page error keywords");
 assert.ok(queue.includes("messageQueueIndexV3"));
@@ -124,6 +125,16 @@ for (const file of runtimeTextFiles.filter((file) => file.endsWith(".js"))) {
   const size = fs.statSync(path.join(root, file)).size;
   assert.ok(size <= 50_000, `${file} is too large (${size} bytes); split responsibilities before release`);
 }
+
+const packageJson = JSON.parse(read("package.json"));
+const chromeE2E = read("scripts/e2e-current-chrome.mjs");
+assert.ok(packageJson.scripts["e2e:chrome:prepare"]);
+assert.ok(packageJson.scripts["e2e:chrome:endpoint"]);
+assert.ok(packageJson.scripts["e2e:chrome:probe"]);
+assert.equal(packageJson.devDependencies["@playwright/cli"], undefined, "the deprecated Playwright CLI connector must stay removed");
+assert.ok(chromeE2E.includes("DevToolsActivePort"));
+assert.ok(chromeE2E.includes("connectOverCDP"));
+assert.ok(!chromeE2E.includes("Profile 2"));
 
 const updater = read("scripts/update-installed-extension.ps1");
 assert.ok(updater.includes("backupPath"));

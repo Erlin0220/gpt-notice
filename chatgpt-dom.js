@@ -325,7 +325,7 @@
     if (!facts.composer.exists) blocked.push("composer_missing");
     if (facts.composer.ambiguous) blocked.push("multiple_visible_composers");
     if (facts.composer.exists && !facts.composer.ready && !facts.controls.stopVisible) degraded.push("composer_not_ready");
-    if (!facts.controls.send.exists && facts.composer.exists) degraded.push("send_control_missing");
+    if (!facts.controls.send.exists && facts.composer.exists && !facts.composer.empty) degraded.push("send_control_missing");
     if (facts.messages.assistantCount > 0 && !facts.messages.latestAssistantHasCopyAction) degraded.push("copy_action_missing");
 
     const compatibility = blocked.length ? "blocked" : degraded.length ? "degraded" : "healthy";
@@ -336,7 +336,7 @@
     const canTrackTask = supported && !facts.composer.ambiguous;
     const canDetectCompletion = canTrackTask && compatibility !== "blocked";
     const canAdmitQueue = supported && facts.composer.exists && !facts.composer.ambiguous;
-    const canDispatchQueue = compatibility !== "blocked" && canClickSend;
+    const canDispatchQueue = compatibility !== "blocked" && canWriteComposer;
     return {
       supportStatus: "supported",
       compatibility,

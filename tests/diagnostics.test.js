@@ -59,7 +59,7 @@ assert.equal(diagnostics.pruneEvents(many, now + 300).length, diagnostics.MAX_EV
   assert.ok(!firstAlias.includes("secret"));
 
   const report = diagnostics.buildReport({
-    extensionVersion: "0.7.0",
+    extensionVersion: "0.7.1",
     manifestVersion: 3,
     browserMajorVersion: "150",
     platform: "Windows",
@@ -108,7 +108,7 @@ assert.equal(diagnostics.pruneEvents(many, now + 300).length, diagnostics.MAX_EV
   assert.equal(report.queues.totalTextBucket, "10k-100k");
   assert.equal(report.currentPage.compatibility, "blocked");
   assert.match(markdown, /gpt-notice 诊断摘要/);
-  console.log("diagnostics v0.7.0 tests passed");
+  console.log("diagnostics v0.7.1 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

@@ -13,7 +13,7 @@ test.describe("real ChatGPT Team smoke", () => {
     });
 
     const composer = page.locator("#prompt-textarea, [contenteditable='true'][data-lexical-editor='true']").first();
-    await expect(composer, "Team 登录状态无效；真实验收请改用 npm run e2e:profile2:attach 连接已登录的 Chrome Profile 2").toBeVisible({ timeout: 30_000 });
+    await expect(composer, "登录状态无效；真实验收请运行 npm run e2e:chrome:prepare 后连接当前已登录 Chrome").toBeVisible({ timeout: 30_000 });
     await expect(page.locator("#chatgpt-message-queue-root")).toBeAttached({ timeout: 15_000 });
 
     await page.screenshot({ path: testInfo.outputPath("01-chatgpt-team-home.png"), fullPage: true });
@@ -45,6 +45,6 @@ test.describe("real ChatGPT Team smoke", () => {
       "utf8"
     );
 
-    expect(diagnostic.extensionVersion).toBe("0.7.0");
+    expect(diagnostic.extensionVersion).toBe("0.7.1");
   });
 });

@@ -670,7 +670,7 @@
     target.activeItemId ||= source.activeItemId;
     target.nextDispatchAt = Math.max(target.nextDispatchAt, source.nextDispatchAt);
     await saveQueue(toKey, target, target);
-    await deleteQueue(fromKey, source);
+    await deleteQueue(fromKey,{items:[]});
   }
 
   async function loadQueue(key = runtime.queueKey) {

@@ -26,7 +26,7 @@ async function serveMockChatGpt(context) {
 test("loads Manifest V3 service worker", async ({ extensionServiceWorker }) => {
   const manifest = await extensionServiceWorker.evaluate(() => chrome.runtime.getManifest());
   expect(manifest.manifest_version).toBe(3);
-  expect(manifest.version).toBe("0.7.0");
+  expect(manifest.version).toBe("0.7.1");
   expect(manifest.background.service_worker).toBe("background.js");
 });
 

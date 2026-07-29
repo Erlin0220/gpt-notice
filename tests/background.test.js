@@ -27,7 +27,7 @@ const chrome = {
     onStartup: createEvent(),
     onMessage: runtimeMessages,
     getURL(value) { return `chrome-extension://test/${value}`; },
-    getManifest() { return { version: "0.7.0", manifest_version: 3 }; }
+    getManifest() { return { version: "0.7.1", manifest_version: 3 }; }
   },
   storage: {
     local: {
@@ -131,7 +131,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.ok(!JSON.stringify(storage.diagnosticEventsV1).includes("c:secret"));
   const diagnosticReport = await send({ type: "GET_DIAGNOSTIC_REPORT" });
   assert.equal(diagnosticReport.ok, true);
-  assert.equal(diagnosticReport.report.extension.version, "0.7.0");
+  assert.equal(diagnosticReport.report.extension.version, "0.7.1");
   assert.equal(diagnosticReport.report.currentPage.compatibility, "healthy");
   assert.ok(!JSON.stringify(diagnosticReport.report).includes("secret"));
 
@@ -224,7 +224,7 @@ async function send(message, tab = tabs.get(7)) {
   assert.equal(storage.messageQueueConversationLeasesV1["c:close"], undefined, "closed tab lease must be released");
   assert.ok(storage.messageQueueConversationLeasesV1["c:other"]);
 
-  console.log("background v0.7.0 tests passed");
+  console.log("background v0.7.1 tests passed");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

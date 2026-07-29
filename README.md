@@ -2,13 +2,15 @@
 
 非官方 Chrome Manifest V3 扩展。监控当前仍然打开的 ChatGPT 页面，在任务完成、等待确认或失败时发送 Windows 通知，并提供按标签页隔离的纯文本消息队列。
 
-## v0.7.0 核心变化
+## v0.7.1 核心变化
 
 - 任务监控和消息队列统一使用页面状态适配层，不再各自维护停止按钮、发送按钮、确认、忙碌、错误和消息节点规则。
 - 页面支持状态区分 `initializing`、`supported` 和 `unsupported`；兼容性区分 `healthy`、`degraded` 和 `blocked`。
 - 页面无法安全判断时自动队列进入兼容性暂停；页面恢复后仍需用户点击“继续”，不会隐式重发。
 - **加入队列**在受支持的 ChatGPT 工作页面中始终可点击。空输入、页面不支持或无法安全读取输入框时会给出明确结果。
 - 没有活动任务时也可以预存队列消息；空闲入队默认暂停，不会立即发送。
+- 修复 ChatGPT 空输入框隐藏发送按钮时，队列恢复后一直等待、无法写入首条消息的问题；扩展现在会先写入文本，再等待发送按钮出现。
+- 修复首页提升到 `WEB:` 临时会话和正式会话时，旧队列清理误删共享正文、导致剩余消息消失的问题。
 - 队列固定为 FIFO，取消上移和下移；编辑、失败重试保持原位置，“立即执行”是唯一明确插队操作。
 - 队列 UI 与 ChatGPT 流式回复 DOM 更新解耦；按钮和列表节点仅在真实队列状态变化时增量更新。
 - Popup 新增本地诊断中心，可查看页面兼容性、通知权限、活动任务和消息队列状态。
@@ -111,15 +113,15 @@ node --check queue-ui.js
 node --check queue-v060.js
 ```
 
-真实 ChatGPT Team 验收继续使用已登录 Chrome Profile 2：
+真实 ChatGPT 验收复用当前已经登录的 Chrome，不复制 Cookie，也不再依赖固定的 `Profile 2` 目录：
 
 ```bash
-npm run e2e:profile2:prepare
-npm run e2e:profile2:attach
-npm run e2e:profile2:snapshot
+npm run e2e:chrome:prepare
+npm run e2e:chrome:endpoint
+npm run e2e:chrome:probe
 ```
 
-无登录 Chromium 冒烟覆盖 Service Worker、Popup 诊断、流式 DOM 下 UI 节点稳定和空闲入队。Profile 2 测试需要人工登录环境，未执行时不得声明真实 ChatGPT E2E 已通过。
+Chrome 150 下使用 `DevToolsActivePort` 的完整 WebSocket 地址和 Playwright 原生 `connectOverCDP`；详情见 `docs/PLAYWRIGHT-E2E.md`。无登录 Chromium 冒烟覆盖 Service Worker、Popup 诊断、流式 DOM 下 UI 节点稳定和空闲入队；未执行真实登录环境验收时不得声明真实 ChatGPT E2E 已通过。
 
 ## 项目结构
 
