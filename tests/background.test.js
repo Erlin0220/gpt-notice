@@ -65,6 +65,24 @@ test("stale page mutations are rejected after SPA navigation", async () => {
   const h=harness(); h.tabs.set(1,{id:1,windowId:1,url:"https://chatgpt.com/c/other"});
   assert.equal((await h.send({op:"add",id:"pending-item",text:"wrong conversation"})).ok,false);
 });
+test("single-tab start repairs a legacy false concurrency pause", async () => {
+  const key = Q.key(scope, "https://chatgpt.com/c/a");
+  const legacy = Q.fresh();
+  delete legacy.pauseCause;
+  legacy.paused = true;
+  legacy.reason = Q.CONFLICT_REASON;
+  legacy.holdUntil = Date.now();
+  legacy.turn = { id: "old-user", userId: "old-user", at: Date.now() - 1000, done: false };
+  const h = harness({ [key]: legacy });
+  h.tabs.delete(2);
+  const result = await h.send({ op: "start", userId: "new-user" }, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.conflict, undefined);
+  assert.equal(h.storage[key].turn.id, "new-user");
+  assert.equal(h.storage[key].turn.source, "1");
+  assert.equal(h.storage[key].paused, false);
+  assert.equal(h.storage[key].holdUntil, 0);
+});
 test("disabled notifications do not create routing records; clicked records are removed", async () => {
   const h=harness({"notice:notifications":false});await h.send({op:"start",userId:"silent"});await h.send({op:"settle",userId:"silent"});
   assert.equal(Object.keys(h.storage).filter(k=>k.startsWith('notice:notification:')).length,0);

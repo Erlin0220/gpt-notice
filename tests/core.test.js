@@ -23,6 +23,14 @@ test("enqueue is idempotent and rejects overflow without truncating", () => {
   assert.throws(() => added("x".repeat(Q.MAX_TEXT + 1)));
   assert.equal(state.items.length, 1);
 });
+test("idle enqueue starts active unless the user explicitly paused the queue", () => {
+  let state = Q.apply(undefined, { op: "add", id: "item-idle-1", text: "run me", running: false }, "tab-A", at).state;
+  assert.equal(state.paused, false);
+  state = Q.apply(state, { op: "pause", paused: true }, "tab-A", at + 1).state;
+  state = Q.apply(state, { op: "add", id: "item-idle-2", text: "wait too", running: false }, "tab-A", at + 2).state;
+  assert.equal(state.paused, true);
+  assert.equal(state.pauseCause, "user");
+});
 test("one claim across tabs, with a durable intent before delivery", () => {
   const a = claim();
   assert.throws(() => Q.apply(a.state, { op: "claim", baseline: "before" }, "tab-B", at + 2));
@@ -94,6 +102,38 @@ test("simultaneous native generations in two tabs fail closed instead of replaci
   assert.throws(() => Q.apply(settled.state, { op: "claim", baseline: "branch-a" }, "tab-A", at + 3));
   const resumed = Q.apply(settled.state, { op: "pause", paused: false }, "tab-A", at + 4).state;
   assert.equal(resumed.holdUntil, 0);
+});
+test("a newer generation from the same browser tab supersedes a missed settle without a false concurrency pause", () => {
+  let state = Q.apply(undefined, { op: "start", userId: "first" }, "17:doc-a:instance-a", at).state;
+  const next = Q.apply(state, { op: "start", userId: "second" }, "17:doc-b:instance-b", at + 1);
+  assert.equal(next.conflict, undefined);
+  assert.equal(next.state.turn.id, "second");
+  assert.equal(next.state.turn.source, "17");
+  assert.equal(next.state.paused, false);
+  assert.ok(next.state.settled.includes("first"));
+});
+test("same-tab recovery does not override an explicit user pause", () => {
+  let state = Q.apply(undefined, { op: "start", userId: "first" }, "17:doc-a:instance-a", at).state;
+  state = Q.apply(state, { op: "pause", paused: true }, "17:doc-a:instance-a", at + 1).state;
+  state = Q.apply(state, { op: "start", userId: "second" }, "17:doc-b:instance-b", at + 2).state;
+  assert.equal(state.turn.id, "second");
+  assert.equal(state.paused, true);
+  assert.equal(state.pauseCause, "user");
+  assert.equal(state.reason, "已暂停");
+});
+test("a legacy conflict can recover when the background proves only one tab has the conversation", () => {
+  const legacy = Q.fresh();
+  delete legacy.pauseCause;
+  legacy.paused = true;
+  legacy.reason = Q.CONFLICT_REASON;
+  legacy.holdUntil = at;
+  legacy.turn = { id: "old", userId: "old", at, done: false };
+  const recovered = Q.apply(legacy, { op: "start", userId: "new", singleTab: true }, "17:doc-new:instance", at + 1);
+  assert.equal(recovered.conflict, undefined);
+  assert.equal(recovered.state.turn.id, "new");
+  assert.equal(recovered.state.paused, false);
+  assert.equal(recovered.state.pauseCause, "");
+  assert.equal(recovered.state.holdUntil, 0);
 });
 test("completion with pending items does not notify; the final turn notifies once", () => {
   let state = Q.apply(added(), { op: "start", userId: "manual" }, "tab-A", at).state;

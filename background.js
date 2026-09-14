@@ -50,8 +50,14 @@ async function handle(message, sender) {
   }
   const stored = await chrome.storage.local.get([queueKey, usageKey, "notice:notifications"]);
   const raw = stored[queueKey];
+  let command = message.command || { op: "get" };
+  if (command.op === "start") {
+    const tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.openai.com/*"] });
+    const sameConversation = tabs.filter(tab => Queue.route(tab.url).id === route.id);
+    command = { ...command, singleTab: sameConversation.length === 1 };
+  }
   let result;
-  try { result = Queue.apply(raw, message.command || { op: "get" }, owner); }
+  try { result = Queue.apply(raw, command, owner); }
   catch (error) {
     // Persist lease expiry even when a subsequent operation is rejected.
     const recovered = Queue.apply(raw, { op: "get" }, owner);
@@ -65,7 +71,7 @@ async function handle(message, sender) {
     result.state.url = route.url;
     writes[queueKey] = result.state;
   }
-  const notificationId = result.notify && stored["notice:notifications"] !== false ? `notice:${message.scope.slice(0,16)}:${route.id}:${message.command.generationId || message.command.userId}` : "";
+  const notificationId = result.notify && stored["notice:notifications"] !== false ? `notice:${message.scope.slice(0,16)}:${route.id}:${command.generationId || command.userId}` : "";
   if (notificationId) writes[`notice:notification:${notificationId}`] = { url: route.url, scope: message.scope, tabId: sender.tab.id, at: Date.now() };
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
@@ -78,7 +84,7 @@ async function handle(message, sender) {
     } catch (error) { notificationError = error.message; }
     await pruneNotices();
   }
-  return { ok: true, queue: result.state, usage: usage.state, item: result.item, notificationError };
+  return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
 }
 
 async function openNotice(id) {

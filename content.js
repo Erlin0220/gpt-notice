@@ -134,14 +134,23 @@
       const resume = storedTurn && !storedTurn.done && storedUser === p.userId;
       const retry = rt.retryBaseline?.userId === p.userId && p.assistantId && p.assistantId !== rt.retryBaseline.assistantId;
       const regenerated = retry || storedTurn?.done && storedUser === p.userId && p.running && p.assistantId && p.assistantId !== storedTurn.assistantId;
+      const recoveredCompleted = storedTurn && !storedTurn.done && storedUser && p.userId && storedUser !== p.userId && !p.running && p.copy;
       // A regeneration gets a new native response identity, while tool/message
       // segments within one ongoing generation still count only once.
       const generationId = regenerated ? `${p.userId}:${p.assistantId}` : resume ? storedTurn.id : p.userId;
       const live = p.running && !p.copy && p.userId && !rt.queue?.settled?.includes(generationId);
-      if (p.userId && (confirmedSubmission || resume || live || regenerated) && rt.turn?.generationId !== generationId) {
-        rt.turn = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: false };
+      if (p.userId && (confirmedSubmission || resume || live || regenerated || recoveredCompleted) && rt.turn?.generationId !== generationId) {
+        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: false, recovered: Boolean(recoveredCompleted && !confirmedSubmission) };
         if (regenerated) rt.stopped = "";
-        await request({ op: "start", userId: p.userId, generationId });
+        const started = await request({ op: "start", userId: p.userId, generationId });
+        if (started.conflict || rt.queue?.turn?.id !== generationId) {
+          rt.turn = null;
+          rt.pending = null;
+          rt.retryBaseline = null;
+          render(rt.queue?.reason || "检测到同一对话存在并发生成；Queue 已暂停");
+          return;
+        }
+        rt.turn = candidate;
         rt.pending = null;
         rt.retryBaseline = null;
       }
@@ -165,7 +174,7 @@
         const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
         const failed = !p.running && (p.error || stopped) && now - rt.quietAt >= 2000;
         if (finished || failed) {
-          await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped) });
+          await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered) });
           rt.turn = null; rt.stopped = ""; rt.quietAt = now;
         }
       }

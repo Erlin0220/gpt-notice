@@ -10,7 +10,7 @@ test.beforeEach(async({persistentContext,extensionServiceWorker})=>{
 });
 test("MV3 loads and popup lists only pending conversation queues",async({page,extensionServiceWorker,persistentContext,extensionId})=>{
   expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.0");
-  await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await enqueue(page,"saved");
+  await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await expect(popup.locator("h1")).toHaveText("ChatGPT Queue");await expect(popup.locator("#queues a")).toHaveCount(1);
 });
@@ -27,6 +27,7 @@ test("home and project first sends change modes without replacing the UI root",a
 });
 test("queues restore on SPA navigation and reload; edit and reorder preserve native drafts",async({page})=>{
   await page.goto("https://chatgpt.com/c/a");await expect(button(page,"add")).toBeVisible();
+  await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();
   await enqueue(page,"first");await enqueue(page,"second");await button(page,"queue").click();
   await button(page,"up").nth(1).click();await expect(page.locator(`${host} .preview`).first()).toHaveText("second");
   await button(page,"edit").first().click();await page.locator(`${host} textarea`).fill("edited second");await button(page,"save-edit").click();
@@ -57,19 +58,26 @@ test("manual native sends still complete when the rendered user turn contains at
 });
 test("draft protection waits without replacing text, then uses native Send",async({page})=>{
   await page.goto("https://chatgpt.com/c/draft");await expect(button(page,"add")).toBeVisible();await enqueue(page,"queued");
-  await page.locator("#prompt-textarea").fill("do not touch");await button(page,"queue").click();await button(page,"pause").click();
+  await page.locator("#prompt-textarea").fill("do not touch");
   await page.waitForTimeout(5500);await expect(page.locator("#prompt-textarea")).toHaveText("do not touch");expect(await page.evaluate(()=>window.sent.length)).toBe(0);
   await page.locator("#prompt-textarea").fill("");await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(1);
   expect(await page.evaluate(()=>window.sent[0].text)).toBe("queued");
 });
+test("idle queued messages auto-run without requiring Continue",async({page,extensionServiceWorker})=>{
+  await page.goto("https://chatgpt.com/c/idle-auto");await expect(button(page,"add")).toBeVisible();await enqueue(page,"auto queued");
+  await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.paused),{timeout:3000}).toBe(false);
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(1);
+  expect(await page.evaluate(()=>window.sent[0].text)).toBe("auto queued");
+  await expect(page.locator(`${host} .count`)).toHaveText("0",{timeout:10000});
+});
 test("two tabs never claim the same message; ambiguous send is quarantined after reload",async({page,persistentContext,extensionServiceWorker})=>{
-  await page.goto("https://chatgpt.com/c/multi");await expect(button(page,"add")).toBeVisible();await enqueue(page,"only once");
+  await page.goto("https://chatgpt.com/c/multi");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"only once");
   const second=await persistentContext.newPage();await second.goto("https://chatgpt.com/c/multi");await expect(button(second,"queue")).toBeVisible();
   await button(page,"queue").click();await button(page,"pause").click();
   await expect.poll(async()=>await page.evaluate(()=>window.sent.length)+await second.evaluate(()=>window.sent.length),{timeout:20000}).toBe(1);
   await page.waitForTimeout(5000);expect(await page.evaluate(()=>window.sent.length)+await second.evaluate(()=>window.sent.length)).toBe(1);
   await second.close();await page.goto("https://chatgpt.com/c/unknown");await expect(button(page,"add")).toBeVisible();
-  await enqueue(page,"ambiguous");await page.evaluate(()=>window.clickDrops=true);await button(page,"queue").click();await button(page,"pause").click();
+  await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"ambiguous");await page.evaluate(()=>window.clickDrops=true);await button(page,"queue").click();await button(page,"pause").click();
   await expect.poll(()=>page.evaluate(()=>window.clickCount),{timeout:15000}).toBe(1);
   await extensionServiceWorker.evaluate(async()=>{const data=await chrome.storage.local.get(null);for(const [key,q] of Object.entries(data)){if(key.endsWith(':unknown')){q.items[0].expiresAt=Date.now()-1;await chrome.storage.local.set({[key]:q});}}});
   await page.reload();await expect(page.locator(`${host} .count`)).toHaveText("1");await button(page,"queue").click();
@@ -125,7 +133,7 @@ test("enqueue storage delay preserves a newer native draft without saving it twi
   expect((await snapshot(extensionServiceWorker)).queues[0].items[0].text).toBe('original queued text');
 });
 test("attachments and unavailable Send fail closed without a click",async({page})=>{
-  await page.goto("https://chatgpt.com/c/attachments");await expect(button(page,'add')).toBeVisible();await enqueue(page,'queued safely');
+  await page.goto("https://chatgpt.com/c/attachments");await expect(button(page,'add')).toBeVisible();await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'queued safely');
   await page.evaluate(()=>{const attachment=document.createElement('div');attachment.dataset.testid='file-preview';document.querySelector('form').append(attachment);});
   await expect(button(page,'add')).toBeDisabled();await expect(page.locator(`${host} .status`)).toContainText(/图片|附件/);
   await button(page,'queue').click();await button(page,'pause').click();await page.waitForTimeout(4500);
@@ -151,7 +159,7 @@ test("native composer popovers hide overlapping extension chrome and restore it 
 });
 test("stale content script after extension reload asks for a page refresh instead of throwing sendMessage TypeError",async({page,extensionServiceWorker})=>{
   test.setTimeout(30000);
-  await page.goto('https://chatgpt.com/c/reload-required');await expect(button(page,'add')).toBeVisible();await enqueue(page,'saved before extension reload');
+  await page.goto('https://chatgpt.com/c/reload-required');await expect(button(page,'add')).toBeVisible();await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'saved before extension reload');
   await button(page,'queue').click();await expect(page.locator(`${host} .queue-panel`)).toBeVisible();
   await extensionServiceWorker.evaluate(()=>chrome.runtime.reload());
   await page.waitForTimeout(500);
@@ -160,7 +168,7 @@ test("stale content script after extension reload asks for a page refresh instea
   await expect(page.locator(`${host} .count`)).toHaveText('1');
 });
 test("native Send preempting the queue click cannot return a delivered item to pending",async({page,extensionServiceWorker})=>{
-  await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await enqueue(page,'preempted queue text');
+  await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'preempted queue text');
   await page.evaluate(()=>{let used=false;document.addEventListener('input',()=>{if(!used&&document.getElementById('prompt-textarea').innerText==='preempted queue text'){used=true;setTimeout(()=>document.getElementById('composer-submit-button').click(),0);}});});
   await button(page,'queue').click();await button(page,'pause').click();
   await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(1);
@@ -174,6 +182,16 @@ test("attachments added during enqueue persistence preserve the associated nativ
   await page.locator('#prompt-textarea').fill('text associated with attachment');await button(page,'add').click();
   await page.evaluate(()=>{const node=document.createElement('div');node.dataset.testid='attachment-preview';document.querySelector('form').append(node);});
   await expect(page.locator(`${host} .count`)).toHaveText('1');await expect(page.locator('#prompt-textarea')).toHaveText('text associated with attachment');
+});
+test("a legacy false-concurrency pause recovers on a single conversation tab and continues the queue",async({page,extensionServiceWorker})=>{
+  test.setTimeout(30000);
+  await page.goto('https://chatgpt.com/c/recover-conflict');await expect(button(page,'add')).toBeVisible();
+  await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues.length,{timeout:5000}).toBe(1);
+  await extensionServiceWorker.evaluate(async()=>{const all=await chrome.storage.local.get(null);const [key,q]=Object.entries(all).find(([k])=>k.startsWith('notice:conversation:')&&k.endsWith(':recover-conflict'));delete q.pauseCause;q.paused=true;q.reason='检测到同一对话存在并发生成；Queue 已暂停，请确认对话后继续';q.holdUntil=Date.now();q.turn={id:'stale-user',userId:'stale-user',at:Date.now()-5000,done:false};q.items=[{id:'recover-item',text:'recover queued',state:'pending',createdAt:Date.now()}];await chrome.storage.local.set({[key]:q});});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0]?.paused,{timeout:12000}).toBe(false);
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:20000}).toBe(1);
+  expect(await page.evaluate(()=>window.sent[0].text)).toBe('recover queued');
 });
 test("regeneration counts and notifies independently without duplicate observations",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/regenerate');await expect(button(page,'add')).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');

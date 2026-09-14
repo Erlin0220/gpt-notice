@@ -12,10 +12,12 @@
   const MAX_TEXT = 200_000;
   const MAX_TOTAL = 1_000_000;
   const LEASE_MS = 30_000;
+  const CONFLICT_REASON = "检测到同一对话存在并发生成；Queue 已暂停，请确认对话后继续";
   const id = () => crypto.randomUUID();
   const text = value => String(value ?? "").replace(/\r\n?/g, "\n");
   const comparable = value => text(value).replace(/\u00a0/g, " ").trim();
   const clone = value => JSON.parse(JSON.stringify(value));
+  const source = owner => String(owner || "").split(":", 1)[0];
   function route(value) {
     try {
       const url = new URL(value);
@@ -35,17 +37,21 @@
     return /^[a-f0-9]{32,64}$/.test(scope || "") && r.id ? `${PREFIX}${scope}:${r.id}` : "";
   }
   function fresh() {
-    return { version: 8, revision: 0, paused: false, reason: "", items: [], receipts: [], turn: null, settled: [], holdUntil: 0, updatedAt: 0 };
+    return { version: 8, revision: 0, paused: false, pauseCause: "", reason: "", items: [], receipts: [], turn: null, settled: [], holdUntil: 0, updatedAt: 0 };
   }
   function normalize(raw, now = Date.now()) {
     if (raw && (raw.version !== 8 || !Array.isArray(raw.items) || !Array.isArray(raw.receipts) || !Array.isArray(raw.settled))) throw new Error("本地 Queue 数据格式异常；未覆盖原始数据，请先备份检查");
     const state = raw?.version === 8 ? clone(raw) : fresh();
+    if (typeof state.pauseCause !== "string") {
+      state.pauseCause = !state.paused ? "" : state.reason === "已暂停" ? "user" : state.reason === CONFLICT_REASON ? "conflict" : state.reason === "已保存，点击继续或立即发送" ? "legacy-idle" : "safety";
+    }
     for (const item of state.items) {
       if (item.state === "sending" && item.expiresAt <= now) {
         // A lost sender before intent is safe to reclaim; after intent it is not.
         if (item.phase === "submitting") {
           item.state = "unknown";
           state.paused = true;
+          state.pauseCause = "safety";
           state.reason = "发送结果未知，请核对对话后处理";
         } else {
           item.state = "pending";
@@ -86,7 +92,6 @@
         if (state.items.length >= MAX_ITEMS || state.items.reduce((n, i) => n + i.text.length, 0) + value.length > MAX_TOTAL) reject("本地队列容量已满，草稿未改动");
         if (!/^[a-zA-Z0-9_-]{8,80}$/.test(command.id || "")) reject("无效的消息标识");
         state.items.push({ id: command.id, text: value, state: "pending", createdAt: now });
-        if (!command.running && state.items.length === 1) { state.paused = true; state.reason = "已保存，点击继续或立即发送"; }
         break;
       }
       case "edit": {
@@ -108,6 +113,7 @@
       case "pause":
         if (!command.paused && state.items.some(i => i.state === "unknown")) reject("请先核对发送结果未知的消息，继续不会自动重发");
         state.paused = Boolean(command.paused);
+        state.pauseCause = state.paused ? "user" : "";
         state.reason = state.paused ? "已暂停" : "";
         if (!state.paused) state.holdUntil = 0;
         break;
@@ -143,6 +149,7 @@
         if (command.beforeClick === true) { item.state = "pending"; delete item.claim; }
         else item.state = "unknown";
         state.paused = true;
+        state.pauseCause = "safety";
         state.reason = command.beforeClick ? "发送前已停止，草稿保留，请检查后继续" : "发送结果未知，请核对对话后处理";
         break;
       }
@@ -165,25 +172,40 @@
         if (command.retry) { item.state = "pending"; delete item.claim; }
         else state.items = state.items.filter(i => i.id !== item.id);
         state.paused = true;
+        state.pauseCause = "safety";
         state.reason = "已处理，请检查对话后继续";
         break;
       }
       case "start": {
         const generationId = command.generationId || command.userId;
+        const currentSource = source(owner);
         if (command.userId && !state.settled.includes(generationId) && state.turn?.id !== generationId) {
           if (state.turn && !state.turn.done && !state.turn.stopped) {
-            // One queue belongs to the conversation, not to a tab/branch. If a
-            // second tab starts another native generation while the first one
-            // is still active, do not guess which branch should own the queue.
-            state.paused = true;
-            state.holdUntil = now;
-            state.reason = "检测到同一对话存在并发生成；Queue 已暂停，请确认对话后继续";
-            result.conflict = true;
-            break;
+            // A newer generation from the same browser tab is sequential even
+            // if a prior content script missed its settle event. A different
+            // tab is a real branch/concurrency hazard and still fails closed.
+            const sameSource = Boolean(state.turn.source && state.turn.source === currentSource);
+            const legacySingleTab = !state.turn.source && command.singleTab === true;
+            if (!sameSource && !legacySingleTab) {
+              state.paused = true;
+              state.pauseCause = "conflict";
+              state.holdUntil = now;
+              state.reason = CONFLICT_REASON;
+              result.conflict = true;
+              break;
+            }
+            state.settled = [...state.settled.filter(id => id !== state.turn.id), state.turn.id].slice(-200);
+            if (state.pauseCause === "conflict") {
+              state.paused = false;
+              state.pauseCause = "";
+              state.reason = "";
+            }
           }
-          state.turn = { id: generationId, userId: command.userId, at: now, done: false };
+          state.turn = { id: generationId, userId: command.userId, source: currentSource, at: now, done: false };
           state.holdUntil = 0;
           state.reason = state.paused ? "已暂停" : "";
+        } else if (state.turn?.id === generationId && !state.turn.source && currentSource) {
+          state.turn.source = currentSource;
         }
         break;
       }
@@ -201,8 +223,8 @@
         state.turn.assistantId = String(command.assistantId || "");
         state.settled = [...state.settled, state.turn.id].slice(-200);
         // Store notification intent before touching chrome.notifications: at-most-once.
-        result.notify = state.items.length === 0 && !command.failed && !state.turn.stopped && !state.holdUntil;
-        if (command.failed || state.turn.stopped) { state.paused = true; state.reason = "当前回复异常或已停止，请检查后继续"; }
+        result.notify = state.items.length === 0 && !command.failed && !command.suppressNotify && !state.turn.stopped && !state.holdUntil;
+        if (command.failed || state.turn.stopped) { state.paused = true; state.pauseCause = "safety"; state.reason = "当前回复异常或已停止，请检查后继续"; }
         break;
       default: reject("未知队列操作");
     }
@@ -210,5 +232,5 @@
     if (changed) { state.revision += 1; state.updatedAt = now; }
     return { state, changed, ...result };
   }
-  return { PREFIX, MAX_ITEMS, MAX_TEXT, LEASE_MS, id, text, comparable, route, key, fresh, normalize, apply };
+  return { PREFIX, MAX_ITEMS, MAX_TEXT, LEASE_MS, CONFLICT_REASON, id, text, comparable, route, key, fresh, normalize, apply };
 });
