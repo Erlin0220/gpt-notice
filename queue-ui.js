@@ -1,228 +1,131 @@
-(function attachQueueUI(root, factory) {
-  const api = factory();
-  if (typeof module === "object" && module.exports) module.exports = api;
-  root.ChatGPTQueueUI = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function createQueueUIApi() {
-  const DEFAULT_ROOT_ID = "chatgpt-message-queue-root";
-  const PREVIEW_LENGTH = 240;
-  const STATUS_LABELS = { pending: "等待", dispatching: "发送中", running: "执行中", completed: "已完成", failed: "失败" };
-
-  function create({ documentRef = globalThis.document, ownerId = "", onAction = async () => {}, rootId = DEFAULT_ROOT_ID } = {}) {
-    let root = null;
-    let lastSignature = "";
-
-    function ensure() {
-      const existing = documentRef.getElementById(rootId);
-      if (existing && existing.dataset.gptqOwner !== ownerId) existing.remove();
-      root = documentRef.getElementById(rootId);
-      if (!root) {
-        root = documentRef.createElement("div");
-        root.id = rootId;
-        root.dataset.gptqOwner = ownerId;
-        root.innerHTML = buildMarkup();
-        (documentRef.body || documentRef.documentElement).appendChild(root);
-        bindEvents(root);
-      }
-      return root;
-    }
-
-    function bindEvents(node) {
-      node.addEventListener("click", async (event) => {
-        const button = event.target?.closest?.("button");
-        if (!button || !node.contains(button)) return;
-        const action = button.dataset.action || (button.classList.contains("gptq-trigger") ? "toggle-panel" : "");
-        if (!action) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        await onAction({ action, itemId: button.dataset.id || "", button, root: node });
-      }, true);
-    }
-
-    function render(model = {}) {
-      const node = ensure();
-      const normalized = normalizeModel(model);
-      const signature = JSON.stringify(normalized);
-      if (signature === lastSignature) return false;
-      lastSignature = signature;
-
-      setText(node.querySelector(".gptq-count"), normalized.pendingCount);
-      node.querySelector(".gptq-trigger")?.classList.toggle("has-items", normalized.pendingCount > 0);
-      const enqueue = node.querySelector('[data-action="enqueue"]');
-      if (enqueue) {
-        enqueue.disabled = normalized.busy;
-        enqueue.title = normalized.enqueueTitle;
-      }
-      const pause = node.querySelector('[data-action="pause"]');
-      if (pause) pause.textContent = normalized.paused ? "继续" : "暂停";
-      setText(node.querySelector(".gptq-status"), normalized.statusText);
-      syncItems(node.querySelector(".gptq-list"), normalized.items, documentRef);
-      node.dataset.busy = normalized.busy ? "true" : "false";
-      return true;
-    }
-
-    function syncItems(list, items, doc) {
-      if (!list) return;
-      const existing = new Map([...list.querySelectorAll(".gptq-item[data-id]")].map((node) => [node.dataset.id, node]));
-      const wanted = new Set(items.map((item) => item.id));
-      for (const [id, node] of existing) if (!wanted.has(id)) node.remove();
-      list.querySelector(".gptq-empty")?.remove();
-      if (!items.length) {
-        const empty = doc.createElement("li");
-        empty.className = "gptq-empty";
-        empty.textContent = "输入下一条消息后加入队列";
-        list.appendChild(empty);
+(() => {
+  "use strict";
+  const CSS = `
+    :host{all:initial;position:fixed;display:block;z-index:1000;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
+    *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
+    .bar{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-height:32px;pointer-events:none}
+    button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--n-line,#ddd);border-radius:9px;padding:6px 10px;background:var(--n-bg,#fff);min-height:30px;pointer-events:auto}
+    button:hover{background:var(--n-hover,#f0f0f0)}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #538ae8;outline-offset:2px}button:disabled{opacity:.45;cursor:default}
+    .usage{margin-right:auto;max-width:65%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--n-muted,#666)}
+    .panel{position:absolute;bottom:calc(100% + 6px);right:0;width:min(100%,620px);max-height:min(58vh,560px,var(--n-panel-height,560px));overflow:auto;overscroll-behavior:contain;pointer-events:auto;border:1px solid var(--n-line,#ddd);border-radius:14px;background:var(--n-bg,#fff);box-shadow:0 12px 35px #0002;padding:14px}
+    header{display:flex;align-items:center;gap:8px;margin-bottom:10px}header strong{font-size:14px;margin-right:auto}
+    .hint{color:var(--n-muted,#666);margin:8px 0;overflow-wrap:anywhere}.status{margin:6px 0;min-height:18px}.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+    .item{border:1px solid var(--n-line,#ddd);border-radius:10px;padding:10px}.preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:110px;overflow:auto;margin:0 0 8px}.actions{display:flex;gap:5px;flex-wrap:wrap}.state{color:var(--n-muted,#666);margin-bottom:6px}
+    label{display:block;margin:10px 0 4px}input,textarea{width:100%;border:1px solid var(--n-line,#ddd);border-radius:8px;padding:8px;background:var(--n-bg,#fff)}textarea{min-height:110px;resize:vertical}footer{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+    .notice{position:absolute;bottom:calc(100% + 8px);left:0;max-width:100%;background:var(--n-bg,#fff);border:1px solid var(--n-line,#ddd);border-radius:8px;padding:8px 12px;pointer-events:auto;white-space:pre-wrap}
+    :host([data-dark=true]){--n-bg:#242424;--n-fg:#eee;--n-muted:#b2b2b2;--n-line:#484848;--n-hover:#363636}
+    @media(max-width:550px){.bar{gap:4px}button{padding:5px 7px}.usage{max-width:55%;font-size:11px}.panel{width:100%}}
+  `;
+  function create(onAction) {
+    const host = document.createElement("div");
+    host.id = "chatgpt-message-queue-root";
+    host.hidden = true;
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<style>${CSS}</style><div class="bar"><button class="usage" data-action="usage" title="用量来源与本地校正">GPT-6 · 读取中</button><button data-action="add">加入 Queue</button><button data-action="queue" aria-expanded="false">Queue <span class="count">0</span></button></div>
+      <section class="panel queue-panel" hidden aria-label="当前对话 Queue"><header><strong>Queue</strong><button data-action="pause">暂停</button><button data-action="close">关闭</button></header><p class="status" role="status"></p><ol class="list"></ol><p class="hint">使用原生输入框添加消息。Queue 只发送纯文本，永不覆盖草稿或接管原生 Send。</p></section>
+      <section class="panel usage-panel" hidden aria-label="GPT-6 用量"><header><strong>GPT-6 用量</strong><button data-action="close">关闭</button></header><p class="source hint"></p><p class="reset hint"></p><p class="hint">当前账号配置为每周 50 次；GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度。不包含 Thinking、Work 或 Codex。首次使用日期：2026-09-09；日期本身不能证明本周期已用次数或精确刷新时间。</p><label>本地已用总数校正（留空表示历史未知）<input name="total" type="number" min="0" placeholder="未知"></label><label>每周额度（当前账号设置）<input name="limit" type="number" min="1" max="10000"></label><label>下一次刷新（仅填写已确认的时间；留空表示未知）<input name="resetAt" type="datetime-local"></label><p class="hint">所有统计只在本机保存。手动时间会作为每 7 天刷新一次的本地计划，不冒充官方 reset time。</p><footer><button data-action="close">取消</button><button data-action="save-usage">保存校正</button></footer></section>
+      <section class="panel edit-panel" hidden aria-label="编辑已保存的队列消息"><header><strong>编辑 Queue 消息</strong></header><label>已保存的文本<textarea name="edit" maxlength="200000"></textarea></label><footer><button data-action="cancel-edit">取消</button><button data-action="save-edit">保存</button></footer></section><div class="notice" hidden role="status"></div>`;
+    document.body.appendChild(host);
+    const $ = s => shadow.querySelector(s);
+    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
+    const close = () => { for (const panel of shadow.querySelectorAll(".panel")) panel.hidden = true; $('[data-action="queue"]').setAttribute("aria-expanded", "false"); editing = null; };
+    const showNotice = value => {
+      clearTimeout(noticeTimer);
+      $(".notice").textContent = value || "";
+      $(".notice").hidden = !value;
+      noticeTimer = setTimeout(() => { $(".notice").hidden = true; }, 7000);
+    };
+    shadow.addEventListener("keydown", event => { if (event.key === "Escape") { close(); event.stopPropagation(); } });
+    shadow.addEventListener("click", async event => {
+      const button = event.target.closest("button[data-action]");
+      if (!button || button.disabled) return;
+      const action = button.dataset.action;
+      if (["queue", "usage", "edit"].includes(action)) position(true);
+      const item = model.queue?.items.find(i => i.id === button.dataset.id);
+      if (action === "close") return close();
+      if (action === "queue") { const open = $(".queue-panel").hidden; close(); $(".queue-panel").hidden = !open; button.setAttribute("aria-expanded", String(open)); return; }
+      if (action === "usage") {
+        close(); $(".usage-panel").hidden = false;
+        const usage = globalThis.ChatGPTUsage.summary(model.usage);
+        usageRevision = usage.revision;
+        $('[name="total"]').value = usage.baselineKnown ? usage.used : "";
+        $('[name="limit"]').value = usage.limit;
+        $('[name="resetAt"]').value = usage.resetAt ? new Date(usage.resetAt - new Date(usage.resetAt).getTimezoneOffset() * 60000).toISOString().slice(0,16) : "";
         return;
       }
-      items.forEach((item, index) => {
-        let node = existing.get(item.id);
-        if (!node) {
-          node = createItemNode(doc, item.id);
-          list.appendChild(node);
+      if (action === "edit" && item?.state === "pending") {
+        editing = { id: item.id, revision: model.queue.revision, key: model.key };
+        $(".queue-panel").hidden = true; $(".edit-panel").hidden = false;
+        $('[name="edit"]').value = item.text; $('[name="edit"]').focus(); return;
+      }
+      if (action === "cancel-edit") { close(); $(".queue-panel").hidden = false; return; }
+      if (action === "resolve-retry" || action === "resolve-remove") {
+        if (!confirm(action === "resolve-retry" ? "请先核对原生对话：确认这条消息没有发送。重新入队可能导致重复发送，是否继续？" : "已核对原生对话，确认从 outbox 移除此未知结果，不再发送？")) return;
+      }
+      const payload = action === "save-edit" ? { ...editing, text: $('[name="edit"]').value } : action === "save-usage" ? { revision: usageRevision, total: $('[name="total"]').value, limit: $('[name="limit"]').value, resetAt: $('[name="resetAt"]').value ? new Date($('[name="resetAt"]').value).getTime() : 0 } : { id: item?.id };
+      button.disabled = true;
+      try {
+        await onAction(action, payload);
+        if (action.startsWith("save-")) close();
+      } catch (error) { showNotice(error.message); }
+      finally { button.disabled = false; }
+    });
+    const observer = new ResizeObserver(() => position());
+    function place() {
+      frame = 0;
+      if (!anchorNode?.isConnected) { host.hidden = true; return; }
+      const rect = anchorNode.getBoundingClientRect();
+      host.style.setProperty("--n-panel-height", `${Math.max(40, rect.top - 56)}px`);
+      host.hidden = model.mode === "off" || rect.width < 1 || rect.top < 70 || rect.top > innerHeight;
+      const width = Math.min(rect.width, innerWidth - 24);
+      const left = Math.max(12, Math.min(rect.left, innerWidth - width - 12));
+      const next = `${Math.round(left)}:${Math.round(rect.top - 6)}:${Math.round(width)}`;
+      if (geometry !== next) { geometry = next; host.style.left = `${left}px`; host.style.top = `${rect.top - 6}px`; host.style.width = `${width}px`; }
+    }
+    function position(immediate = false) {
+      if (immediate) { cancelAnimationFrame(frame); place(); return; }
+      if (frame) return;
+      frame = requestAnimationFrame(place);
+    }
+    const onScroll = () => position();
+    addEventListener("scroll", onScroll, { capture: true, passive: true });
+    addEventListener("resize", onScroll, { passive: true });
+    function render(next) {
+      model = next;
+      if (lastKey !== next.key) { lastKey = next.key; close(); signature = ""; }
+      const usage = globalThis.ChatGPTUsage.summary(next.usage);
+      $(".usage").textContent = next.scope ? usage.label : "GPT-6 · 账号未识别";
+      $(".source").textContent = usage.sourceLabel;
+      $(".reset").textContent = usage.resetLabel;
+      for (const name of ["add", "queue"]) $(`[data-action="${name}"]`).hidden = next.mode !== "conversation";
+      $('[data-action="add"]').disabled = !next.scope || next.actionBusy;
+      $('[data-action="pause"]').textContent = next.queue?.paused ? "继续" : "暂停";
+      $(".count").textContent = next.queue?.items.length || 0;
+      $(".status").textContent = next.status || next.queue?.reason || "队列就绪";
+      host.dataset.dark = String(document.documentElement.classList.contains("dark") || document.documentElement.style.colorScheme === "dark");
+      const sig = `${next.key}:${next.queue?.revision || 0}`;
+      if (sig !== signature) {
+        signature = sig;
+        const nodes = new Map([...$(".list").children].map(n => [n.dataset.id,n]));
+        for (const item of next.queue?.items || []) {
+          let node = nodes.get(item.id);
+          nodes.delete(item.id);
+          if (!node) { node = document.createElement("li"); node.className = "item"; node.dataset.id = item.id; node.innerHTML = '<div class="state"></div><p class="preview"></p><div class="actions"></div>'; }
+          node.querySelector(".preview").textContent = item.text;
+          node.querySelector(".state").textContent = { pending: "等待发送", sending: "正在确认送达", unknown: "发送结果未知 · 不会自动重发" }[item.state];
+          if (node.dataset.state !== item.state) {
+            node.dataset.state = item.state;
+            const controls = item.state === "pending" ? [["send","立即发送"],["edit","编辑"],["up","上移"],["down","下移"],["remove","删除"]] : item.state === "unknown" ? [["resolve-retry","确认未发送，重新入队"],["resolve-remove","确认移除"]] : [];
+            node.querySelector(".actions").replaceChildren(...controls.map(([action,label]) => { const b = document.createElement("button"); b.dataset.action=action; b.dataset.id=item.id; b.textContent=label; return b; }));
+          }
+          $(".list").appendChild(node);
         }
-        updateItemNode(node, item, index, doc);
-        if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
-      });
+        for (const node of nodes.values()) node.remove();
+      }
+      position();
     }
-
-    function openConfirmation(mode, itemId, message) {
-      const node = ensure();
-      const box = node.querySelector(".gptq-confirm");
-      if (!box || !itemId) return false;
-      if (!box.hidden && box.dataset.mode && box.dataset.mode !== "auto-execute" && mode === "auto-execute") return false;
-      box.dataset.mode = mode;
-      box.dataset.itemId = itemId;
-      setText(box.querySelector(".gptq-confirm-message"), message);
-      box.hidden = false;
-      const panel = node.querySelector(".gptq-panel");
-      if (panel) panel.hidden = false;
-      lastSignature = "";
-      return true;
-    }
-
-    function closeConfirmation(onlyMode = "") {
-      const node = ensure();
-      const box = node.querySelector(".gptq-confirm");
-      if (!box || (onlyMode && box.dataset.mode !== onlyMode)) return;
-      box.hidden = true;
-      delete box.dataset.mode;
-      delete box.dataset.itemId;
-      setText(box.querySelector(".gptq-confirm-message"), "");
-      lastSignature = "";
-    }
-
-    function getConfirmation() {
-      const box = ensure().querySelector(".gptq-confirm");
-      if (!box || box.hidden) return { mode: "", itemId: "" };
-      return { mode: box.dataset.mode || "", itemId: box.dataset.itemId || "" };
-    }
-
-    function setPanelOpen(open) {
-      const panel = ensure().querySelector(".gptq-panel");
-      if (panel) panel.hidden = !open;
-    }
-
-    function togglePanel() {
-      const panel = ensure().querySelector(".gptq-panel");
-      if (panel) panel.hidden = !panel.hidden;
-    }
-
-    function setBusy(busy) {
-      const node = ensure();
-      node.dataset.busy = busy ? "true" : "false";
-      for (const button of node.querySelectorAll("button")) button.disabled = Boolean(busy);
-      lastSignature = "";
-    }
-
-    function invalidate() { lastSignature = ""; }
-
-    return { ensure, render, openConfirmation, closeConfirmation, getConfirmation, setPanelOpen, togglePanel, setBusy, invalidate, getRoot: () => ensure() };
+    return { host, render, showNotice, anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
+      dispose() { clearTimeout(noticeTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); host.remove(); } };
   }
-
-  function normalizeModel(model) {
-    return {
-      pendingCount: Math.max(0, Number(model.pendingCount || 0)),
-      paused: Boolean(model.paused),
-      busy: Boolean(model.busy),
-      enqueueTitle: String(model.enqueueTitle || "将输入框内容加入当前页面队列"),
-      statusText: String(model.statusText || "暂无等待消息"),
-      items: (model.items || []).map((item) => ({
-        id: String(item.id || ""),
-        status: String(item.status || "pending"),
-        text: String(item.text || ""),
-        error: String(item.error || ""),
-        canModify: Boolean(item.canModify),
-        canRetry: Boolean(item.canRetry),
-        canDelete: Boolean(item.canDelete)
-      })).filter((item) => item.id)
-    };
-  }
-
-  function createItemNode(doc, id) {
-    const node = doc.createElement("li");
-    node.className = "gptq-item";
-    node.dataset.id = id;
-    const main = doc.createElement("div");
-    main.className = "gptq-item-main";
-    const index = doc.createElement("span");
-    index.className = "gptq-index";
-    const content = doc.createElement("div");
-    const preview = doc.createElement("p");
-    const meta = doc.createElement("small");
-    content.append(preview, meta);
-    main.append(index, content);
-    const actions = doc.createElement("div");
-    actions.className = "gptq-item-actions";
-    node.append(main, actions);
-    return node;
-  }
-
-  function updateItemNode(node, item, index, doc) {
-    node.dataset.status = item.status;
-    setText(node.querySelector(".gptq-index"), index + 1);
-    const preview = item.text.length > PREVIEW_LENGTH ? `${item.text.slice(0, PREVIEW_LENGTH)}…` : item.text;
-    setText(node.querySelector("p"), preview);
-    setText(node.querySelector("small"), `${STATUS_LABELS[item.status] || item.status} · ${item.text.length.toLocaleString()} 字符${item.error ? ` · ${item.error}` : ""}`);
-    const actions = node.querySelector(".gptq-item-actions");
-    const actionSignature = JSON.stringify([item.canModify, item.canRetry, item.canDelete]);
-    if (actions.dataset.signature === actionSignature) return;
-    actions.dataset.signature = actionSignature;
-    actions.replaceChildren();
-    if (item.canModify) {
-      actions.append(createButton(doc, "编辑", "edit", item.id));
-      actions.append(createButton(doc, "立即执行", "execute-now", item.id));
-    }
-    if (item.canRetry) actions.append(createButton(doc, "重试", "retry", item.id));
-    if (item.canDelete) actions.append(createButton(doc, "删除", "delete", item.id));
-  }
-
-  function createButton(doc, label, action, id = "") {
-    const button = doc.createElement("button");
-    button.type = "button";
-    button.dataset.action = action;
-    if (id) button.dataset.id = id;
-    button.textContent = label;
-    return button;
-  }
-
-  function setText(node, value) {
-    if (node && node.textContent !== String(value ?? "")) node.textContent = String(value ?? "");
-  }
-
-  function buildMarkup() {
-    return `
-      <div class="gptq-dock">
-        <button class="gptq-quick-add" type="button" data-action="enqueue">加入队列</button>
-        <button class="gptq-trigger" type="button"><span>队列</span><strong class="gptq-count">0</strong></button>
-      </div>
-      <section class="gptq-panel" hidden>
-        <header><strong>消息队列</strong><button type="button" data-action="close" aria-label="关闭">×</button></header>
-        <div class="gptq-actions"><button type="button" data-action="pause">暂停</button><button type="button" data-action="clear-completed">清除已完成</button></div>
-        <div class="gptq-confirm" hidden><p class="gptq-confirm-message"></p><div class="gptq-confirm-actions"><button type="button" data-action="cancel-confirm">否</button><button type="button" data-action="confirm-action">是</button></div></div>
-        <div class="gptq-status"></div>
-        <ol class="gptq-list"></ol>
-      </section>`;
-  }
-
-  return { create, normalizeModel, PREVIEW_LENGTH };
-});
+  globalThis.ChatGPTQueueUI = { create };
+})();

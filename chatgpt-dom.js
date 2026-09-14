@@ -1,503 +1,123 @@
-(function attachChatGPTPageAdapter(root, factory) {
+(function (root, factory) {
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
   root.ChatGPTPageAdapter = api;
-  root.ChatGPTDomAdapter = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function createChatGPTPageAdapter() {
-  const PAGE_SNAPSHOT_SCHEMA_VERSION = 1;
-  const INITIALIZING_GRACE_MS = 3_000;
-  const MAX_PUBLIC_ERROR_LENGTH = 160;
-  const CHAT_HOSTS = new Set(["chatgpt.com", "chat.openai.com"]);
-
-  const COMPOSER_SELECTORS = [
-    "#prompt-textarea",
-    "textarea[placeholder]",
-    '[contenteditable="true"][data-virtualkeyboard]',
-    'main [contenteditable="true"]'
-  ];
-  const SEND_SELECTORS = [
-    "#composer-submit-button",
-    'button[data-testid*="send-button"]',
-    'button[data-testid*="composer-submit"]'
-  ];
-  const STOP_SELECTORS = [
-    'button[data-testid*="stop"]',
-    'button[aria-label*="Stop"]',
-    'button[aria-label*="stop"]',
-    'button[aria-label*="停止"]',
-    'button[aria-label*="中止"]',
-    'button[aria-label*="取消生成"]'
-  ];
-  const APPROVAL_LABELS = new Set([
-    "allow", "approve", "confirm", "continue", "run", "allow once", "always allow",
-    "允许", "批准", "确认", "继续", "运行", "允许一次", "始终允许"
-  ]);
-  const BUSY_WORDS = [
-    "working", "thinking", "searching", "running", "generating",
-    "正在处理", "正在思考", "正在搜索", "正在运行", "正在生成"
-  ];
-  const ERROR_WORDS = [
-    "something went wrong", "there was an error generating a response", "network error",
-    "conversation not found", "出现错误", "发生错误", "网络错误", "生成回复时出错", "找不到对话"
-  ];
-
-  function queryAll(documentRef, selector) {
-    if (!documentRef || typeof documentRef.querySelectorAll !== "function") return [];
-    try { return [...documentRef.querySelectorAll(selector)]; } catch { return []; }
-  }
-
-  function cleanText(value, maxLength = 50_000) {
-    return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
-  }
-
-  function hashText(text) {
-    const value = String(text || "");
-    let hash = 2166136261;
-    for (let index = 0; index < value.length; index += 1) {
-      hash ^= value.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
+})(globalThis, function () {
+  "use strict";
+  // Keep the selectors verified by the previous extension and the live web regression.
+  const COMPOSER = '#prompt-textarea, main textarea[placeholder], main [contenteditable="true"][data-virtualkeyboard]';
+  const STOP = 'button[data-testid*="stop"], button[aria-label*="Stop"], button[aria-label*="stop"], button[aria-label*="停止"], button[aria-label*="中止"], button[aria-label*="取消生成"]';
+  const SEND = '#composer-submit-button, button[data-testid*="send-button"], button[data-testid*="composer-submit"]';
+  const all = (doc, selector) => [...doc.querySelectorAll(selector)];
+  const visible = n => Boolean(n?.isConnected && n.getClientRects().length && getComputedStyle(n).visibility !== "hidden");
+  const enabled = n => Boolean(n && !n.disabled && n.getAttribute("aria-disabled") !== "true");
+  const readText = n => String(n?.value ?? n?.innerText ?? n?.textContent ?? "").replace(/\r\n?/g, "\n");
+  const messageId = n => n?.getAttribute("data-message-id") || "";
+  const turn = n => n?.closest('[data-testid^="conversation-turn-"], article');
+  const MESSAGE = '[data-message-author-role]';
+  let messageRoot = null, cachedUser = null, discoveryAfter = 0;
+  function tail(doc) {
+    if (!messageRoot?.isConnected || messageRoot.ownerDocument !== doc) {
+      if (Date.now() < discoveryAfter) return [];
+      discoveryAfter = Date.now() + 2000;
+      const nodes = all(doc, MESSAGE);
+      cachedUser = nodes.findLast(n => n.dataset.messageAuthorRole === "user") || null;
+      const last = turn(nodes.at(-1));
+      messageRoot = last?.parentElement || null;
+      // Live ChatGPT wraps each turn in its own div; the fixture/direct layout
+      // puts sections directly under the transcript. Cache their common parent.
+      if (messageRoot?.children.length === 1) messageRoot = messageRoot.parentElement;
+      while (messageRoot && cachedUser && !messageRoot.contains(cachedUser)) messageRoot = messageRoot.parentElement;
+      if (!messageRoot) return [];
     }
-    return (hash >>> 0).toString(36);
+    const groups = [];
+    for (let node = messageRoot.lastElementChild; node && groups.length < 12; node = node.previousElementSibling) groups.push(node);
+    const nodes = groups.reverse().flatMap(n => n.matches(MESSAGE) ? [n] : all(n, MESSAGE));
+    const user = nodes.findLast(n => n.dataset.messageAuthorRole === "user");
+    if (user) cachedUser = user;
+    else if (cachedUser?.isConnected && messageRoot.contains(cachedUser)) nodes.unshift(cachedUser);
+    return nodes;
   }
-
-  function isComposerEnabled(node) {
-    return Boolean(
-      node &&
-      node.disabled !== true &&
-      node.getAttribute?.("aria-disabled") !== "true" &&
-      node.getAttribute?.("aria-hidden") !== "true"
-    );
+  function composer(doc = document) {
+    const nodes = all(doc, COMPOSER).filter(visible);
+    return nodes.length === 1 ? nodes[0] : null;
   }
-
-  function isElementVisible(node, root = globalThis) {
-    if (!node) return false;
-    const style = typeof root?.getComputedStyle === "function" ? root.getComputedStyle(node) : null;
-    if (style && (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0)) return false;
-    const rect = typeof node.getBoundingClientRect === "function" ? node.getBoundingClientRect() : null;
-    return !rect || (rect.width > 0 && rect.height > 0);
+  function sendButton(doc = document) {
+    // Never mistake Stop/interrupt for Send even when they reuse the same id.
+    return all(doc, SEND).find(n => visible(n) && !n.matches(STOP) && !/stop|停止|中止/i.test(n.getAttribute("aria-label") || "")) || null;
   }
-
-  function collectComposerCandidates(documentRef) {
-    const seen = new Set();
-    const candidates = [];
-    for (const selector of COMPOSER_SELECTORS) {
-      for (const node of queryAll(documentRef, selector)) {
-        if (!node || seen.has(node)) continue;
-        seen.add(node);
-        candidates.push(node);
-      }
+  function snapshot(doc = document, completion = false) {
+    const input = composer(doc);
+    const box = input?.closest("form") || input?.parentElement;
+    const stop = all(doc, STOP).some(visible);
+    const messages = tail(doc);
+    const users = messages.filter(n => n.dataset.messageAuthorRole === "user");
+    const assistants = messages.filter(n => n.dataset.messageAuthorRole === "assistant");
+    const user = users.at(-1) || null;
+    const assistant = assistants.at(-1) || null;
+    const afterUser = Boolean(user && assistant && (user.compareDocumentPosition(assistant) & 4));
+    const assistantTurn = turn(assistant);
+    const activeTurn = afterUser ? assistantTurn : turn(user);
+    const local = selector => activeTurn ? all(activeTurn, selector) : [];
+    const waiting = local('button').some(n => visible(n) && /^(allow|approve|confirm|continue|allow once|always allow|允许|批准|确认|继续|允许一次|始终允许)$/i.test(n.innerText.trim()));
+    const busy = local('[role="status"], [data-state="loading"]').some(n => visible(n) && /working|thinking|searching|generating|正在处理|正在思考|正在搜索|正在生成/i.test(n.textContent.slice(0,200)));
+    const errors = [...local('[role="alert"], [data-testid*="error"]'), ...(box ? all(box, '[role="alert"], [data-testid*="error"]') : [])];
+    const error = errors.some(n => visible(n) && /error|wrong|failed|错误|失败|出错|达到.*限|limit/i.test(n.textContent.slice(0,500)));
+    const attachments = Boolean(box?.querySelector('input[type="file"]')?.files?.length || box?.querySelector('[data-testid*="attachment"], [data-testid*="file-preview"], button[aria-label*="Remove file"], button[aria-label*="删除附件"]'));
+    return { composer: input, anchor: box, ready: enabled(input), empty: !readText(input).trim() && !attachments,
+      attachments, stop, waiting, busy, error, running: stop || waiting || busy,
+      user, users, userId: messageId(user), assistant, assistantId: afterUser ? messageId(assistant) : "",
+      model: afterUser ? assistant?.getAttribute("data-message-model-slug") || "" : "",
+      copy: afterUser && Boolean(assistantTurn?.querySelector('button[data-testid="copy-turn-action-button"]')),
+      // Never read or hash streamed answer tokens. Content is sampled only after native controls are idle.
+      settledText: completion && afterUser && !stop && !busy && !waiting ? (assistant.textContent || "").slice(0,200000) : "" };
+  }
+  function receipt(item, page) {
+    const baseline = document.querySelector(`[data-message-author-role="user"][data-message-id="${CSS.escape(item.baseline)}"]`);
+    if (!baseline) return null; // Missing/virtualized baseline cannot prove delivery.
+    return page.users.find(n => (baseline.compareDocumentPosition(n) & 4) && messageId(n) && globalThis.ChatGPTQueueCore.comparable(readText(n)) === globalThis.ChatGPTQueueCore.comparable(item.text)) || null;
+  }
+  let bootstrapNode, userId = "", initialAccount = "", scopeIdentity = "", scopeValue = "";
+  async function scope(doc = document) {
+    const node = doc.getElementById("client-bootstrap");
+    if (node !== bootstrapNode) {
+      bootstrapNode = node;
+      userId = "";
+      initialAccount = "";
+      try {
+        const value = JSON.parse(node?.textContent || "{}");
+        userId = String(value.user?.id || value.session?.user?.id || "");
+        initialAccount = String(value.session?.account?.id || "");
+      } catch {}
     }
-    return candidates;
-  }
-
-  function findActiveComposer(documentRef, isVisible = () => true) {
-    const candidates = collectComposerCandidates(documentRef);
-    if (!candidates.length) return null;
-    const activeElement = documentRef?.activeElement;
-    const focused = candidates.find((node) =>
-      node === activeElement || (typeof node.contains === "function" && node.contains(activeElement))
-    );
-    if (focused && isComposerEnabled(focused) && isVisible(focused)) return focused;
-    const visibleEnabled = candidates.filter((node) => isComposerEnabled(node) && isVisible(node));
-    if (visibleEnabled.length) return visibleEnabled.at(-1);
-    const visible = candidates.filter((node) => isVisible(node));
-    if (visible.length) return visible.at(-1);
-    return null;
-  }
-
-  function combinedText(element) {
-    return cleanText(`${element?.getAttribute?.("aria-label") || ""} ${element?.innerText || ""} ${element?.title || ""}`, 120);
-  }
-
-  function looksLikeSendButton(button) {
-    if (!button) return false;
-    const id = String(button.id || button.getAttribute?.("id") || "").toLowerCase();
-    const testId = String(button.getAttribute?.("data-testid") || "").toLowerCase();
-    const label = combinedText(button).toLowerCase();
-    return id === "composer-submit-button" ||
-      testId.includes("send-button") ||
-      testId.includes("composer-submit") ||
-      /^(send|发送|傳送|提交)$/.test(label) ||
-      label.includes("send message") ||
-      label.includes("发送消息");
-  }
-
-  function isSendButtonEnabled(button) {
-    return Boolean(button && button.disabled !== true && button.getAttribute?.("aria-disabled") !== "true");
-  }
-
-  function findSendButton(documentRef, root = globalThis) {
-    for (const selector of SEND_SELECTORS) {
-      const visible = queryAll(documentRef, selector).find((node) => isElementVisible(node, root));
-      if (visible) return visible;
+    let account = "";
+    try { account = localStorage.getItem("_account") || initialAccount || "personal"; } catch { return ""; }
+    if (!userId) return "";
+    const identity = `${userId}:${account}`;
+    if (scopeIdentity !== identity) {
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+      scopeValue = [...new Uint8Array(hash)].map(n => n.toString(16).padStart(2,"0")).join("");
+      scopeIdentity = identity;
     }
-    return queryAll(documentRef, "main button").find((node) => isElementVisible(node, root) && looksLikeSendButton(node)) || null;
+    return scopeValue;
   }
-
-  function hasStopControl(documentRef, root = globalThis) {
-    if (STOP_SELECTORS.some((selector) => queryAll(documentRef, selector).some((node) => isElementVisible(node, root)))) return true;
-    const words = ["stop generating", "stop responding", "停止生成", "停止响应", "中止生成", "取消生成"];
-    return queryAll(documentRef, "main button")
-      .filter((node) => isElementVisible(node, root))
-      .some((node) => words.some((word) => combinedText(node).toLowerCase().includes(word)));
-  }
-
-  function hasApprovalControl(documentRef, root = globalThis) {
-    return queryAll(documentRef, "main button")
-      .filter((node) => isElementVisible(node, root))
-      .some((node) => APPROVAL_LABELS.has(combinedText(node).toLowerCase()));
-  }
-
-  function hasBusyIndicator(documentRef, root = globalThis) {
-    return queryAll(documentRef, 'main [aria-live="polite"], main [role="status"], main [data-state="loading"]')
-      .filter((node) => isElementVisible(node, root))
-      .some((node) => {
-        const text = cleanText(node.innerText || node.textContent || "", 200).toLowerCase();
-        return BUSY_WORDS.some((word) => text.includes(word));
-      });
-  }
-
-  function findVisibleError(documentRef, root = globalThis) {
-    const found = queryAll(documentRef, '[role="alert"], main [data-testid*="error"], main .text-red-500')
-      .filter((node) => isElementVisible(node, root))
-      .map((node) => cleanText(node.innerText || node.textContent || "", 500))
-      .find((text) => ERROR_WORDS.some((word) => text.toLowerCase().includes(word)));
-    return found ? cleanText(found, MAX_PUBLIC_ERROR_LENGTH) : "";
-  }
-
-  function hasCopyTurnAction(node) {
-    if (!node) return false;
-    const turn = node.closest?.('[data-testid^="conversation-turn-"], article');
-    if (turn?.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
-    let parent = node.parentElement;
-    for (let depth = 0; parent && depth < 3; depth += 1, parent = parent.parentElement) {
-      if (parent.querySelector?.('button[data-testid="copy-turn-action-button"]')) return true;
+  function write(input, value) {
+    if (!input || !enabled(input) || !visible(input)) return false;
+    input.focus({ preventScroll: true });
+    if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+      const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value").set.call(input, value);
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
+    } else {
+      const range = document.createRange();
+      range.selectNodeContents(input);
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      // Let ProseMirror receive its normal edit transaction rather than replacing React DOM.
+      if (!document.execCommand(value ? "insertText" : "delete", false, value)) return false;
     }
-    return false;
+    return globalThis.ChatGPTQueueCore.comparable(readText(input)) === globalThis.ChatGPTQueueCore.comparable(value);
   }
-
-  function isVisibleOrHasContent(node, root = globalThis) {
-    return Boolean(node && (isElementVisible(node, root) || node.textContent?.trim()));
-  }
-
-  function getAssistantFirstLine(node, rawText) {
-    const roots = [
-      node?.querySelector?.("[data-message-content]"),
-      node?.querySelector?.(".markdown"),
-      node?.querySelector?.('[class*="prose"]'),
-      node
-    ].filter(Boolean);
-    for (const candidate of roots) {
-      const blocks = candidate.matches?.("h1,h2,h3,h4,p,li,blockquote,pre")
-        ? [candidate]
-        : [...(candidate.querySelectorAll?.("h1,h2,h3,h4,p,li,blockquote,pre") || [])];
-      for (const block of blocks) {
-        const line = String(block.innerText || block.textContent || "")
-          .split(/\n+/)
-          .map((item) => item.trim())
-          .find((item) => item && !isAssistantUiLine(item));
-        if (line) return cleanText(line, 240);
-      }
-    }
-    const fallback = String(rawText || "")
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .find((line) => line && !isAssistantUiLine(line));
-    return cleanText(fallback || "", 240);
-  }
-
-  function isAssistantUiLine(line) {
-    const normalized = cleanText(line, 160).toLowerCase();
-    return /^(思考了\s*\d|thought for\s*\d|复制$|copy$|分享$|share$|重新生成$|regenerate$|good response$|bad response$)/i.test(normalized);
-  }
-
-  function getThinkingTimeText(node) {
-    const turn = node?.closest?.('[data-testid^="conversation-turn-"]') || node?.closest?.("article") || node?.parentElement;
-    const text = String(turn?.innerText || node?.innerText || node?.textContent || "");
-    const match = text.match(/(?:思考了|thought for)\s*((?:\d+\s*(?:h|小时|hours?|hrs?)\s*)?(?:\d+\s*(?:m|分钟|minutes?|mins?)\s*)?(?:\d+\s*(?:s|秒|seconds?|secs?))?)/i);
-    if (!match?.[1] || !/\d/.test(match[1])) return "";
-    const duration = match[1];
-    const hours = Number(duration.match(/(\d+)\s*(?:h|小时|hours?|hrs?)/i)?.[1] || 0);
-    const minutes = Number(duration.match(/(\d+)\s*(?:m|分钟|minutes?|mins?)/i)?.[1] || 0);
-    const seconds = Number(duration.match(/(\d+)\s*(?:s|秒|seconds?|secs?)/i)?.[1] || 0);
-    const totalMinutes = hours * 60 + minutes;
-    const parts = [];
-    if (totalMinutes) parts.push(`${totalMinutes}m`);
-    if (seconds || !totalMinutes) parts.push(`${seconds}s`);
-    return `思考了 ${parts.join(" ")}`;
-  }
-
-  function collectAssistant(documentRef, root = globalThis) {
-    const nodes = queryAll(documentRef, '[data-message-author-role="assistant"]')
-      .filter((node) => isVisibleOrHasContent(node, root));
-    const node = nodes.at(-1) || null;
-    const rawText = String(node?.innerText || node?.textContent || "");
-    const text = cleanText(rawText, 50_000);
-    return {
-      node,
-      text,
-      hash: text ? hashText(text) : "",
-      count: nodes.length,
-      hasCopyAction: hasCopyTurnAction(node),
-      firstLine: getAssistantFirstLine(node, rawText),
-      thinkingTimeText: getThinkingTimeText(node)
-    };
-  }
-
-  function collectUsers(documentRef) {
-    const nodes = queryAll(documentRef, '[data-message-author-role="user"]');
-    const node = nodes.at(-1) || null;
-    return {
-      nodes,
-      count: nodes.length,
-      latestText: cleanText(node?.innerText || node?.textContent || "", 240)
-    };
-  }
-
-  function getConversationId(value, base = "https://chatgpt.com/") {
-    try { return new URL(value || base, base).pathname.match(/(?:^|\/)c\/([^/?#]+)/)?.[1] || ""; }
-    catch { return ""; }
-  }
-
-  function isProvisionalConversationId(value) {
-    return /^WEB:/i.test(String(value || "").trim());
-  }
-
-  function classifyRoute(value, base = "https://chatgpt.com/") {
-    try {
-      const url = new URL(value || base, base);
-      if (!CHAT_HOSTS.has(url.hostname)) return { supportStatus: "unsupported", routeType: "non_chatgpt", conversationId: "" };
-      const pathname = url.pathname.replace(/\/+$/, "") || "/";
-      const conversationId = getConversationId(url.href, base);
-      if (conversationId) {
-        return {
-          supportStatus: "supported",
-          routeType: isProvisionalConversationId(conversationId) ? "provisional_conversation" : "conversation",
-          conversationId
-        };
-      }
-      if (pathname === "/" || /(?:^|\/)g\/g-p-[^/]+\/project$/.test(pathname)) {
-        return { supportStatus: "supported", routeType: "draft", conversationId: "" };
-      }
-      if (/^\/(auth|login|settings|share|gpts)(?:\/|$)/.test(pathname)) {
-        return { supportStatus: "unsupported", routeType: "unsupported", conversationId: "" };
-      }
-      return { supportStatus: "unsupported", routeType: "unknown", conversationId: "" };
-    } catch {
-      return { supportStatus: "unsupported", routeType: "unknown", conversationId: "" };
-    }
-  }
-
-  function composerText(node) {
-    return String(node?.value ?? node?.innerText ?? node?.textContent ?? "");
-  }
-
-  function textLengthBucket(length) {
-    const size = Math.max(0, Number(length || 0));
-    if (!size) return "empty";
-    if (size < 1_000) return "short";
-    if (size < 10_000) return "medium";
-    if (size < 100_000) return "long";
-    return "very_long";
-  }
-
-  function evaluatePageFacts(facts, { now = Date.now(), documentStartedAt = now } = {}) {
-    if (facts.supportStatus === "unsupported") {
-      return {
-        supportStatus: "unsupported",
-        compatibility: "unsupported",
-        reasonCodes: ["unsupported_route"],
-        capabilities: emptyCapabilities()
-      };
-    }
-    const initializing = !facts.pageReady || (!facts.composer.exists && now - documentStartedAt < INITIALIZING_GRACE_MS);
-    if (initializing) {
-      return {
-        supportStatus: "initializing",
-        compatibility: "initializing",
-        reasonCodes: ["page_initializing"],
-        capabilities: emptyCapabilities()
-      };
-    }
-
-    const blocked = [];
-    const degraded = [];
-    if (!facts.composer.exists) blocked.push("composer_missing");
-    if (facts.composer.ambiguous) blocked.push("multiple_visible_composers");
-    if (facts.composer.exists && !facts.composer.ready && !facts.controls.stopVisible) degraded.push("composer_not_ready");
-    if (!facts.controls.send.exists && facts.composer.exists && !facts.composer.empty) degraded.push("send_control_missing");
-    if (facts.messages.assistantCount > 0 && !facts.messages.latestAssistantHasCopyAction) degraded.push("copy_action_missing");
-
-    const compatibility = blocked.length ? "blocked" : degraded.length ? "degraded" : "healthy";
-    const reasonCodes = blocked.length ? blocked : degraded;
-    const supported = facts.supportStatus === "supported";
-    const canWriteComposer = supported && facts.composer.ready && !facts.composer.ambiguous;
-    const canClickSend = canWriteComposer && facts.controls.send.exists && facts.controls.send.enabled;
-    const canTrackTask = supported && !facts.composer.ambiguous;
-    const canDetectCompletion = canTrackTask && compatibility !== "blocked";
-    const canAdmitQueue = supported && facts.composer.exists && !facts.composer.ambiguous;
-    const canDispatchQueue = compatibility !== "blocked" && canWriteComposer;
-    return {
-      supportStatus: "supported",
-      compatibility,
-      reasonCodes,
-      capabilities: {
-        canTrackTask,
-        canDetectCompletion,
-        canAdmitQueue,
-        canDispatchQueue,
-        canWriteComposer,
-        canClickSend
-      }
-    };
-  }
-
-  function emptyCapabilities() {
-    return {
-      canTrackTask: false,
-      canDetectCompletion: false,
-      canAdmitQueue: false,
-      canDispatchQueue: false,
-      canWriteComposer: false,
-      canClickSend: false
-    };
-  }
-
-  function collectPageState({
-    documentRef = globalThis.document,
-    locationRef = globalThis.location,
-    root = globalThis,
-    now = Date.now(),
-    documentStartedAt = now
-  } = {}) {
-    const route = classifyRoute(locationRef?.href || "", locationRef?.origin || "https://chatgpt.com/");
-    const candidates = collectComposerCandidates(documentRef);
-    const visibleEnabled = candidates.filter((node) => isComposerEnabled(node) && isElementVisible(node, root));
-    const activeElement = documentRef?.activeElement;
-    const focusedVisible = visibleEnabled.some((node) => node === activeElement || node.contains?.(activeElement));
-    const composer = findActiveComposer(documentRef, (node) => isElementVisible(node, root));
-    const text = composerText(composer);
-    const sendButton = findSendButton(documentRef, root);
-    const assistant = collectAssistant(documentRef, root);
-    const users = collectUsers(documentRef);
-    const facts = {
-      schemaVersion: PAGE_SNAPSHOT_SCHEMA_VERSION,
-      observedAt: now,
-      pageReady: ["interactive", "complete"].includes(String(documentRef?.readyState || "")),
-      supportStatus: route.supportStatus,
-      routeType: route.routeType,
-      composer: {
-        exists: Boolean(composer),
-        ready: Boolean(composer && isComposerEnabled(composer) && isElementVisible(composer, root)),
-        empty: !text.trim(),
-        textLengthBucket: textLengthBucket(text.length),
-        visibleCount: visibleEnabled.length,
-        ambiguous: visibleEnabled.length > 1 && !focusedVisible
-      },
-      controls: {
-        send: { exists: Boolean(sendButton), enabled: isSendButtonEnabled(sendButton) },
-        stopVisible: hasStopControl(documentRef, root),
-        waitingAction: hasApprovalControl(documentRef, root),
-        busy: hasBusyIndicator(documentRef, root)
-      },
-      error: { visible: Boolean(findVisibleError(documentRef, root)) },
-      messages: {
-        userCount: users.count,
-        assistantCount: assistant.count,
-        latestAssistantHasCopyAction: assistant.hasCopyAction,
-        copyActionCount: queryAll(documentRef, 'button[data-testid="copy-turn-action-button"]').length
-      }
-    };
-    const evaluation = evaluatePageFacts(facts, { now, documentStartedAt });
-    return {
-      ...facts,
-      ...evaluation,
-      refs: {
-        composer,
-        sendButton,
-        assistantNode: assistant.node
-      },
-      private: {
-        composerText: text,
-        latestUserText: users.latestText,
-        assistantText: assistant.text,
-        assistantHash: assistant.hash,
-        assistantFirstLine: assistant.firstLine,
-        thinkingTimeText: assistant.thinkingTimeText,
-        visibleErrorText: findVisibleError(documentRef, root),
-        conversationId: route.conversationId
-      }
-    };
-  }
-
-  function toPublicSnapshot(state) {
-    if (!state || typeof state !== "object") return null;
-    return {
-      schemaVersion: PAGE_SNAPSHOT_SCHEMA_VERSION,
-      observedAt: Number(state.observedAt || Date.now()),
-      pageReady: Boolean(state.pageReady),
-      supportStatus: String(state.supportStatus || "unsupported"),
-      routeType: String(state.routeType || "unknown"),
-      compatibility: String(state.compatibility || "unsupported"),
-      reasonCodes: [...new Set((state.reasonCodes || []).map(String))],
-      capabilities: { ...emptyCapabilities(), ...(state.capabilities || {}) },
-      composer: {
-        exists: Boolean(state.composer?.exists),
-        ready: Boolean(state.composer?.ready),
-        empty: Boolean(state.composer?.empty),
-        textLengthBucket: String(state.composer?.textLengthBucket || "empty"),
-        visibleCount: Math.max(0, Number(state.composer?.visibleCount || 0)),
-        ambiguous: Boolean(state.composer?.ambiguous)
-      },
-      controls: {
-        send: {
-          exists: Boolean(state.controls?.send?.exists),
-          enabled: Boolean(state.controls?.send?.enabled)
-        },
-        stopVisible: Boolean(state.controls?.stopVisible),
-        waitingAction: Boolean(state.controls?.waitingAction),
-        busy: Boolean(state.controls?.busy)
-      },
-      error: { visible: Boolean(state.error?.visible) },
-      messages: {
-        userCount: Math.max(0, Number(state.messages?.userCount || 0)),
-        assistantCount: Math.max(0, Number(state.messages?.assistantCount || 0)),
-        latestAssistantHasCopyAction: Boolean(state.messages?.latestAssistantHasCopyAction),
-        copyActionCount: Math.max(0, Number(state.messages?.copyActionCount || 0))
-      }
-    };
-  }
-
-  function install() {
-    return false;
-  }
-
-  return {
-    PAGE_SNAPSHOT_SCHEMA_VERSION,
-    INITIALIZING_GRACE_MS,
-    COMPOSER_SELECTORS,
-    SEND_SELECTORS,
-    cleanText,
-    hashText,
-    classifyRoute,
-    getConversationId,
-    isProvisionalConversationId,
-    collectComposerCandidates,
-    isComposerEnabled,
-    isElementVisible,
-    findActiveComposer,
-    findSendButton,
-    looksLikeSendButton,
-    isSendButtonEnabled,
-    hasStopControl,
-    hasApprovalControl,
-    hasBusyIndicator,
-    findVisibleError,
-    collectAssistant,
-    collectUsers,
-    evaluatePageFacts,
-    collectPageState,
-    toPublicSnapshot,
-    install
-  };
+  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, composer, sendButton, snapshot, receipt, scope, write };
 });

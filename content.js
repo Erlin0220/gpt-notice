@@ -1,601 +1,263 @@
 (() => {
-  if (window.__CHATGPT_TASK_NOTIFIER_LOADED__) return;
-  window.__CHATGPT_TASK_NOTIFIER_LOADED__ = true;
-
-  const pageAdapter = globalThis.ChatGPTPageAdapter;
-  if (!pageAdapter) return;
-
-  const COMPLETION_STABLE_MS = 4_000;
-  const COPY_ACTION_STABLE_MS = 600;
-  const NAVIGATION_CONFIRM_MS = 2_000;
-  const RECOVERY_IDLE_GRACE_MS = 10_000;
-  const INSPECT_INTERVAL_MS = 800;
-  const HEARTBEAT_INTERVAL_MS = 5_000;
-  const PENDING_SUBMISSION_MS = 10_000;
-  const URL_PROMOTION_WINDOW_MS = 60_000;
-  const START_RETRY_MS = 800;
-
-  const state = {
-    taskId: null,
-    running: false,
-    remoteStatus: null,
-    baselineAssistantHash: "",
-    baselineCopyActionCount: 0,
-    latestAssistantHash: "",
-    latestAssistantChangedAt: Date.now(),
-    lastAssistantText: "",
-    lastAssistantHasCopyAction: false,
-    lastSettledAssistantHash: "",
-    lastUserCount: 0,
-    pendingBaselineUserCount: 0,
-    pendingBaselineUserHash: "",
-    pendingPrompt: "",
-    pendingBaselineHash: "",
-    pendingBaselineCopyActionCount: 0,
-    pendingAt: 0,
-    pendingConfirmed: false,
-    nextStartAttemptAt: 0,
-    startInFlight: false,
-    startedAt: 0,
-    lastUrl: location.href,
-    lastPageKey: getPageKey(location.href),
-    lastReportedStatus: null,
-    reportInFlight: false,
-    lastContentChangeAt: Date.now(),
-    inspectionScheduled: false,
-    inspectRunning: false,
-    restoredAt: 0,
-    restoredAssistantHash: "",
-    restoredObservedRunning: false,
-    navigationCandidateUrl: "",
-    navigationCandidateSince: 0,
-    navigationCandidateTimer: null,
-    documentStartedAt: Math.floor(globalThis.performance?.timeOrigin || Date.now()),
-    lastPageState: null,
-    lastCompatibilityKey: ""
-  };
-
-  globalThis.ChatGPTTaskNotifierBridge = {
-    getTaskState() {
-      return {
-        taskId: state.taskId,
-        running: state.running,
-        status: state.remoteStatus,
-        startedAt: state.startedAt,
-        compatibility: state.lastPageState?.compatibility || "initializing"
-      };
-    },
-    getPublicPageSnapshot() {
-      return pageAdapter.toPublicSnapshot(state.lastPageState || collectPageState());
-    }
-  };
-
-  boot().catch((error) => console.warn("[ChatGPT Task Notifier] boot failed", error));
-
-  async function boot() {
-    const initial = collectPageState();
-    state.lastPageState = initial;
-    state.lastUserCount = initial.messages.userCount;
-    const assistant = assistantFromPage(initial);
-    state.lastAssistantText = assistant.text;
-    state.lastAssistantHasCopyAction = assistant.hasCopyAction;
-    state.latestAssistantHash = assistant.hash;
-    state.lastSettledAssistantHash = assistant.hash;
-
-    await bindCurrentPage();
-    installSubmissionListeners();
-    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === "PROBE_TASK_STATE") {
-        sendResponse({ ok: true, ...buildProbe() });
-        return false;
-      }
-      if (message?.type === "GET_PAGE_SNAPSHOT") {
-        const current = collectPageState();
-        state.lastPageState = current;
-        sendResponse({ ok: true, snapshot: pageAdapter.toPublicSnapshot(current) });
-        return false;
-      }
-      return false;
-    });
-
-    const observer = new MutationObserver(scheduleInspect);
-    observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["aria-label", "aria-hidden", "disabled", "data-testid", "data-state"]
-    });
-
-    setInterval(() => void inspect(), INSPECT_INTERVAL_MS);
-    setInterval(() => void sendHeartbeat(), HEARTBEAT_INTERVAL_MS);
-    await inspect();
+  "use strict";
+  if (globalThis.ChatGPTNotice) return;
+  const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage;
+  const instance = crypto.randomUUID();
+  const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
+    tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
+    pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false, ticks: 0, maxTickMs: 0 };
+  const events = new AbortController();
+  const ui = globalThis.ChatGPTQueueUI.create(action);
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const current = context => context === rt.context && location.href === context?.url && !rt.disposed;
+  function accept(reply, context) {
+    if (!current(context)) return;
+    if (reply.queue && (!rt.queue || reply.queue.revision >= rt.queue.revision)) rt.queue = reply.queue;
+    if (reply.usage && (!rt.usage || reply.usage.revision >= rt.usage.revision)) rt.usage = reply.usage;
+    if (reply.notificationError) ui.showNotice(`系统通知未能创建：${reply.notificationError}`);
   }
-
-  function collectPageState(now = Date.now()) {
-    return pageAdapter.collectPageState({ documentRef: document, locationRef: location, root: globalThis, now, documentStartedAt: state.documentStartedAt });
+  async function request(command, context = rt.context, usage) {
+    if (!context?.scope) throw new Error("账号尚未识别，未改动草稿或 Queue");
+    const reply = await chrome.runtime.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
+    if (!reply?.ok) throw new Error(reply?.error || "扩展连接不可用，请重新加载页面");
+    accept(reply, context);
+    return reply;
   }
-
-  async function bindCurrentPage() {
-    const response = await sendWithRetry({ type: "PAGE_READY", url: location.href }, 2);
-    if (response?.task && ["running", "waiting_action"].includes(response.task.status)) attachExistingTask(response.task);
+  function render(status = "") {
+    const context = rt.context || { mode: "off", key: "", scope: "" };
+    const p = rt.page;
+    ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy,
+      status: status || (rt.previousTail ? "等待目标对话加载" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿或附件已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
+    ui.anchor(p?.anchor || null);
   }
-
-  function attachExistingTask(task) {
-    const page = collectPageState();
-    const assistant = assistantFromPage(page);
-    state.lastPageState = page;
-    state.taskId = task.id;
-    state.running = true;
-    state.remoteStatus = task.status;
-    state.baselineAssistantHash = task.baselineAssistantHash || "";
-    state.baselineCopyActionCount = Math.max(0, Number(task.baselineCopyActionCount || 0));
-    state.latestAssistantHash = assistant.hash;
-    state.lastAssistantText = assistant.text;
-    state.lastAssistantHasCopyAction = assistant.hasCopyAction;
-    state.startedAt = task.startedAt || Date.now();
-    state.lastReportedStatus = task.status;
-    state.latestAssistantChangedAt = Date.now();
-    state.restoredAt = Date.now();
-    state.restoredAssistantHash = assistant.hash || task.latestAssistantHash || "";
-    state.restoredObservedRunning = false;
-  }
-
-  function installSubmissionListeners() {
-    document.addEventListener("click", (event) => {
-      const button = event.target?.closest?.("button");
-      if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true" || !pageAdapter.looksLikeSendButton(button)) return;
-      rememberPendingSubmission();
-    }, true);
-
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.defaultPrevented) return;
-      if (!isComposerElement(event.target)) return;
-      rememberPendingSubmission();
-    }, true);
-
-    document.addEventListener("submit", (event) => {
-      if (event.defaultPrevented) return;
-      const composer = collectPageState().refs.composer;
-      if (composer && (event.target === composer || event.target?.contains?.(composer))) rememberPendingSubmission();
-    }, true);
-  }
-
-  function rememberPendingSubmission() {
-    const page = collectPageState();
-    const prompt = cleanText(page.private.composerText, 240);
-    if (!prompt) return;
-    const assistant = assistantFromPage(page);
-    state.pendingBaselineUserCount = page.messages.userCount;
-    state.pendingBaselineUserHash = hashText(page.private.latestUserText);
-    state.pendingPrompt = prompt;
-    state.pendingBaselineHash = assistant.hash || state.lastSettledAssistantHash || "";
-    state.pendingBaselineCopyActionCount = page.messages.copyActionCount;
-    state.pendingAt = Date.now();
-    state.pendingConfirmed = false;
-    state.nextStartAttemptAt = 0;
-    setTimeout(() => void inspect(), 150);
-  }
-
-  function scheduleInspect() {
-    state.lastContentChangeAt = Date.now();
-    if (state.inspectionScheduled) return;
-    state.inspectionScheduled = true;
-    setTimeout(() => {
-      state.inspectionScheduled = false;
-      void inspect();
-    }, 120);
-  }
-
-  async function inspect() {
-    if (state.inspectRunning) return;
-    state.inspectRunning = true;
-    try {
-      await handleNavigationChange();
-      const now = Date.now();
-      const page = collectPageState(now);
-      state.lastPageState = page;
-      const assistant = assistantFromPage(page);
-      if (assistant.text !== state.lastAssistantText || assistant.hasCopyAction !== state.lastAssistantHasCopyAction) {
-        state.lastAssistantText = assistant.text;
-        state.lastAssistantHasCopyAction = assistant.hasCopyAction;
-        state.latestAssistantHash = assistant.hash;
-        state.latestAssistantChangedAt = now;
-        state.lastContentChangeAt = now;
-      }
-      const compatibilityKey = `${page.supportStatus}:${page.compatibility}:${page.reasonCodes.join(",")}`;
-      if (compatibilityKey !== state.lastCompatibilityKey) {
-        const previousKey = state.lastCompatibilityKey;
-        state.lastCompatibilityKey = compatibilityKey;
-        recordDiagnostic({
-          type: "page.compatibility_changed",
-          module: "task-monitor",
-          operation: "inspect",
-          result: page.compatibility === "blocked" ? "blocked" : previousKey ? "recovered" : "ok",
-          reasonCode: page.reasonCodes[0] || page.compatibility,
-          snapshot: pageAdapter.toPublicSnapshot(page)
-        });
-      }
-      const snapshot = collectTaskSnapshot(page, now, assistant);
-      const userCount = page.messages.userCount;
-      if (state.restoredAt && snapshot.domRunning) state.restoredObservedRunning = true;
-
-      const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= PENDING_SUBMISSION_MS);
-      const latestUserText = page.private.latestUserText;
-      const latestUserHash = hashText(latestUserText);
-      const userMessageConfirmed = userCount > state.pendingBaselineUserCount || Boolean(
-        latestUserHash && latestUserHash !== state.pendingBaselineUserHash && samePromptText(latestUserText, state.pendingPrompt)
-      );
-      if (recentSubmission && userMessageConfirmed) state.pendingConfirmed = true;
-      if (!recentSubmission && !state.running) clearPendingSubmission();
-
-      if (!state.running && state.pendingConfirmed && now >= state.nextStartAttemptAt) {
-        await startTask({ prompt: latestUserText || state.pendingPrompt, baselineHash: state.pendingBaselineHash || state.lastSettledAssistantHash });
-      }
-      state.lastUserCount = userCount;
-
-      if (!state.running) {
-        if (assistant.hash) state.lastSettledAssistantHash = assistant.hash;
-        return;
-      }
-
-      if (page.compatibility === "blocked" || page.supportStatus !== "supported") return;
-      if (snapshot.stopVisible && state.remoteStatus !== "running") await reportStatus("running", assistant);
-      if (snapshot.waitingAction && !snapshot.stopVisible) {
-        await reportStatus("waiting_action", assistant);
-        return;
-      }
-      if (snapshot.visibleError && !snapshot.stopVisible) {
-        if (await reportStatus("failed", assistant)) finishLocalTask();
-        return;
-      }
-      if (snapshot.completed && await reportStatus("completed", assistant)) {
-        state.lastSettledAssistantHash = assistant.hash;
-        finishLocalTask();
-      }
-    } catch (error) {
-      console.debug("[ChatGPT Task Notifier] inspect failed", error);
-    } finally {
-      state.inspectRunning = false;
-    }
-  }
-
-  async function handleNavigationChange() {
-    const currentUrl = location.href;
-    const currentPageKey = getPageKey(currentUrl);
-    if (currentUrl === state.lastUrl && currentPageKey === state.lastPageKey) {
-      clearNavigationCandidate();
+  function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
+  function submission(event) {
+    if (event.defaultPrevented || rt.writing) return;
+    const button = event.target?.closest?.("button");
+    if (event.type === "click" && button?.matches(D.STOP)) {
+      rt.stopped = D.snapshot().userId;
+      const generationId = rt.turn?.id === rt.stopped ? rt.turn.generationId : rt.stopped;
+      if (current(rt.context) && rt.context?.mode === "conversation") void request({ op: "stop", userId: rt.stopped, generationId }).catch(() => {});
       return;
     }
-    const previousUrl = state.lastUrl;
-    const previousPageKey = state.lastPageKey;
-    const promoted = isConversationPromotion(previousUrl, currentUrl);
-    if (previousPageKey && currentPageKey !== previousPageKey && !promoted && isAmbiguousConversationTransition(previousUrl, currentUrl)) {
-      if (state.navigationCandidateUrl !== currentUrl) {
-        clearNavigationCandidate();
-        state.navigationCandidateUrl = currentUrl;
-        state.navigationCandidateSince = Date.now();
-        state.navigationCandidateTimer = setTimeout(() => {
-          state.navigationCandidateTimer = null;
-          void inspect();
-        }, NAVIGATION_CONFIRM_MS);
-      }
-      if (Date.now() - state.navigationCandidateSince < NAVIGATION_CONFIRM_MS) return;
-      clearNavigationCandidate();
-    } else {
-      clearNavigationCandidate();
+    const retry = event.target?.closest?.('button, [role="menuitem"]');
+    if (event.type === "click" && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
+      const page = D.snapshot();
+      rt.retryBaseline = { userId: page.userId, assistantId: page.assistantId };
+      if (rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
-    state.lastUrl = currentUrl;
-    state.lastPageKey = currentPageKey;
+    const nativeSend = event.type === "click" && button?.matches(D.SEND) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
+    if (nativeSend) {
+      const page = D.snapshot();
+      if (page.empty) return;
+      if (rt.attempt) rt.attempt.submitted = true;
+      rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", url: location.href, text: D.readText(page.composer), fromUsage: Q.route(location.href).mode === "usage" };
+      rt.quietAt = Date.now();
+      if (!rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
+    }
+    // Observation only: never preventDefault, replace handlers, patch history or fetch.
+  }
+  for (const type of ["click", "keydown", "submit"]) document.addEventListener(type, submission, { capture: true, signal: events.signal });
+  for (const type of ["beforeinput", "input", "compositionstart", "compositionend", "pointerdown"]) document.addEventListener(type, event => {
+    if (!isInput(event.target) || rt.writing) return;
+    rt.inputEpoch += 1;
+    rt.quietAt = Date.now();
+    if (type === "compositionstart") rt.composing = true;
+    if (type === "compositionend") rt.composing = false;
+  }, { capture: true, passive: true, signal: events.signal });
+  const storageListener = (changes, area) => {
+    if (area !== "local" || !rt.context) return;
+    const queue = changes[rt.context.key]?.newValue;
+    const usage = changes[U.PREFIX + rt.context.scope]?.newValue;
+    accept({ queue, usage }, rt.context);
+  };
+  chrome.storage.onChanged.addListener(storageListener);
 
-    if (previousPageKey && currentPageKey !== previousPageKey && promoted) {
-      if (state.running && state.taskId) {
-        const response = await sendWithRetry({ type: "PAGE_PROMOTED", taskId: state.taskId, url: currentUrl, previousUrl }, 3);
-        if (response?.task?.id) {
-          state.taskId = response.task.id;
-          state.remoteStatus = response.task.status || state.remoteStatus;
+  async function tick() {
+    if (rt.tickBusy || rt.disposed) return;
+    rt.tickBusy = true;
+    const start = performance.now();
+    try {
+      const url = location.href;
+      const route = Q.route(url);
+      if (route.mode === "off") { rt.context = { mode: "off", url, scope: "", key: "" }; rt.page = null; render(); return; }
+      const scope = await D.scope();
+      if (location.href !== url) return;
+      const key = Q.key(scope, url);
+      const p = D.snapshot(document, Boolean(rt.turn));
+      const changed = rt.context?.url !== url || rt.context.scope !== scope;
+      if (changed) {
+        const old = rt.context;
+        const firstSendTransition = old?.mode === "usage" && rt.pending?.fromUsage && Date.now() - rt.pending.at < 60000;
+        const promoting = firstSendTransition && route.mode === "conversation";
+        rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
+        rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
+        rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
+        rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
+        if (!firstSendTransition) rt.pending = null;
+        if (scope) await request({ op: "get" });
+        if (!current(rt.context)) return;
+      }
+      rt.page = p;
+      if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
+      if (!scope || route.mode !== "conversation") { render(); return; }
+      if (rt.previousTail && p.userId && p.userId !== rt.previousTail) rt.previousTail = "";
+      if (rt.previousTail) { render(); return; }
+      const now = Date.now();
+      if (rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
+      if (rt.queue?.items.some(item => item.state === "sending" && item.expiresAt <= now)) await request({ op: "get" });
+      // A refresh may recover an exact receipt, but never infer one merely from Streaming.
+      for (const item of rt.queue?.items || []) {
+        if (!["sending", "unknown"].includes(item.state) || item.phase !== "submitting") continue;
+        const node = D.receipt(item, p);
+        if (node) await request({ op: "receipt", id: item.id, claim: item.claim, userId: D.messageId(node), text: D.readText(node) });
+      }
+      // The native user turn may render attachment/file chips or other metadata
+      // that was not present in the composer text. The captured native submit
+      // event plus a new user message in the same live conversation is enough
+      // to begin completion tracking; Queue delivery still requires its stricter
+      // text-matching receipt below and therefore cannot be acknowledged here.
+      const confirmedSubmission = rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline;
+      const storedTurn = rt.queue?.turn;
+      const storedUser = storedTurn?.userId || storedTurn?.id;
+      const resume = storedTurn && !storedTurn.done && storedUser === p.userId;
+      const retry = rt.retryBaseline?.userId === p.userId && p.assistantId && p.assistantId !== rt.retryBaseline.assistantId;
+      const regenerated = retry || storedTurn?.done && storedUser === p.userId && p.running && p.assistantId && p.assistantId !== storedTurn.assistantId;
+      // A regeneration gets a new native response identity, while tool/message
+      // segments within one ongoing generation still count only once.
+      const generationId = regenerated ? `${p.userId}:${p.assistantId}` : resume ? storedTurn.id : p.userId;
+      const live = p.running && !p.copy && p.userId && !rt.queue?.settled?.includes(generationId);
+      if (p.userId && (confirmedSubmission || resume || live || regenerated) && rt.turn?.generationId !== generationId) {
+        rt.turn = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: false };
+        if (regenerated) rt.stopped = "";
+        await request({ op: "start", userId: p.userId, generationId });
+        rt.pending = null;
+        rt.retryBaseline = null;
+      }
+      rt.lastUserId = p.userId || rt.lastUserId;
+      if (p.running) rt.quietAt = now;
+      const active = rt.turn;
+      if (active && p.userId === active.id) {
+        if (!active.counted && p.assistantId && U.MODELS.has(p.model)) {
+          // Usage is auxiliary accounting. A storage/validation failure must not
+          // strand the completion state machine or block the next Queue item.
+          // Retry on later ticks while this turn is active, then fail closed as
+          // an undercount rather than delaying the user's conversation.
+          try {
+            await request(null, rt.context, { op: "record", turnId: `${route.id}:${active.generationId}`, model: p.model, at: active.at });
+            active.counted = true;
+          } catch {}
+        }
+        const fingerprint = !p.running && p.copy ? `${p.assistantId}:${p.settledText}` : "";
+        if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
+        const finished = !p.running && p.ready && fingerprint && now - active.stableAt >= 3000 && now - active.at >= 3000;
+        const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
+        const failed = !p.running && (p.error || stopped) && now - rt.quietAt >= 2000;
+        if (finished || failed) {
+          await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped) });
+          rt.turn = null; rt.stopped = ""; rt.quietAt = now;
         }
       }
-      return;
-    }
-
-    if (previousPageKey && currentPageKey !== previousPageKey) {
-      await sendWithRetry({
-        type: "PAGE_CHANGED",
-        url: currentUrl,
-        previousUrl,
-        reason: "已明确进入其他 ChatGPT 会话，旧任务监控已停止"
-      }, 3);
-      finishLocalTask();
-      const page = collectPageState();
-      state.lastUserCount = page.messages.userCount;
-      const assistant = assistantFromPage(page);
-      state.lastSettledAssistantHash = assistant.hash;
-      state.lastAssistantText = assistant.text;
-      state.latestAssistantHash = assistant.hash;
-      await bindCurrentPage();
-    }
-  }
-
-  function clearNavigationCandidate() {
-    if (state.navigationCandidateTimer) clearTimeout(state.navigationCandidateTimer);
-    state.navigationCandidateUrl = "";
-    state.navigationCandidateSince = 0;
-    state.navigationCandidateTimer = null;
-  }
-
-  function collectTaskSnapshot(page, now = Date.now(), assistant = assistantFromPage(page)) {
-    const stopVisible = page.controls.stopVisible;
-    const waitingAction = page.controls.waitingAction;
-    const visibleError = page.error.visible;
-    const busy = page.controls.busy;
-    const domRunning = stopVisible || waitingAction || busy;
-    const responseChanged = Boolean(assistant.hash && assistant.hash !== state.baselineAssistantHash && assistant.text.trim());
-    const copyActionAdvanced = Boolean(responseChanged && assistant.hasCopyAction && page.messages.copyActionCount >= state.baselineCopyActionCount);
-    const copyActionStable = copyActionAdvanced && now - state.latestAssistantChangedAt >= COPY_ACTION_STABLE_MS;
-    const textStable = responseChanged && now - state.latestAssistantChangedAt >= COMPLETION_STABLE_MS;
-    const ranLongEnough = !state.startedAt || now - state.startedAt >= 1_800;
-    const recoveryReady = !state.restoredAt || state.restoredObservedRunning || assistant.hash !== state.restoredAssistantHash || now - state.restoredAt >= RECOVERY_IDLE_GRACE_MS;
-    const completed = Boolean(
-      state.running && page.capabilities.canDetectCompletion && !domRunning && !visibleError && ranLongEnough && page.composer.ready && recoveryReady && (copyActionStable || textStable)
-    );
-    return {
-      assistant,
-      stopVisible,
-      waitingAction,
-      visibleError,
-      busy,
-      domRunning,
-      composerReady: page.composer.ready,
-      copyActionCount: page.messages.copyActionCount,
-      copyActionAdvanced,
-      completed
-    };
-  }
-
-  function buildProbe() {
-    const page = collectPageState();
-    state.lastPageState = page;
-    const snapshot = collectTaskSnapshot(page);
-    const assistant = assistantFromPage(page);
-    return {
-      taskId: state.taskId,
-      url: location.href,
-      pageReady: page.pageReady,
-      supportStatus: page.supportStatus,
-      compatibility: page.compatibility,
-      reasonCodes: page.reasonCodes,
-      capabilities: page.capabilities,
-      stopVisible: snapshot.stopVisible,
-      waitingAction: snapshot.waitingAction,
-      visibleError: snapshot.visibleError,
-      busy: snapshot.busy,
-      composerReady: snapshot.composerReady,
-      completed: snapshot.completed,
-      latestAssistantHash: assistant.hash,
-      assistantFirstLine: assistant.firstLine,
-      thinkingTimeText: assistant.thinkingTimeText,
-      publicPageSnapshot: pageAdapter.toPublicSnapshot(page),
-      checkedAt: Date.now()
-    };
-  }
-
-  async function startTask({ prompt, baselineHash }) {
-    if (state.running || state.startInFlight || !state.pendingConfirmed) return false;
-    state.startInFlight = true;
-    try {
-      const startedAt = Date.now();
-      const page = collectPageState();
-      const resolvedPrompt = prompt || page.private.latestUserText || state.pendingPrompt || "ChatGPT 任务";
-      const response = await sendWithRetry({
-        type: "TASK_STARTED",
-        taskId: state.taskId,
-        url: location.href,
-        questionTitle: getQuestionTitle(resolvedPrompt),
-        prompt: cleanText(resolvedPrompt, 240),
-        baselineAssistantHash: baselineHash || state.lastSettledAssistantHash || "",
-        baselineCopyActionCount: state.pendingBaselineCopyActionCount,
-        latestAssistantHash: page.private.assistantHash,
-        compatibility: page.compatibility
-      }, 3);
-      if (!response?.task?.id) {
-        state.nextStartAttemptAt = Date.now() + START_RETRY_MS;
-        return false;
-      }
-      state.taskId = response.task.id;
-      state.running = true;
-      state.remoteStatus = "running";
-      state.startedAt = response.task.startedAt || startedAt;
-      state.baselineAssistantHash = response.task.baselineAssistantHash || baselineHash || state.lastSettledAssistantHash || "";
-      state.baselineCopyActionCount = Math.max(0, Number(response.task.baselineCopyActionCount ?? state.pendingBaselineCopyActionCount));
-      state.lastReportedStatus = "running";
-      state.latestAssistantChangedAt = Date.now();
-      state.lastContentChangeAt = Date.now();
-      state.restoredAt = 0;
-      state.restoredAssistantHash = "";
-      state.restoredObservedRunning = false;
-      clearPendingSubmission();
-      recordDiagnostic({ type: "task.started", module: "task-monitor", operation: "start", result: "started", reasonCode: "user_message_confirmed" });
-      return true;
+      render();
+      if (!rt.actionBusy && !rt.sending && safeToSend(p) && !rt.queue?.paused && rt.queue?.items[0]?.state === "pending") await dispatch(rt.queue.items[0].id, false);
+    } catch (error) {
+      // Missing adapters, storage failures and route races do not fall back to sending.
+      render(error.message);
     } finally {
-      state.startInFlight = false;
+      rt.ticks += 1;
+      rt.maxTickMs = Math.max(rt.maxTickMs, performance.now() - start);
+      rt.tickBusy = false;
     }
   }
 
-  async function reportStatus(status, assistant = assistantFromPage(collectPageState()), extra = {}) {
-    if (!state.taskId) return false;
-    if (state.lastReportedStatus === status) {
-      state.remoteStatus = status;
-      return true;
-    }
-    if (state.reportInFlight) return false;
-    state.reportInFlight = true;
-    try {
-      const page = state.lastPageState || collectPageState();
-      const response = await sendWithRetry({
-        type: "TASK_STATE",
-        taskId: state.taskId,
-        status,
-        url: location.href,
-        prompt: page.private.latestUserText,
-        questionTitle: getQuestionTitle(page.private.latestUserText),
-        assistantFirstLine: assistant.firstLine || "",
-        thinkingTimeText: assistant.thinkingTimeText || (status === "completed" ? formatThinkingTime(Date.now() - state.startedAt) : ""),
-        latestAssistantHash: assistant.hash,
-        lastContentChangeAt: state.lastContentChangeAt,
-        compatibility: page.compatibility,
-        ...extra
-      }, 3);
-      if (!response?.ok) return false;
-      state.lastReportedStatus = status;
-      state.remoteStatus = status;
-      recordDiagnostic({
-        type: `task.${status}`,
-        module: "task-monitor",
-        operation: "state",
-        result: status === "failed" ? "failed" : status === "completed" ? "completed" : "ok",
-        reasonCode: page.compatibility || ""
-      });
-      return true;
-    } finally {
-      state.reportInFlight = false;
-    }
+  function safeToSend(p) {
+    return Boolean(rt.context?.mode === "conversation" && rt.context.scope && current(rt.context) && !rt.previousTail &&
+      p.userId && p.ready && p.empty && !p.running && !p.error && !rt.turn && !rt.composing &&
+      !rt.queue?.holdUntil && (!rt.queue?.turn || rt.queue.turn.done && (rt.queue.turn.userId || rt.queue.turn.id) === p.userId) && Date.now() - rt.quietAt >= 4000);
   }
-
-  function clearPendingSubmission() {
-    state.pendingBaselineUserCount = 0;
-    state.pendingBaselineUserHash = "";
-    state.pendingPrompt = "";
-    state.pendingBaselineHash = "";
-    state.pendingBaselineCopyActionCount = 0;
-    state.pendingAt = 0;
-    state.pendingConfirmed = false;
-    state.nextStartAttemptAt = 0;
-  }
-
-  function finishLocalTask() {
-    state.running = false;
-    state.remoteStatus = null;
-    state.taskId = null;
-    state.startedAt = 0;
-    state.lastReportedStatus = null;
-    state.baselineAssistantHash = state.latestAssistantHash;
-    state.baselineCopyActionCount = state.lastPageState?.messages.copyActionCount || 0;
-    state.restoredAt = 0;
-    state.restoredAssistantHash = "";
-    state.restoredObservedRunning = false;
-    clearPendingSubmission();
-  }
-
-  async function sendHeartbeat() {
-    if (!state.taskId || !state.running) return;
-    const page = collectPageState();
-    state.lastPageState = page;
-    const response = await sendWithRetry({
-      type: "HEARTBEAT",
-      taskId: state.taskId,
-      url: location.href,
-      latestAssistantHash: page.private.assistantHash,
-      compatibility: page.compatibility
-    }, 2);
-    if (response?.task?.status) state.remoteStatus = response.task.status;
-  }
-
-  function assistantFromPage(page) {
-    return {
-      node: page?.refs?.assistantNode || null,
-      text: String(page?.private?.assistantText || ""),
-      hash: String(page?.private?.assistantHash || ""),
-      count: Math.max(0, Number(page?.messages?.assistantCount || 0)),
-      hasCopyAction: Boolean(page?.messages?.latestAssistantHasCopyAction),
-      firstLine: String(page?.private?.assistantFirstLine || ""),
-      thinkingTimeText: String(page?.private?.thinkingTimeText || "")
+  async function dispatch(id, manual) {
+    if (rt.sending) throw new Error("正在确认上一条发送");
+    let page = D.snapshot();
+    if (!safeToSend(page)) throw new Error("当前回复、草稿、附件或页面尚未就绪；没有发送");
+    const context = rt.context, epoch = rt.inputEpoch, input = page.composer;
+    let item, clicked = false;
+    const attempt = { submitted: false };
+    rt.attempt = attempt;
+    rt.sending = true;
+    const guard = expected => {
+      const p = D.snapshot();
+      if (!current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || p.error || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
+      return p;
     };
-  }
-
-  function isComposerElement(target) {
-    const composer = collectPageState().refs.composer;
-    return Boolean(target && composer && (target === composer || composer.contains?.(target) || target.closest?.("#prompt-textarea, textarea, [contenteditable='true']") === composer));
-  }
-
-  function getPageKey(value) {
     try {
-      const url = new URL(value, location.origin);
-      const conversationId = pageAdapter.getConversationId(url.href, location.origin);
-      if (conversationId) return `${url.origin}/c/${conversationId}`;
-      return `${url.origin}${url.pathname.replace(/\/+$/, "") || "/"}`;
-    } catch {
-      return String(value || "");
-    }
-  }
-
-  function isDraftChatUrl(value) {
-    return pageAdapter.classifyRoute(value, location.origin).routeType === "draft";
-  }
-
-  function isConversationPromotion(previousUrl, currentUrl, now = Date.now()) {
-    const recentSubmission = Boolean(state.pendingAt && now - state.pendingAt <= URL_PROMOTION_WINDOW_MS);
-    const previousId = pageAdapter.getConversationId(previousUrl, location.origin);
-    const currentId = pageAdapter.getConversationId(currentUrl, location.origin);
-    const draftPromotion = isDraftChatUrl(previousUrl) && Boolean(currentId);
-    const provisionalPromotion = pageAdapter.isProvisionalConversationId(previousId) && Boolean(currentId) && !pageAdapter.isProvisionalConversationId(currentId);
-    return (draftPromotion || provisionalPromotion) && (state.running || recentSubmission);
-  }
-
-  function isAmbiguousConversationTransition(previousUrl, currentUrl) {
-    const previousId = pageAdapter.getConversationId(previousUrl, location.origin);
-    const currentId = pageAdapter.getConversationId(currentUrl, location.origin);
-    return Boolean(previousId) !== Boolean(currentId);
-  }
-
-  function getQuestionTitle(value) {
-    const raw = String(value || "").replace(/\r/g, "").trim();
-    let title = raw.split(/\n+/).map((line) => line.trim()).find(Boolean) || "ChatGPT 任务";
-    const indexes = ["。", "！", "？", "!", "?"].map((mark) => title.indexOf(mark)).filter((index) => index >= 6);
-    if (indexes.length) title = title.slice(0, Math.min(...indexes) + 1);
-    return cleanText(title.replace(/^#+\s*/, ""), 80) || "ChatGPT 任务";
-  }
-
-  function formatThinkingTime(elapsedMs) {
-    const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = totalSeconds % 60;
-    return `思考了 ${minutes ? `${minutes}m${seconds ? ` ${seconds}s` : ""}` : `${seconds}s`}`;
-  }
-
-  function samePromptText(left, right) {
-    const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
-    const normalizedLeft = normalize(left);
-    const normalizedRight = normalize(right);
-    return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
-  }
-
-  function cleanText(value, maxLength) {
-    return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLength);
-  }
-
-  function hashText(text) {
-    return pageAdapter.hashText(String(text || ""));
-  }
-
-  function recordDiagnostic(event) {
-    try {
-      void chrome.runtime.sendMessage({ type: "DIAGNOSTIC_EVENT", event }).catch(() => {});
-    } catch {}
-  }
-
-  function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
-
-  async function sendWithRetry(message, attempts = 3) {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const response = await chrome.runtime.sendMessage(message);
-        if (response && response.ok !== false) return response;
-      } catch (error) {
-        if (attempt === attempts - 1) console.debug("[ChatGPT Task Notifier] message failed", message.type, error);
+      item = (await request({ op: "claim", id, manual, baseline: page.userId }, context)).item;
+      guard("");
+      await request({ op: "intent", id: item.id, claim: item.claim, manual }, context);
+      if (await D.scope() !== context.scope) throw new Error("账号已切换，发送已停止");
+      guard("");
+      rt.writing = true;
+      let written;
+      try { written = D.write(input, item.text); } finally { rt.writing = false; }
+      if (!written) throw new Error("原生输入框未接受文本，Queue 已保留");
+      const deadline = Date.now() + 2500;
+      do {
+        await delay(100);
+        if (await D.scope() !== context.scope) throw new Error("账号已切换，发送已停止");
+        page = guard(item.text);
+        if (!manual && rt.queue?.paused) throw new Error("队列已暂停，草稿保留");
+        const button = D.sendButton();
+        if (button && D.enabled(button)) {
+          clicked = true; // Before click: any exception after this point is ambiguous.
+          button.click();
+          rt.quietAt = Date.now();
+          return;
+        }
+      } while (Date.now() < deadline);
+      throw new Error("原生发送按钮不可用；未点击，文本保留在原生输入框");
+    } catch (error) {
+      if (item && current(context)) {
+        try { await request({ op: "abort", id: item.id, claim: item.claim, beforeClick: !clicked && !attempt.submitted }, context); } catch {}
       }
-      if (attempt < attempts - 1) await delay(150 * (attempt + 1));
-    }
-    return null;
+      // Never restore an old draft over newer user input, or retry an ambiguous click.
+      ui.showNotice(error.message);
+    } finally { rt.sending = false; rt.attempt = null; }
   }
+  async function action(name, payload) {
+    if (rt.actionBusy) throw new Error("上一项操作尚未完成");
+    rt.actionBusy = true;
+    const context = rt.context;
+    try {
+      if (!current(context)) throw new Error("页面已切换，请重新操作");
+      if (name === "save-usage") { await request(null, context, { op: "edit", ...payload }); return; }
+      if (context.mode !== "conversation") throw new Error("仅正式对话提供 Queue");
+      if (name === "add") {
+        const page = D.snapshot(), text = D.readText(page.composer), epoch = rt.inputEpoch;
+        if (!text.trim() || !page.composer || page.attachments || rt.composing) throw new Error("仅支持已完成输入的纯文本；草稿和附件未改动");
+        if (page.running && page.userId && !rt.queue?.turn) await request({ op: "start", userId: page.userId }, context);
+        if (!rt.addAttempt || rt.addAttempt.text !== text || rt.addAttempt.context !== context) rt.addAttempt = { id: Q.id(), text, context };
+        await request({ op: "add", id: rt.addAttempt.id, text, running: page.running || Boolean(rt.turn) }, context);
+        if (!current(context) || epoch !== rt.inputEpoch || D.composer() !== page.composer || D.readText(page.composer) !== text || D.snapshot().attachments || rt.composing) { ui.showNotice("已保存 Queue；输入期间有变化，当前草稿保持原样"); return; }
+        rt.writing = true;
+        let cleared;
+        try { cleared = D.write(page.composer, ""); } finally { rt.writing = false; }
+        if (!cleared) { await request({ op: "pause", paused: true }, context); ui.showNotice("已保存并暂停；原生草稿未能清空，请核对后继续"); }
+        else { rt.addAttempt = null; ui.showNotice("已加入当前对话 Queue"); }
+      } else if (name === "pause") await request({ op: "pause", paused: !rt.queue?.paused }, context);
+      else if (name === "send") await dispatch(payload.id, true);
+      else if (name === "save-edit") {
+        if (payload.key !== context.key) throw new Error("编辑所属对话已变化");
+        await request({ op: "edit", ...payload }, context);
+      } else if (name === "remove") await request({ op: "remove", id: payload.id }, context);
+      else if (name === "up" || name === "down") await request({ op: "move", id: payload.id, direction: name === "up" ? -1 : 1 }, context);
+      else if (name === "resolve-retry" || name === "resolve-remove") await request({ op: "resolve", id: payload.id, confirmed: true, retry: name === "resolve-retry" }, context);
+    } finally { rt.actionBusy = false; render(); }
+  }
+  const interval = setInterval(() => void tick(), 1000);
+  addEventListener("popstate", () => void tick(), { signal: events.signal });
+  addEventListener("pageshow", () => void tick(), { signal: events.signal });
+  globalThis.ChatGPTNotice = {
+    stats: () => ({ ticks: rt.ticks, maxTickMs: rt.maxTickMs, mode: rt.context?.mode, sending: rt.sending }),
+    dispose() { rt.disposed = true; clearInterval(interval); events.abort(); chrome.storage.onChanged.removeListener(storageListener); ui.dispose(); delete globalThis.ChatGPTNotice; }
+  };
+  void tick();
 })();

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 - 2026-09-14
+
+- 收敛为 ChatGPT 原生 Composer + 本地消息 Queue + 完成系统通知 + GPT-6 用量记录，删除旧 Task Runtime、诊断中心、临时 Queue 迁移与重复状态机。
+- 首页和项目首页仅显示用量；只有稳定 `*/c/<conversation-id>` 启用 Queue 与完成提醒，`WEB:` 临时路由不创建队列。
+- Queue 改为持久化 outbox：claim/lease、点击前 intent、原生 Composer/Send、严格 delivery receipt、未知送达人工处理，多标签异常并发 fail closed。
+- 插件 UI 使用稳定 Shadow DOM 根节点贴在原生 Composer 外围；运行时不使用全页 MutationObserver、token 级正文扫描或反复 destroy/remount。
+- 草稿、附件、IME、原生 Send 抢占、持久化延迟与不可用发送按钮均 fail closed，不覆盖用户新输入，也不自动重试不确定发送。
+- 完成提醒统一观察原生手动发送和 Queue 发送；Queue 未空不通知，最终完成只通知一次，通知点击按 conversation 定位正确标签页。
+- GPT-6 用量只记录本机观察到的 `gpt-6-pro` / `gpt-5-6-pro`，历史未知时明确标注本地来源；支持手动校正额度、已用基数和已确认刷新时间，不伪造官方余额或 reset。
+- 自动回归改为真实 MV3 + 本地 ChatGPT fixture，避免消耗受限模型额度；真人 ChatGPT 验证默认只读。
+
 ## 0.7.1 - 2026-07-29
 
 - 修复 ChatGPT 空输入框不会渲染发送按钮时，页面被误判为暂不可派发、空闲预存队列点击继续后始终等待的问题。

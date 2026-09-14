@@ -1,0 +1,19 @@
+// Controlled native-composer fixture. These are real Chromium + MV3 integration
+// tests, not claims about the live ChatGPT service; live verification is separate.
+const html = `<!doctype html><html><head><meta charset="utf-8"><title>Queue regression</title><style>
+body{margin:0;font:16px system-ui}main{max-width:760px;margin:30px auto}form{position:fixed;bottom:32px;left:calc(50% - 360px);width:720px;padding:12px;background:#eee;border-radius:16px}#prompt-textarea{min-height:50px;white-space:pre-wrap;outline:none}#messages{padding-bottom:220px}button{padding:8px}</style></head><body>
+<script id="client-bootstrap" type="application/json">{"user":{"id":"regression-user"},"session":{"account":{"id":"regression-workspace"}}}</script>
+<main><div id="messages"></div><form id="native-form"><div id="prompt-textarea" contenteditable="true" role="textbox" data-virtualkeyboard="true"></div><button id="composer-submit-button" data-testid="send-button" aria-label="发送提示" type="submit" disabled>发送</button></form></main>
+<script>
+localStorage.setItem('_account','regression-workspace');
+window.sent=[];window.autoReply=true;window.model='gpt-5-6-thinking';window.clickDrops=false;window.clickCount=0;
+const messages=document.getElementById('messages');
+window.addMessage=(role,id,text,model)=>{const turn=document.createElement('section');turn.dataset.testid='conversation-turn-'+id;const node=document.createElement('div');node.dataset.messageAuthorRole=role;node.dataset.messageId=id;if(model)node.dataset.messageModelSlug=model;node.textContent=text;turn.append(node);messages.append(turn);return node;};
+window.finish=(text='Done')=>{document.querySelector('[data-testid="stop-button"]')?.remove();const node=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);if(!node)return;node.textContent=text;const b=document.createElement('button');b.dataset.testid='copy-turn-action-button';b.textContent='复制回复';node.parentElement.append(b);};
+window.routeTo=(path)=>{history.pushState({},'',path);messages.replaceChildren();if(path.includes('/c/')){addMessage('user','baseline-'+path,'baseline');addMessage('assistant','answer-'+path,'old response',window.model);finish('old response');}document.getElementById('prompt-textarea').textContent='';};
+routeTo(location.pathname);
+document.addEventListener('input',()=>{document.getElementById('composer-submit-button').disabled=!document.getElementById('prompt-textarea').innerText.trim();});
+document.getElementById('native-form').addEventListener('submit',event=>{event.preventDefault();window.clickCount++;if(window.clickDrops)return;const input=document.getElementById('prompt-textarea');const text=input.innerText;if(!text.trim())return;const id=crypto.randomUUID();window.sent.push({id,text,model:window.model});input.textContent='';document.getElementById('composer-submit-button').disabled=true;if(!location.pathname.includes('/c/'))history.pushState({},'',location.pathname.includes('/project')?'/g/g-p-regression/c/project-first':'/c/home-first');addMessage('user',id,text);addMessage('assistant','answer-'+id,'thinking',window.model);if(!document.querySelector('[data-testid="stop-button"]')){const b=document.createElement('button');b.dataset.testid='stop-button';b.type='button';b.textContent='停止';b.onclick=()=>b.remove();document.getElementById('native-form').append(b);}if(window.autoReply)setTimeout(()=>window.finish('Done '+id),400);});
+</script></body></html>`;
+async function serve(context) { await context.route("https://chatgpt.com/**", route => route.fulfill({status:200,contentType:"text/html; charset=utf-8",body:html})); }
+module.exports={serve};

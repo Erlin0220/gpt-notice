@@ -17,8 +17,8 @@ $backupPath = "$TargetPath.backup-v$targetVersion-$stamp"
 Copy-Item $TargetPath $backupPath -Recurse -Force
 
 $releaseFiles = @(
-  "manifest.json", "background.js", "chatgpt-dom.js", "content.js", "diagnostics.js", "popup.js", "popup.html", "popup.css",
-  "queue-core.js", "queue-lease-guard.js", "queue-ui.js", "queue.css", "queue-v060.js", "README.md", "CHANGELOG.md", "PRIVACY.md"
+  "manifest.json", "background.js", "chatgpt-dom.js", "content.js", "popup.js", "popup.html", "popup.css",
+  "queue-core.js", "usage-core.js", "queue-ui.js", "README.md", "CHANGELOG.md", "PRIVACY.md", "THIRD_PARTY_NOTICES.md"
 )
 Get-ChildItem $TargetPath -Force | Remove-Item -Recurse -Force
 foreach ($file in $releaseFiles) {

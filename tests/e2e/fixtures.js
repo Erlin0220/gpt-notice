@@ -5,9 +5,9 @@ const { test: base, chromium, expect } = require("@playwright/test");
 const projectRoot = path.resolve(__dirname, "../..");
 const extensionPath = projectRoot;
 
-function resolveProfilePath() {
+function resolveProfilePath(testInfo) {
   const configured = process.env.GPT_NOTICE_E2E_PROFILE;
-  if (!configured) return path.join(projectRoot, ".test-profile", "automation");
+  if (!configured) return path.join(projectRoot, ".test-profile", "automation", `${process.pid}-${testInfo.testId.replace(/[^a-zA-Z0-9_-]/g, "_")}`);
   return path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured);
 }
 
@@ -25,7 +25,7 @@ async function getExtensionServiceWorker(context) {
 
 const test = base.extend({
   persistentContext: async ({}, use, testInfo) => {
-    const profilePath = resolveProfilePath();
+    const profilePath = resolveProfilePath(testInfo);
     fs.mkdirSync(profilePath, { recursive: true });
     fs.mkdirSync(testInfo.outputDir, { recursive: true });
 

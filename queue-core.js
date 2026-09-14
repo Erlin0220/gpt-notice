@@ -1,245 +1,214 @@
-(function attachQueueCore(root, factory) {
+/* Queue claim/outbox operations adapted from chatgpt-yolo (MIT).
+ * Upstream queue.js blob 544217149cf42e6890ac936a60a09da6a28b3edd.
+ * See THIRD_PARTY_NOTICES.md. No workflow/runtime is imported. */
+(function (root, factory) {
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
   root.ChatGPTQueueCore = api;
-})(typeof globalThis !== "undefined" ? globalThis : this, function createQueueCore() {
-  const QUEUE_SCHEMA_VERSION = 5;
-  const QUEUE_STORAGE_KEY = "messageQueues";
-  const WRITE_LOCK_STORAGE_KEY = "messageQueueWriteLocks";
-  const ITEM_STATUSES = new Set(["pending", "dispatching", "running", "completed", "failed"]);
-  const MAX_TEXT_LENGTH = 200_000;
-  const MAX_HISTORY_ITEMS = 120;
-  const MAX_COMPLETED_ITEMS = 60;
-
-  function cleanText(value, maxLength = MAX_TEXT_LENGTH) {
-    return String(value || "").replace(/\r/g, "").trim().slice(0, maxLength);
-  }
-
-  function createId(prefix = "queue") {
-    const random = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID().slice(0, 8)
-      : Math.random().toString(36).slice(2, 10);
-    return `${prefix}-${Date.now().toString(36)}-${random}`;
-  }
-
-  function normalizeItem(item = {}) {
-    const now = Date.now();
-    const status = ITEM_STATUSES.has(item.status) ? item.status : "pending";
-    return {
-      id: item.id || createId("item"),
-      text: cleanText(item.text),
-      status,
-      retryCount: Math.max(0, Number(item.retryCount || 0)),
-      createdAt: Number(item.createdAt || now),
-      startedAt: item.startedAt ? Number(item.startedAt) : null,
-      finishedAt: item.finishedAt ? Number(item.finishedAt) : null,
-      baselineAssistantHash: String(item.baselineAssistantHash || ""),
-      baselineAssistantCount: Math.max(0, Number(item.baselineAssistantCount || 0)),
-      baselineCopyActionCount: Math.max(0, Number(item.baselineCopyActionCount || 0)),
-      baselineUserCount: Math.max(0, Number(item.baselineUserCount || 0)),
-      error: cleanText(item.error || "", 240)
-    };
-  }
-
-  function pruneItems(items) {
-    const normalized = (Array.isArray(items) ? items : []).map(normalizeItem).filter((item) => item.text);
-    const protectedItems = normalized.filter((item) => item.status !== "completed");
-    const completedLimit = Math.max(0, Math.min(MAX_COMPLETED_ITEMS, MAX_HISTORY_ITEMS - protectedItems.length));
-    const completed = normalized
-      .filter((item) => item.status === "completed")
-      .sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt))
-      .slice(0, completedLimit);
-    const keepIds = new Set([...protectedItems, ...completed].map((item) => item.id));
-    return normalized.filter((item) => keepIds.has(item.id));
-  }
-
-  function normalizeQueue(queue = {}, conversationKey = "") {
-    const items = pruneItems(queue.items);
-    const activeItem = items.find((item) => item.id === queue.activeItemId);
-    return {
-      version: QUEUE_SCHEMA_VERSION,
-      revision: Math.max(0, Number(queue.revision || 0)),
-      conversationKey: String(conversationKey || queue.conversationKey || ""),
-      conversationUrl: String(queue.conversationUrl || ""),
-      ownerTabId: queue.ownerTabId !== null && queue.ownerTabId !== undefined && Number.isInteger(Number(queue.ownerTabId)) ? Number(queue.ownerTabId) : null,
-      ownerInstanceId: String(queue.ownerInstanceId || ""),
-      paused: Boolean(queue.paused),
-      pauseReason: cleanText(queue.pauseReason || "", 120),
-      activeItemId: activeItem && ["dispatching", "running"].includes(activeItem.status) ? activeItem.id : null,
-      nextDispatchAt: Math.max(0, Number(queue.nextDispatchAt || 0)),
-      items,
-      createdAt: Number(queue.createdAt || Date.now()),
-      updatedAt: Number(queue.updatedAt || Date.now())
-    };
-  }
-
-  function createQueueItem(text) {
-    const cleaned = cleanText(text);
-    return cleaned ? normalizeItem({ text: cleaned, status: "pending" }) : null;
-  }
-
-  function findConversationId(value) {
+})(globalThis, function () {
+  "use strict";
+  const PREFIX = "notice:conversation:";
+  const MAX_ITEMS = 50;
+  const MAX_TEXT = 200_000;
+  const MAX_TOTAL = 1_000_000;
+  const LEASE_MS = 30_000;
+  const id = () => crypto.randomUUID();
+  const text = value => String(value ?? "").replace(/\r\n?/g, "\n");
+  const comparable = value => text(value).replace(/\u00a0/g, " ").trim();
+  const clone = value => JSON.parse(JSON.stringify(value));
+  function route(value) {
     try {
-      return new URL(value || "https://chatgpt.com/").pathname.match(/(?:^|\/)c\/([^/?#]+)/)?.[1] || "";
-    } catch {
-      return "";
-    }
-  }
-
-  function isProvisionalConversationId(value) {
-    return /^WEB:/i.test(String(value || "").trim());
-  }
-
-  function getConversationKey(value, temporaryKey = "", discoveredConversationId = "") {
-    try {
-      const url = new URL(value || "https://chatgpt.com/");
-      const conversationId = findConversationId(url.href);
-      if (conversationId) return `c:${conversationId}`;
-      const shareMatch = url.pathname.match(/(?:^|\/)share\/([^/?#]+)/);
-      if (shareMatch) return `share:${shareMatch[1]}`;
-      const projectMatch = url.pathname.match(/(?:^|\/)g\/(g-p-[^/]+)\/project(?:\/|$)/);
-      if (projectMatch) return `project-draft:${projectMatch[1]}:${temporaryKey || "page"}`;
-      const trimmedPath = url.pathname.replace(/\/+$/, "") || "/";
-      if (trimmedPath !== "/") return `path:${trimmedPath}`;
-      if (discoveredConversationId) return `c:${discoveredConversationId}`;
+      const url = new URL(value);
+      if (!/^https:$/.test(url.protocol) || !["chatgpt.com", "chat.openai.com"].includes(url.hostname)) return { mode: "off", id: "" };
+      const path = url.pathname.replace(/\/+$/, "") || "/";
+      const conversation = path.match(/(?:^|\/)c\/([a-zA-Z0-9_-]+)$/)?.[1];
+      if (conversation) return { mode: "conversation", id: conversation, url: `${url.origin}${path}` };
+      // ChatGPT itself can briefly expose this URL after first Send. It has no
+      // queue identity: keep the usage UI, never create or migrate an outbox.
+      if (/(?:^|\/)c\/WEB:[a-zA-Z0-9_-]+$/.test(path)) return { mode: "usage", id: "", url: `${url.origin}${path}` };
+      if (path === "/" || /^\/g\/[^/]+\/project$/.test(path)) return { mode: "usage", id: "", url: `${url.origin}${path}` };
     } catch {}
-    return temporaryKey ? `temp:${temporaryKey}` : "";
+    return { mode: "off", id: "" };
   }
-
-  function getTabQueueKey(tabId, conversationKey, tabInstanceKey = "") {
-    const normalizedTabId = Number(tabId);
-    const instanceKey = String(tabInstanceKey || "page").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 120) || "page";
-    const key = String(conversationKey || "");
-    return Number.isInteger(normalizedTabId) && normalizedTabId >= 0 && key ? `tab:${normalizedTabId}:${instanceKey}:${key}` : "";
+  function key(scope, url) {
+    const r = route(url);
+    return /^[a-f0-9]{32,64}$/.test(scope || "") && r.id ? `${PREFIX}${scope}:${r.id}` : "";
   }
-
-  function shouldMigrateQueue(fromKey, toKey) {
-    if (!fromKey || !toKey || fromKey === toKey || !toKey.startsWith("c:")) return false;
-    if (fromKey.startsWith("temp:") || fromKey.startsWith("project-draft:")) return true;
-    const fromConversationId = fromKey.startsWith("c:") ? fromKey.slice(2) : "";
-    const toConversationId = toKey.slice(2);
-    return isProvisionalConversationId(fromConversationId) && !isProvisionalConversationId(toConversationId);
+  function fresh() {
+    return { version: 8, revision: 0, paused: false, reason: "", items: [], receipts: [], turn: null, settled: [], holdUntil: 0, updatedAt: 0 };
   }
-
-  function getPendingItems(queue) { return normalizeQueue(queue).items.filter((item) => item.status === "pending"); }
-  function getNextPendingItem(queue) { return getPendingItems(queue)[0] || null; }
-  function countPending(queue) { return getPendingItems(queue).length; }
-  function hasActiveWork(queue) {
-    const normalized = normalizeQueue(queue);
-    return Boolean(normalized.activeItemId || normalized.items.some((item) => item.status === "pending"));
-  }
-
-  function hasLeaseWork(queue) {
-    const normalized = normalizeQueue(queue);
-    return Boolean(normalized.activeItemId || (!normalized.paused && normalized.items.some((item) => item.status === "pending")));
-  }
-
-  function canAdmit(_queue, snapshot) {
-    if (!snapshot || snapshot.supportStatus === "unsupported") return false;
-    if (snapshot.capabilities) return Boolean(snapshot.capabilities.canAdmitQueue);
-    return Boolean(snapshot.composerReady);
-  }
-
-  function canDispatch(queue, snapshot, now = Date.now()) {
-    const normalized = normalizeQueue(queue);
-    if (normalized.paused || normalized.activeItemId || !getNextPendingItem(normalized)) return false;
-    if (normalized.nextDispatchAt > now) return false;
-    if (snapshot?.supportStatus && snapshot.supportStatus !== "supported") return false;
-    if (snapshot?.compatibility === "blocked" || snapshot?.capabilities?.canDispatchQueue === false) return false;
-    if (!snapshot?.composerReady || snapshot.stopVisible || snapshot.waitingAction || snapshot.taskRunning || snapshot.bridgeRunning || snapshot.visibleError) return false;
-    const stableForMs = Number(snapshot.stableForMs || 0);
-    if (snapshot.busy && stableForMs < 8_000) return false;
-    if (snapshot.manualHold || snapshot.composerEmpty === false) return false;
-    return stableForMs >= 4_000;
-  }
-
-  function isItemCompleted(item, snapshot, now = Date.now()) {
-    if (!item || !["dispatching", "running"].includes(item.status)) return false;
-    if (snapshot?.supportStatus && snapshot.supportStatus !== "supported") return false;
-    if (snapshot?.compatibility === "blocked" || snapshot?.capabilities?.canDetectCompletion === false) return false;
-    if (snapshot?.stopVisible || snapshot?.waitingAction || snapshot?.taskRunning || snapshot?.visibleError || !snapshot?.composerReady) return false;
-    const stableForMs = Number(snapshot.stableForMs || 0);
-    if (item.startedAt && now - item.startedAt < 1_800) return false;
-    const responseAdvanced = Boolean(Number(snapshot.assistantCount || 0) > Number(item.baselineAssistantCount || 0) || (snapshot.assistantHash && snapshot.assistantHash !== item.baselineAssistantHash));
-    if (!responseAdvanced || !String(snapshot.assistantText || "").trim()) return false;
-    const copyActionAdvanced = Boolean(
-      snapshot.assistantHasCopyAction && Number(snapshot.copyActionCount || 0) >= Number(item.baselineCopyActionCount || 0)
-    );
-    if (stableForMs < (copyActionAdvanced ? 600 : 4_000)) return false;
-    if (snapshot.busy && stableForMs < 8_000) return false;
-    return true;
-  }
-
-  function pauseForCompatibility(queue, reason = "页面兼容性受阻") {
-    const normalized = normalizeQueue(queue);
-    normalized.paused = true;
-    normalized.pauseReason = cleanText(reason, 120);
-    normalized.nextDispatchAt = 0;
-    normalized.updatedAt = Date.now();
-    return normalized;
-  }
-
-  function resumeQueue(queue) {
-    const normalized = normalizeQueue(queue);
-    normalized.paused = false;
-    normalized.pauseReason = "";
-    normalized.nextDispatchAt = Date.now() + 1_000;
-    normalized.updatedAt = Date.now();
-    return normalized;
-  }
-
-  function shouldRecoverInterruptedQueue(queue) {
-    return Boolean(normalizeQueue(queue).activeItemId);
-  }
-
-  function shouldPauseQueueAfterPageReload(queue, currentInstanceId = "", documentStartedAt = 0) {
-    const normalized = normalizeQueue(queue);
-    const hasUnfinishedWork = normalized.items.some((item) => ["pending", "dispatching", "running"].includes(item.status));
-    if (!hasUnfinishedWork) return false;
-    if (normalized.ownerInstanceId && currentInstanceId) return normalized.ownerInstanceId !== String(currentInstanceId);
-    const startedAt = Math.max(0, Number(documentStartedAt || 0));
-    return Boolean(startedAt && normalized.updatedAt && normalized.updatedAt < startedAt);
-  }
-
-  function pauseQueueAfterPageReload(queue) {
-    const normalized = normalizeQueue(queue);
-    const now = Date.now();
-    normalized.items = normalized.items.map((item) => ["pending", "dispatching", "running"].includes(item.status)
-      ? {
-          ...item,
-          status: "pending",
-          startedAt: null,
-          finishedAt: null,
-          error: "页面已刷新，队列已暂停，请确认后继续"
+  function normalize(raw, now = Date.now()) {
+    if (raw && (raw.version !== 8 || !Array.isArray(raw.items) || !Array.isArray(raw.receipts) || !Array.isArray(raw.settled))) throw new Error("本地 Queue 数据格式异常；未覆盖原始数据，请先备份检查");
+    const state = raw?.version === 8 ? clone(raw) : fresh();
+    for (const item of state.items) {
+      if (item.state === "sending" && item.expiresAt <= now) {
+        // A lost sender before intent is safe to reclaim; after intent it is not.
+        if (item.phase === "submitting") {
+          item.state = "unknown";
+          state.paused = true;
+          state.reason = "发送结果未知，请核对对话后处理";
+        } else {
+          item.state = "pending";
+          delete item.claim;
         }
-      : item);
-    normalized.activeItemId = null;
-    normalized.paused = normalized.items.some((item) => item.status === "pending");
-    normalized.pauseReason = normalized.paused ? "页面已刷新" : "";
-    normalized.nextDispatchAt = now + 2_000;
-    normalized.updatedAt = now;
-    return normalized;
+      }
+    }
+    return state;
   }
-
-  function resetInterruptedItems(queue) {
-    const normalized = normalizeQueue(queue);
-    const now = Date.now();
-    normalized.items = normalized.items.map((item) => ["dispatching", "running"].includes(item.status)
-      ? { ...item, status: "pending", startedAt: null, finishedAt: null, error: "页面已关闭或刷新，队列已暂停，请确认后继续" }
-      : item);
-    normalized.activeItemId = null;
-    normalized.paused = normalized.items.some((item) => item.status === "pending");
-    normalized.pauseReason = normalized.paused ? "页面已关闭或刷新" : "";
-    normalized.nextDispatchAt = now + 2_000;
-    normalized.updatedAt = now;
-    return normalized;
+  function apply(raw, command, owner, now = Date.now()) {
+    const state = normalize(raw, now);
+    const before = JSON.stringify(state);
+    let result = {};
+    const reject = message => { throw new Error(message); };
+    const find = () => state.items.find(item => item.id === command.id) || reject("队列项不存在");
+    const pending = () => {
+      const item = find();
+      if (item.state !== "pending") reject("正在发送或发送结果未知，不能修改");
+      return item;
+    };
+    const claimed = () => {
+      const item = find();
+      if (item.claim !== command.claim || item.owner !== owner || item.state !== "sending" || item.expiresAt <= now) reject("发送租约已失效");
+      return item;
+    };
+    switch (command.op) {
+      case "get": break;
+      case "hold":
+        // A native submission has no lease-owned retry. Keep it blocked until
+        // a message receipt or an explicit user resume resolves the uncertainty.
+        state.holdUntil = now;
+        state.reason = "等待原生提交确认；未送达请检查后暂停/继续";
+        break;
+      case "add": {
+        if (state.items.some(item => item.id === command.id) || state.receipts.some(r => r.itemId === command.id)) break;
+        const value = text(command.text);
+        if (!value.trim() || value.length > MAX_TEXT) reject("消息为空或超过 200,000 字符，草稿未改动");
+        if (state.items.length >= MAX_ITEMS || state.items.reduce((n, i) => n + i.text.length, 0) + value.length > MAX_TOTAL) reject("本地队列容量已满，草稿未改动");
+        if (!/^[a-zA-Z0-9_-]{8,80}$/.test(command.id || "")) reject("无效的消息标识");
+        state.items.push({ id: command.id, text: value, state: "pending", createdAt: now });
+        if (!command.running && state.items.length === 1) { state.paused = true; state.reason = "已保存，点击继续或立即发送"; }
+        break;
+      }
+      case "edit": {
+        const item = pending();
+        if (command.revision !== state.revision) reject("队列已在其他标签页变化，请重新编辑");
+        const value = text(command.text);
+        if (!value.trim() || value.length > MAX_TEXT || state.items.reduce((n, i) => n + i.text.length, 0) - item.text.length + value.length > MAX_TOTAL) reject("消息为空或超出队列容量");
+        item.text = value;
+        break;
+      }
+      case "remove": pending(); state.items = state.items.filter(i => i.id !== command.id); break;
+      case "move": {
+        pending();
+        const index = state.items.findIndex(i => i.id === command.id);
+        const target = index + (command.direction === -1 ? -1 : 1);
+        if (target >= 0 && target < state.items.length && state.items[target].state === "pending") [state.items[index], state.items[target]] = [state.items[target], state.items[index]];
+        break;
+      }
+      case "pause":
+        if (!command.paused && state.items.some(i => i.state === "unknown")) reject("请先核对发送结果未知的消息，继续不会自动重发");
+        state.paused = Boolean(command.paused);
+        state.reason = state.paused ? "已暂停" : "";
+        if (!state.paused) state.holdUntil = 0;
+        break;
+      case "claim": {
+        if (state.holdUntil) reject("正在等待原生提交确认");
+        if (state.turn && !state.turn.done) reject("上一条回复尚未确认结束");
+        if (state.turn && (state.turn.userId || state.turn.id) !== command.baseline) reject("当前标签页尚未同步最新对话");
+        if (state.items.some(i => i.state !== "pending")) reject("已有发送租约或未知结果");
+        if (state.paused && !command.manual) reject("队列已暂停");
+        const item = command.manual ? pending() : state.items[0];
+        if (!item) reject("队列为空");
+        item.state = "sending";
+        item.claim = id();
+        item.owner = owner;
+        item.expiresAt = now + LEASE_MS;
+        item.phase = "claimed";
+        item.baseline = String(command.baseline || "");
+        result.item = clone(item);
+        break;
+      }
+      case "intent": {
+        const item = claimed();
+        if (state.holdUntil || state.turn && !state.turn.done) reject("原生消息已开始提交，取消队列发送");
+        if (state.turn && (state.turn.userId || state.turn.id) !== item.baseline) reject("对话已在其他标签页变化");
+        if (state.paused && !command.manual) reject("队列已暂停");
+        item.phase = "submitting";
+        result.item = clone(item);
+        break;
+      }
+      case "abort": {
+        const item = claimed();
+        // Only the sender may attest it has not clicked. Never infer this after reload.
+        if (command.beforeClick === true) { item.state = "pending"; delete item.claim; }
+        else item.state = "unknown";
+        state.paused = true;
+        state.reason = command.beforeClick ? "发送前已停止，草稿保留，请检查后继续" : "发送结果未知，请核对对话后处理";
+        break;
+      }
+      case "receipt": {
+        const receipt = state.receipts.find(r => r.itemId === command.id && r.claim === command.claim);
+        if (receipt) { result.alreadyReceived = true; break; }
+        const item = find();
+        if (!["sending", "unknown"].includes(item.state) || item.claim !== command.claim || item.phase !== "submitting") reject("发送意图不匹配");
+        if (!command.userId || command.userId === item.baseline || comparable(command.text) !== comparable(item.text)) reject("用户消息回执不匹配");
+        state.items = state.items.filter(i => i.id !== item.id);
+        state.receipts.push({ itemId: item.id, claim: item.claim, userId: command.userId, at: now });
+        state.receipts = state.receipts.slice(-100);
+        if (!state.settled.includes(command.userId) && state.turn?.id !== command.userId) state.turn = { id: command.userId, userId: command.userId, at: now, done: false };
+        state.holdUntil = 0;
+        break;
+      }
+      case "resolve": {
+        const item = find();
+        if (item.state !== "unknown" || command.confirmed !== true) reject("需要先明确核对发送结果");
+        if (command.retry) { item.state = "pending"; delete item.claim; }
+        else state.items = state.items.filter(i => i.id !== item.id);
+        state.paused = true;
+        state.reason = "已处理，请检查对话后继续";
+        break;
+      }
+      case "start": {
+        const generationId = command.generationId || command.userId;
+        if (command.userId && !state.settled.includes(generationId) && state.turn?.id !== generationId) {
+          if (state.turn && !state.turn.done && !state.turn.stopped) {
+            // One queue belongs to the conversation, not to a tab/branch. If a
+            // second tab starts another native generation while the first one
+            // is still active, do not guess which branch should own the queue.
+            state.paused = true;
+            state.holdUntil = now;
+            state.reason = "检测到同一对话存在并发生成；Queue 已暂停，请确认对话后继续";
+            result.conflict = true;
+            break;
+          }
+          state.turn = { id: generationId, userId: command.userId, at: now, done: false };
+          state.holdUntil = 0;
+          state.reason = state.paused ? "已暂停" : "";
+        }
+        break;
+      }
+      case "stop": {
+        const generationId = command.generationId || command.userId;
+        if (command.userId && !state.settled.includes(generationId)) {
+          if (state.turn?.id !== generationId) state.turn = { id: generationId, userId: command.userId, at: now, done: false };
+          state.turn.stopped = true;
+        }
+        break;
+      }
+      case "settle":
+        if (state.turn?.id !== (command.generationId || command.userId) || state.turn.done) break;
+        state.turn.done = true;
+        state.turn.assistantId = String(command.assistantId || "");
+        state.settled = [...state.settled, state.turn.id].slice(-200);
+        // Store notification intent before touching chrome.notifications: at-most-once.
+        result.notify = state.items.length === 0 && !command.failed && !state.turn.stopped && !state.holdUntil;
+        if (command.failed || state.turn.stopped) { state.paused = true; state.reason = "当前回复异常或已停止，请检查后继续"; }
+        break;
+      default: reject("未知队列操作");
+    }
+    const changed = JSON.stringify(state) !== before || JSON.stringify(raw || fresh()) !== JSON.stringify(state);
+    if (changed) { state.revision += 1; state.updatedAt = now; }
+    return { state, changed, ...result };
   }
-
-  return {
-    QUEUE_SCHEMA_VERSION, QUEUE_STORAGE_KEY, WRITE_LOCK_STORAGE_KEY, MAX_TEXT_LENGTH, MAX_HISTORY_ITEMS,
-    cleanText, createId, normalizeItem, normalizeQueue, pruneItems, createQueueItem, findConversationId, isProvisionalConversationId,
-    getConversationKey, getTabQueueKey, shouldMigrateQueue, getPendingItems, getNextPendingItem, countPending,
-    hasActiveWork, hasLeaseWork, canAdmit, canDispatch, isItemCompleted, pauseForCompatibility, resumeQueue, shouldRecoverInterruptedQueue,
-    shouldPauseQueueAfterPageReload, pauseQueueAfterPageReload, resetInterruptedItems
-  };
+  return { PREFIX, MAX_ITEMS, MAX_TEXT, LEASE_MS, id, text, comparable, route, key, fresh, normalize, apply };
 });
