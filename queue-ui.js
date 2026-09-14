@@ -3,6 +3,7 @@
   const CSS = `
     :host{all:initial;position:fixed;display:block;z-index:30;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
     *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
+    :host([data-native-overlay]) .bar,:host([data-native-overlay]) .notice{visibility:hidden!important;pointer-events:none!important}
     .bar{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-height:32px;pointer-events:none}
     button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--n-line,#ddd);border-radius:9px;padding:6px 10px;background:var(--n-bg,#fff);min-height:30px;pointer-events:auto}
     button:hover{background:var(--n-hover,#f0f0f0)}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #538ae8;outline-offset:2px}button:disabled{opacity:.45;cursor:default}
@@ -22,12 +23,12 @@
     host.hidden = true;
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `<style>${CSS}</style><div class="bar"><button class="usage" data-action="usage" title="GPT-6 用量设置">GPT-6 · 读取中</button><button data-action="add">加入 Queue</button><button data-action="queue" aria-expanded="false">Queue <span class="count">0</span></button></div>
-      <section class="panel queue-panel" hidden aria-label="当前对话 Queue"><header><strong>Queue</strong><button data-action="pause">暂停</button><button data-action="close">关闭</button></header><p class="status" role="status"></p><ol class="list"></ol><p class="hint">使用原生输入框添加消息。Queue 只发送纯文本，永不覆盖草稿或接管原生 Send。</p></section>
+      <section class="panel queue-panel" hidden aria-label="当前对话 Queue"><header><strong>Queue</strong><button data-action="pause">暂停</button><button data-action="close">关闭</button></header><p class="status" role="status"></p><ol class="list"></ol><p class="hint">使用原生输入框添加消息。Queue 当前只发送纯文本；图片和附件请使用 ChatGPT 原生发送。永不覆盖草稿或接管原生 Send。</p></section>
       <section class="panel usage-panel" hidden aria-label="GPT-6 用量"><header><strong>GPT-6 用量</strong><button data-action="close">关闭</button></header><p class="source hint"></p><p class="reset hint"></p><p class="config hint"></p><label>当前周期已用次数（可选）<input name="total" type="number" min="0" placeholder="未知"></label><label>周期额度<input name="limit" type="number" min="1" max="10000"></label><label>刷新周期（天）<input name="cycleDays" type="number" min="1" max="90" step="1"></label><label>下一次刷新<input name="resetAt" type="datetime-local"></label><p class="hint">所有统计只在本机保存。留空已用次数表示不补录历史；下一次刷新留空表示未知。</p><footer><button data-action="close">取消</button><button data-action="save-usage">保存设置</button></footer></section>
       <section class="panel edit-panel" hidden aria-label="编辑已保存的队列消息"><header><strong>编辑 Queue 消息</strong></header><label>已保存的文本<textarea name="edit" maxlength="200000"></textarea></label><footer><button data-action="cancel-edit">取消</button><button data-action="save-edit">保存</button></footer></section><div class="notice" hidden role="status"></div>`;
     document.body.appendChild(host);
     const $ = s => shadow.querySelector(s);
-    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
+    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, overlayFrame = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
     const close = () => { for (const panel of shadow.querySelectorAll(".panel")) panel.hidden = true; $('[data-action="queue"]').setAttribute("aria-expanded", "false"); editing = null; };
     const showNotice = value => {
       clearTimeout(noticeTimer);
@@ -72,9 +73,28 @@
       finally { button.disabled = false; }
     });
     const observer = new ResizeObserver(() => position());
+    const nativeFloatingSelector = '.popover,[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
+    const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    function extensionSurfaces() {
+      const surfaces = [host.getBoundingClientRect()];
+      for (const node of shadow.querySelectorAll(".panel,.notice")) {
+        if (!node.hidden && node.getClientRects().length) surfaces.push(node.getBoundingClientRect());
+      }
+      return surfaces;
+    }
+    function nativeOverlayOverlaps(surfaces) {
+      for (const node of document.querySelectorAll(nativeFloatingSelector)) {
+        if (!node.isConnected) continue;
+        const style = getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+        const overlay = node.getBoundingClientRect();
+        if (overlay.width > 0 && overlay.height > 0 && surfaces.some(surface => intersects(surface, overlay))) return true;
+      }
+      return false;
+    }
     function place() {
       frame = 0;
-      if (!anchorNode?.isConnected) { host.hidden = true; return; }
+      if (!anchorNode?.isConnected) { host.hidden = true; host.removeAttribute("data-native-overlay"); return; }
       const rect = anchorNode.getBoundingClientRect();
       host.style.setProperty("--n-panel-height", `${Math.max(40, rect.top - 56)}px`);
       host.hidden = model.mode === "off" || rect.width < 1 || rect.top < 70 || rect.top > innerHeight;
@@ -82,6 +102,9 @@
       const left = Math.max(12, Math.min(rect.left, innerWidth - width - 12));
       const next = `${Math.round(left)}:${Math.round(rect.top - 6)}:${Math.round(width)}`;
       if (geometry !== next) { geometry = next; host.style.left = `${left}px`; host.style.top = `${rect.top - 6}px`; host.style.width = `${width}px`; }
+      const nativeOverlay = !host.hidden && nativeOverlayOverlaps(extensionSurfaces());
+      if (nativeOverlay) close();
+      host.toggleAttribute("data-native-overlay", nativeOverlay);
     }
     function position(immediate = false) {
       if (immediate) { cancelAnimationFrame(frame); place(); return; }
@@ -91,6 +114,15 @@
     const onScroll = () => position();
     addEventListener("scroll", onScroll, { capture: true, passive: true });
     addEventListener("resize", onScroll, { passive: true });
+    const rescanNativeOverlay = () => {
+      cancelAnimationFrame(overlayFrame);
+      overlayFrame = requestAnimationFrame(() => {
+        overlayFrame = requestAnimationFrame(() => { overlayFrame = 0; position(true); });
+      });
+    };
+    document.addEventListener("pointerup", rescanNativeOverlay, { capture: true, passive: true });
+    document.addEventListener("keydown", rescanNativeOverlay, { capture: true, passive: true });
+    document.addEventListener("focusin", rescanNativeOverlay, { capture: true, passive: true });
     function render(next) {
       model = next;
       if (lastKey !== next.key) { lastKey = next.key; close(); signature = ""; }
@@ -101,7 +133,8 @@
       $(".reset").textContent = usage.resetLabel;
       $(".config").textContent = `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度，不包含 Thinking、Work 或 Codex。首次使用日期：${usage.firstUseDate}。`;
       for (const name of ["add", "queue"]) $(`[data-action="${name}"]`).hidden = next.mode !== "conversation";
-      $('[data-action="add"]').disabled = !next.scope || next.actionBusy;
+      $('[data-action="add"]').disabled = !next.scope || next.actionBusy || next.attachments;
+      $('[data-action="add"]').title = next.attachments ? "图片/附件暂不支持加入 Queue；请使用 ChatGPT 原生发送" : "把当前纯文本草稿加入 Queue";
       $('[data-action="pause"]').textContent = next.queue?.paused ? "继续" : "暂停";
       $(".count").textContent = next.queue?.items.length || 0;
       $(".status").textContent = next.status || next.queue?.reason || "队列就绪";
@@ -128,7 +161,7 @@
       position();
     }
     return { host, render, showNotice, anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
-      dispose() { clearTimeout(noticeTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); host.remove(); } };
+      dispose() { clearTimeout(noticeTimer); cancelAnimationFrame(frame); cancelAnimationFrame(overlayFrame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("pointerup",rescanNativeOverlay,true); document.removeEventListener("keydown",rescanNativeOverlay,true); document.removeEventListener("focusin",rescanNativeOverlay,true); host.remove(); } };
   }
   globalThis.ChatGPTQueueUI = { create };
 })();

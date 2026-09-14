@@ -127,6 +127,7 @@ test("enqueue storage delay preserves a newer native draft without saving it twi
 test("attachments and unavailable Send fail closed without a click",async({page})=>{
   await page.goto("https://chatgpt.com/c/attachments");await expect(button(page,'add')).toBeVisible();await enqueue(page,'queued safely');
   await page.evaluate(()=>{const attachment=document.createElement('div');attachment.dataset.testid='file-preview';document.querySelector('form').append(attachment);});
+  await expect(button(page,'add')).toBeDisabled();await expect(page.locator(`${host} .status`)).toContainText(/图片|附件/);
   await button(page,'queue').click();await button(page,'pause').click();await page.waitForTimeout(4500);
   expect(await page.evaluate(()=>window.clickCount)).toBe(0);
   await page.evaluate(()=>{document.querySelector('[data-testid="file-preview"]').remove();document.addEventListener('input',()=>document.getElementById('composer-submit-button').disabled=true);});
@@ -140,11 +141,17 @@ test("usage panel stays inside a narrow viewport",async({page})=>{
   await expect(button(page,'usage')).toBeVisible();await button(page,'usage').click();
   const box=await page.locator(`${host} .usage-panel`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
 });
-test("native composer popovers stay above extension chrome",async({page})=>{
+test("extension chrome yields to overlapping native floating UI and returns after it closes",async({page})=>{
   await page.goto('https://chatgpt.com/c/native-popover');await expect(button(page,'queue')).toBeVisible();
-  const box=await button(page,'queue').boundingBox();
-  const result=await page.evaluate(({x,y,width,height})=>{const overlay=document.createElement('div');overlay.id='native-popover';overlay.style.cssText=`position:fixed;z-index:50;left:${x-8}px;top:${y-8}px;width:${width+16}px;height:${height+16}px;background:#fff;pointer-events:auto`;document.body.append(overlay);const hit=document.elementFromPoint(x+width/2,y+height/2);return {hit:hit?.id,hostZ:getComputedStyle(document.getElementById('chatgpt-message-queue-root')).zIndex};},box);
-  expect(result.hit).toBe('native-popover');expect(Number(result.hostZ)).toBeLessThan(50);
+  await button(page,'queue').click();await expect(page.locator(`${host} .queue-panel`)).toBeVisible();
+  const box=await page.locator(`${host} .queue-panel`).boundingBox();
+  const overlayBox={x:box.x,y:box.y,width:box.width,height:Math.min(40,box.height)};
+  await page.evaluate(({x,y,width,height})=>{const stack=document.createElement('div');stack.id='native-stack';stack.style.cssText='position:fixed;inset:0;z-index:1;pointer-events:none';const overlay=document.createElement('div');overlay.id='native-popover';overlay.className='popover';overlay.style.cssText=`position:fixed;z-index:50;left:${x}px;top:${y}px;width:${width}px;height:${height}px;background:#fff;pointer-events:auto`;stack.append(overlay);document.body.append(stack);document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));},overlayBox);
+  await expect(page.locator(host)).toHaveAttribute('data-native-overlay','');
+  await expect(button(page,'queue')).toBeHidden();await expect(page.locator(`${host} .queue-panel`)).toBeHidden();
+  expect(await page.evaluate(({x,y,width,height})=>document.elementFromPoint(x+width/2,y+height/2)?.id,overlayBox)).toBe('native-popover');
+  await page.evaluate(()=>{document.getElementById('native-stack')?.remove();document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));});
+  await expect(page.locator(host)).not.toHaveAttribute('data-native-overlay','');await expect(button(page,'queue')).toBeVisible();
 });
 test("native Send preempting the queue click cannot return a delivered item to pending",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await enqueue(page,'preempted queue text');

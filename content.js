@@ -26,8 +26,8 @@
   function render(status = "") {
     const context = rt.context || { mode: "off", key: "", scope: "" };
     const p = rt.page;
-    ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy,
-      status: status || (rt.previousTail ? "等待目标对话加载" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿或附件已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
+    ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy, attachments: Boolean(p?.attachments),
+      status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
     ui.anchor(p?.anchor || null);
   }
   function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
