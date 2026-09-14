@@ -1,14 +1,19 @@
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { test: base, chromium, expect } = require("@playwright/test");
+const { buildExtension } = require("../../scripts/build-extension");
 
 const projectRoot = path.resolve(__dirname, "../..");
-const extensionPath = projectRoot;
+const extensionPath = path.join(projectRoot, "dist");
+buildExtension(projectRoot);
 
 function resolveProfilePath(testInfo) {
   const configured = process.env.GPT_NOTICE_E2E_PROFILE;
-  if (!configured) return path.join(projectRoot, ".test-profile", "automation", `${process.pid}-${testInfo.testId.replace(/[^a-zA-Z0-9_-]/g, "_")}`);
-  return path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured);
+  if (configured) return { path: path.isAbsolute(configured) ? configured : path.resolve(projectRoot, configured), cleanup: false };
+  const root = path.join(os.tmpdir(), "gpt-notice-e2e");
+  fs.mkdirSync(root, { recursive: true });
+  return { path: fs.mkdtempSync(path.join(root, `${process.pid}-${testInfo.workerIndex}-`)), cleanup: true };
 }
 
 async function getExtensionServiceWorker(context) {
@@ -25,7 +30,8 @@ async function getExtensionServiceWorker(context) {
 
 const test = base.extend({
   persistentContext: async ({}, use, testInfo) => {
-    const profilePath = resolveProfilePath(testInfo);
+    const profile = resolveProfilePath(testInfo);
+    const profilePath = profile.path;
     fs.mkdirSync(profilePath, { recursive: true });
     fs.mkdirSync(testInfo.outputDir, { recursive: true });
 
@@ -73,6 +79,7 @@ const test = base.extend({
       }
       fs.writeFileSync(testInfo.outputPath("browser-console.log"), `${logLines.join("\n")}\n`, "utf8");
       await context.close();
+      if (profile.cleanup) fs.rmSync(profilePath, { recursive: true, force: true });
     }
   },
 

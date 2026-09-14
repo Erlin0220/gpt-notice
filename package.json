@@ -4,6 +4,7 @@
   "private": true,
   "description": "Thin ChatGPT Web queue, completion notification, and local Pro usage extension.",
   "scripts": {
+    "build": "node scripts/build-extension.js",
     "test": "npm run test:unit",
     "test:unit": "node --test tests/core.test.js tests/background.test.js tests/static.test.js",
     "e2e:install": "playwright install chromium",

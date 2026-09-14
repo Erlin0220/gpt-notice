@@ -1,6 +1,8 @@
 *.zip
 .DS_Store
 node_modules/
+dist/
+.dist-build-*/
 .test-profile/
 test-results/
 playwright-report/
