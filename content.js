@@ -18,7 +18,18 @@
   }
   async function request(command, context = rt.context, usage) {
     if (!context?.scope) throw new Error("账号尚未识别，未改动草稿或 Queue");
-    const reply = await chrome.runtime.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime?.id || typeof runtime.sendMessage !== "function") throw new Error("扩展已更新，请刷新当前页面后再操作；草稿和附件未改动");
+    let reply;
+    try {
+      reply = await runtime.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
+    } catch (error) {
+      const detail = String(error?.message || error || "");
+      if (!globalThis.chrome?.runtime?.id || /extension context invalidated|receiving end does not exist|message port closed|could not establish connection/i.test(detail)) {
+        throw new Error("扩展已更新，请刷新当前页面后再操作；草稿和附件未改动");
+      }
+      throw error;
+    }
     if (!reply?.ok) throw new Error(reply?.error || "扩展连接不可用，请重新加载页面");
     accept(reply, context);
     return reply;

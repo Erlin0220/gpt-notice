@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const CSS = `
-    :host{all:initial;position:fixed;display:block;z-index:30;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
+    :host{all:initial;position:fixed;display:block;z-index:9;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
     *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
     :host([data-native-overlay]) .bar,:host([data-native-overlay]) .notice{visibility:hidden!important;pointer-events:none!important}
     .bar{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-height:32px;pointer-events:none}
@@ -28,7 +28,7 @@
       <section class="panel edit-panel" hidden aria-label="编辑已保存的队列消息"><header><strong>编辑 Queue 消息</strong></header><label>已保存的文本<textarea name="edit" maxlength="200000"></textarea></label><footer><button data-action="cancel-edit">取消</button><button data-action="save-edit">保存</button></footer></section><div class="notice" hidden role="status"></div>`;
     document.body.appendChild(host);
     const $ = s => shadow.querySelector(s);
-    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, overlayFrame = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
+    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, overlayTimer = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
     const close = () => { for (const panel of shadow.querySelectorAll(".panel")) panel.hidden = true; $('[data-action="queue"]').setAttribute("aria-expanded", "false"); editing = null; };
     const showNotice = value => {
       clearTimeout(noticeTimer);
@@ -75,20 +75,11 @@
     const observer = new ResizeObserver(() => position());
     const nativeFloatingSelector = '.popover,[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
     const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-    function extensionSurfaces() {
-      const surfaces = [host.getBoundingClientRect()];
-      for (const node of shadow.querySelectorAll(".panel,.notice")) {
-        if (!node.hidden && node.getClientRects().length) surfaces.push(node.getBoundingClientRect());
-      }
-      return surfaces;
-    }
-    function nativeOverlayOverlaps(surfaces) {
+    function nativeOverlayOverlaps(rect) {
       for (const node of document.querySelectorAll(nativeFloatingSelector)) {
-        if (!node.isConnected) continue;
         const style = getComputedStyle(node);
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
         const overlay = node.getBoundingClientRect();
-        if (overlay.width > 0 && overlay.height > 0 && surfaces.some(surface => intersects(surface, overlay))) return true;
+        if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && overlay.width > 0 && overlay.height > 0 && intersects(rect, overlay)) return true;
       }
       return false;
     }
@@ -102,7 +93,7 @@
       const left = Math.max(12, Math.min(rect.left, innerWidth - width - 12));
       const next = `${Math.round(left)}:${Math.round(rect.top - 6)}:${Math.round(width)}`;
       if (geometry !== next) { geometry = next; host.style.left = `${left}px`; host.style.top = `${rect.top - 6}px`; host.style.width = `${width}px`; }
-      const nativeOverlay = !host.hidden && nativeOverlayOverlaps(extensionSurfaces());
+      const nativeOverlay = !host.hidden && nativeOverlayOverlaps(host.getBoundingClientRect());
       if (nativeOverlay) close();
       host.toggleAttribute("data-native-overlay", nativeOverlay);
     }
@@ -115,14 +106,11 @@
     addEventListener("scroll", onScroll, { capture: true, passive: true });
     addEventListener("resize", onScroll, { passive: true });
     const rescanNativeOverlay = () => {
-      cancelAnimationFrame(overlayFrame);
-      overlayFrame = requestAnimationFrame(() => {
-        overlayFrame = requestAnimationFrame(() => { overlayFrame = 0; position(true); });
-      });
+      clearTimeout(overlayTimer);
+      overlayTimer = setTimeout(() => { overlayTimer = 0; position(true); }, 80);
     };
-    document.addEventListener("pointerup", rescanNativeOverlay, { capture: true, passive: true });
+    document.addEventListener("click", rescanNativeOverlay, { capture: true, passive: true });
     document.addEventListener("keydown", rescanNativeOverlay, { capture: true, passive: true });
-    document.addEventListener("focusin", rescanNativeOverlay, { capture: true, passive: true });
     function render(next) {
       model = next;
       if (lastKey !== next.key) { lastKey = next.key; close(); signature = ""; }
@@ -161,7 +149,7 @@
       position();
     }
     return { host, render, showNotice, anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
-      dispose() { clearTimeout(noticeTimer); cancelAnimationFrame(frame); cancelAnimationFrame(overlayFrame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("pointerup",rescanNativeOverlay,true); document.removeEventListener("keydown",rescanNativeOverlay,true); document.removeEventListener("focusin",rescanNativeOverlay,true); host.remove(); } };
+      dispose() { clearTimeout(noticeTimer); clearTimeout(overlayTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("click",rescanNativeOverlay,true); document.removeEventListener("keydown",rescanNativeOverlay,true); host.remove(); } };
   }
   globalThis.ChatGPTQueueUI = { create };
 })();

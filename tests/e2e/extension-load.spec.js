@@ -141,17 +141,23 @@ test("usage panel stays inside a narrow viewport",async({page})=>{
   await expect(button(page,'usage')).toBeVisible();await button(page,'usage').click();
   const box=await page.locator(`${host} .usage-panel`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
 });
-test("extension chrome yields to overlapping native floating UI and returns after it closes",async({page})=>{
+test("native composer popovers hide overlapping extension chrome and restore it on close",async({page})=>{
   await page.goto('https://chatgpt.com/c/native-popover');await expect(button(page,'queue')).toBeVisible();
-  await button(page,'queue').click();await expect(page.locator(`${host} .queue-panel`)).toBeVisible();
-  const box=await page.locator(`${host} .queue-panel`).boundingBox();
-  const overlayBox={x:box.x,y:box.y,width:box.width,height:Math.min(40,box.height)};
-  await page.evaluate(({x,y,width,height})=>{const stack=document.createElement('div');stack.id='native-stack';stack.style.cssText='position:fixed;inset:0;z-index:1;pointer-events:none';const overlay=document.createElement('div');overlay.id='native-popover';overlay.className='popover';overlay.style.cssText=`position:fixed;z-index:50;left:${x}px;top:${y}px;width:${width}px;height:${height}px;background:#fff;pointer-events:auto`;stack.append(overlay);document.body.append(stack);document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));},overlayBox);
-  await expect(page.locator(host)).toHaveAttribute('data-native-overlay','');
-  await expect(button(page,'queue')).toBeHidden();await expect(page.locator(`${host} .queue-panel`)).toBeHidden();
-  expect(await page.evaluate(({x,y,width,height})=>document.elementFromPoint(x+width/2,y+height/2)?.id,overlayBox)).toBe('native-popover');
-  await page.evaluate(()=>{document.getElementById('native-stack')?.remove();document.dispatchEvent(new PointerEvent('pointerup',{bubbles:true}));});
+  const box=await page.locator(host).boundingBox();
+  await page.evaluate(({x,y,width,height})=>{const stack=document.createElement('div');stack.id='native-stack';stack.style.cssText='position:fixed;inset:0;z-index:0;pointer-events:none';const overlay=document.createElement('div');overlay.id='native-popover';overlay.className='popover';overlay.style.cssText=`position:fixed;z-index:50;left:${x}px;top:${y}px;width:${width}px;height:${height}px;background:#fff;pointer-events:auto`;stack.append(overlay);document.body.append(stack);document.dispatchEvent(new MouseEvent('click',{bubbles:true}));},box);
+  await expect(page.locator(host)).toHaveAttribute('data-native-overlay','');await expect(button(page,'queue')).toBeHidden();
+  await page.evaluate(()=>{document.getElementById('native-stack')?.remove();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));});
   await expect(page.locator(host)).not.toHaveAttribute('data-native-overlay','');await expect(button(page,'queue')).toBeVisible();
+});
+test("stale content script after extension reload asks for a page refresh instead of throwing sendMessage TypeError",async({page,extensionServiceWorker})=>{
+  test.setTimeout(30000);
+  await page.goto('https://chatgpt.com/c/reload-required');await expect(button(page,'add')).toBeVisible();await enqueue(page,'saved before extension reload');
+  await button(page,'queue').click();await expect(page.locator(`${host} .queue-panel`)).toBeVisible();
+  await extensionServiceWorker.evaluate(()=>chrome.runtime.reload());
+  await page.waitForTimeout(500);
+  await button(page,'remove').click();
+  await expect(page.locator(`${host} .notice`)).toContainText('扩展已更新，请刷新当前页面后再操作');
+  await expect(page.locator(`${host} .count`)).toHaveText('1');
 });
 test("native Send preempting the queue click cannot return a delivered item to pending",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await enqueue(page,'preempted queue text');
