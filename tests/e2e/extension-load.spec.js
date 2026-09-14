@@ -91,10 +91,13 @@ test("usage counts only observed shared Pro models, allows correction, and does 
   await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');
   await page.locator("#prompt-textarea").fill("pro manual");await page.locator("#composer-submit-button").click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0]?.entries.length,{timeout:12000}).toBe(1);
-  await page.waitForTimeout(4500);await page.reload();await expect(button(page,"usage")).toContainText("本地记录 1");
-  await button(page,"usage").click();await page.locator(`${host} [name="total"]`).fill("12");await button(page,"save-usage").click();
-  await expect(button(page,"usage")).toContainText("校正后 12");
-  expect((await snapshot(extensionServiceWorker)).usage[0].resetAt).toBe(0);
+  await page.waitForTimeout(4500);await page.reload();await expect(button(page,"usage")).toContainText("GPT-6 · 1 / 50 · 刷新未知");
+  await button(page,"usage").click();await page.locator(`${host} [name="total"]`).fill("12");await page.locator(`${host} [name="cycleDays"]`).fill("3");
+  const reset=await page.evaluate(()=>{const d=new Date(Date.now()+2*86400000);d.setSeconds(0,0);const local=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);return {local,month:String(d.getMonth()+1).padStart(2,'0'),day:String(d.getDate()).padStart(2,'0'),hour:String(d.getHours()).padStart(2,'0'),minute:String(d.getMinutes()).padStart(2,'0')};});
+  await page.locator(`${host} [name="resetAt"]`).fill(reset.local);await button(page,"save-usage").click();
+  await expect(button(page,"usage")).toContainText(`GPT-6 · 12 / 50 · ${reset.month}-${reset.day} ${reset.hour}:${reset.minute} 刷新`);
+  await expect(button(page,"usage")).not.toContainText(/校正|记录|计算|推算/);
+  const usage=(await snapshot(extensionServiceWorker)).usage[0];expect(usage.cycleDays).toBe(3);expect(usage.resetAt).toBeGreaterThan(Date.now());
 });
 test("usage persistence failure never blocks completion notification",async({page,extensionServiceWorker})=>{
   await page.goto("https://chatgpt.com/c/usage-failure");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');
@@ -136,6 +139,12 @@ test("usage panel stays inside a narrow viewport",async({page})=>{
   await page.evaluate(()=>{const form=document.querySelector('form');form.style.left='12px';form.style.width='396px';form.style.top='280px';form.style.bottom='auto';});
   await expect(button(page,'usage')).toBeVisible();await button(page,'usage').click();
   const box=await page.locator(`${host} .usage-panel`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
+});
+test("native composer popovers stay above extension chrome",async({page})=>{
+  await page.goto('https://chatgpt.com/c/native-popover');await expect(button(page,'queue')).toBeVisible();
+  const box=await button(page,'queue').boundingBox();
+  const result=await page.evaluate(({x,y,width,height})=>{const overlay=document.createElement('div');overlay.id='native-popover';overlay.style.cssText=`position:fixed;z-index:50;left:${x-8}px;top:${y-8}px;width:${width+16}px;height:${height+16}px;background:#fff;pointer-events:auto`;document.body.append(overlay);const hit=document.elementFromPoint(x+width/2,y+height/2);return {hit:hit?.id,hostZ:getComputedStyle(document.getElementById('chatgpt-message-queue-root')).zIndex};},box);
+  expect(result.hit).toBe('native-popover');expect(Number(result.hostZ)).toBeLessThan(50);
 });
 test("native Send preempting the queue click cannot return a delivered item to pending",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await enqueue(page,'preempted queue text');

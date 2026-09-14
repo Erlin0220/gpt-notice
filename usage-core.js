@@ -5,20 +5,32 @@
 })(globalThis, function () {
   "use strict";
   const PREFIX = "notice:usage:";
-  const WEEK = 7 * 24 * 60 * 60 * 1000;
+  const DAY = 24 * 60 * 60 * 1000;
+  const WEEK = 7 * DAY;
+  const DEFAULT_CYCLE_DAYS = 7;
+  const MAX_CYCLE_DAYS = 90;
   // This account's configured Chat allowance is shared by these two Pro
   // model slugs. Work/Codex model slugs are intentionally excluded.
   const MODELS = new Set(["gpt-6-pro", "gpt-5-6-pro"]);
+  const cycleDays = value => Number.isSafeInteger(Number(value)) && Number(value) >= 1 && Number(value) <= MAX_CYCLE_DAYS ? Number(value) : DEFAULT_CYCLE_DAYS;
+  const shortReset = value => {
+    if (!value) return "刷新未知";
+    const date = new Date(value);
+    const pad = number => String(number).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} 刷新`;
+  };
   function fresh(now = Date.now()) {
     return { version: 1, revision: 0, limit: 50, firstUseDate: "2026-09-09", recordedSince: now,
-      cycleStart: 0, resetAt: 0, resetSource: "unknown", correction: 0, baselineKnown: false, entries: [], updatedAt: now };
+      cycleDays: DEFAULT_CYCLE_DAYS, cycleStart: 0, resetAt: 0, resetSource: "unknown", correction: 0, baselineKnown: false, entries: [], updatedAt: now };
   }
   function normalize(raw, now = Date.now()) {
     const state = raw?.version === 1 ? structuredClone(raw) : fresh(now);
+    state.cycleDays = cycleDays(state.cycleDays);
+    const period = state.cycleDays * DAY;
     if (state.resetAt > 0 && now >= state.resetAt) {
-      const boundary = state.resetAt + Math.floor((now - state.resetAt) / WEEK) * WEEK;
+      const boundary = state.resetAt + Math.floor((now - state.resetAt) / period) * period;
       state.cycleStart = boundary;
-      state.resetAt = boundary + WEEK;
+      state.resetAt = boundary + period;
       state.correction = 0;
       state.baselineKnown = false;
       state.resetSource = "manual-schedule";
@@ -39,15 +51,19 @@
         state.entries = state.entries.filter(e => e.at >= now - 90 * 24 * 60 * 60 * 1000);
       }
     } else if (command.op === "edit") {
-      if (command.revision !== state.revision) throw new Error("用量已变化，请重新打开校正面板");
+      if (command.revision !== state.revision) throw new Error("用量设置已变化，请重新打开面板");
       const limit = Number(command.limit);
+      const nextCycleDays = Number(command.cycleDays ?? state.cycleDays);
       const resetAt = command.resetAt ? Number(command.resetAt) : 0;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000) throw new Error("请输入有效的额度");
-      if (resetAt && (!Number.isFinite(resetAt) || resetAt <= now || resetAt > now + 2 * WEEK)) throw new Error("刷新时间须为未来两周内的已确认时间");
+      if (!Number.isSafeInteger(nextCycleDays) || nextCycleDays < 1 || nextCycleDays > MAX_CYCLE_DAYS) throw new Error(`刷新周期须为 1-${MAX_CYCLE_DAYS} 天`);
+      const period = nextCycleDays * DAY;
+      if (resetAt && (!Number.isFinite(resetAt) || resetAt <= now || resetAt > now + 2 * period)) throw new Error("刷新时间须为未来两个刷新周期内的时间");
       state.limit = limit;
-      if (resetAt !== state.resetAt) {
+      if (resetAt !== state.resetAt || nextCycleDays !== state.cycleDays) {
+        state.cycleDays = nextCycleDays;
         state.resetAt = resetAt;
-        state.cycleStart = resetAt ? resetAt - WEEK : 0;
+        state.cycleStart = resetAt ? resetAt - period : 0;
         state.resetSource = resetAt ? "manual" : "unknown";
         state.correction = 0;
         state.baselineKnown = false;
@@ -69,9 +85,9 @@
   function summary(raw, now = Date.now()) {
     const state = normalize(raw, now);
     const used = count(state);
-    return { ...state, used, label: `GPT-6 · ${state.baselineKnown ? "校正后 " : "本地记录 "}${used} / ${state.limit}`,
-      resetLabel: state.resetAt ? `${new Date(state.resetAt).toLocaleString()} · ${state.resetSource === "manual" ? "手动确认" : "按手动周期推算"}` : "刷新时间未知 · 请以原生额度提示为准",
+    return { ...state, used, label: `GPT-6 · ${used} / ${state.limit} · ${shortReset(state.resetAt)}`,
+      resetLabel: state.resetAt ? `下一次刷新：${new Date(state.resetAt).toLocaleString()} · 每 ${state.cycleDays} 天` : `下一次刷新：未知 · 每 ${state.cycleDays} 天`,
       sourceLabel: state.baselineKnown ? "手动基数 + 本机观察；不是官方实时余额" : "仅本机观察；此前及其他设备用量未知，不能据此计算官方剩余次数" };
   }
-  return { PREFIX, WEEK, MODELS, fresh, normalize, count, apply, summary };
+  return { PREFIX, DAY, WEEK, DEFAULT_CYCLE_DAYS, MAX_CYCLE_DAYS, MODELS, fresh, normalize, count, apply, summary };
 });

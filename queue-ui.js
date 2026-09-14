@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const CSS = `
-    :host{all:initial;position:fixed;display:block;z-index:1000;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
+    :host{all:initial;position:fixed;display:block;z-index:30;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
     *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
     .bar{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-height:32px;pointer-events:none}
     button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--n-line,#ddd);border-radius:9px;padding:6px 10px;background:var(--n-bg,#fff);min-height:30px;pointer-events:auto}
@@ -21,9 +21,9 @@
     host.id = "chatgpt-message-queue-root";
     host.hidden = true;
     const shadow = host.attachShadow({ mode: "open" });
-    shadow.innerHTML = `<style>${CSS}</style><div class="bar"><button class="usage" data-action="usage" title="用量来源与本地校正">GPT-6 · 读取中</button><button data-action="add">加入 Queue</button><button data-action="queue" aria-expanded="false">Queue <span class="count">0</span></button></div>
+    shadow.innerHTML = `<style>${CSS}</style><div class="bar"><button class="usage" data-action="usage" title="GPT-6 用量设置">GPT-6 · 读取中</button><button data-action="add">加入 Queue</button><button data-action="queue" aria-expanded="false">Queue <span class="count">0</span></button></div>
       <section class="panel queue-panel" hidden aria-label="当前对话 Queue"><header><strong>Queue</strong><button data-action="pause">暂停</button><button data-action="close">关闭</button></header><p class="status" role="status"></p><ol class="list"></ol><p class="hint">使用原生输入框添加消息。Queue 只发送纯文本，永不覆盖草稿或接管原生 Send。</p></section>
-      <section class="panel usage-panel" hidden aria-label="GPT-6 用量"><header><strong>GPT-6 用量</strong><button data-action="close">关闭</button></header><p class="source hint"></p><p class="reset hint"></p><p class="hint">当前账号配置为每周 50 次；GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度。不包含 Thinking、Work 或 Codex。首次使用日期：2026-09-09；日期本身不能证明本周期已用次数或精确刷新时间。</p><label>本地已用总数校正（留空表示历史未知）<input name="total" type="number" min="0" placeholder="未知"></label><label>每周额度（当前账号设置）<input name="limit" type="number" min="1" max="10000"></label><label>下一次刷新（仅填写已确认的时间；留空表示未知）<input name="resetAt" type="datetime-local"></label><p class="hint">所有统计只在本机保存。手动时间会作为每 7 天刷新一次的本地计划，不冒充官方 reset time。</p><footer><button data-action="close">取消</button><button data-action="save-usage">保存校正</button></footer></section>
+      <section class="panel usage-panel" hidden aria-label="GPT-6 用量"><header><strong>GPT-6 用量</strong><button data-action="close">关闭</button></header><p class="source hint"></p><p class="reset hint"></p><p class="config hint"></p><label>当前周期已用次数（可选）<input name="total" type="number" min="0" placeholder="未知"></label><label>周期额度<input name="limit" type="number" min="1" max="10000"></label><label>刷新周期（天）<input name="cycleDays" type="number" min="1" max="90" step="1"></label><label>下一次刷新<input name="resetAt" type="datetime-local"></label><p class="hint">所有统计只在本机保存。留空已用次数表示不补录历史；下一次刷新留空表示未知。</p><footer><button data-action="close">取消</button><button data-action="save-usage">保存设置</button></footer></section>
       <section class="panel edit-panel" hidden aria-label="编辑已保存的队列消息"><header><strong>编辑 Queue 消息</strong></header><label>已保存的文本<textarea name="edit" maxlength="200000"></textarea></label><footer><button data-action="cancel-edit">取消</button><button data-action="save-edit">保存</button></footer></section><div class="notice" hidden role="status"></div>`;
     document.body.appendChild(host);
     const $ = s => shadow.querySelector(s);
@@ -50,6 +50,7 @@
         usageRevision = usage.revision;
         $('[name="total"]').value = usage.baselineKnown ? usage.used : "";
         $('[name="limit"]').value = usage.limit;
+        $('[name="cycleDays"]').value = usage.cycleDays;
         $('[name="resetAt"]').value = usage.resetAt ? new Date(usage.resetAt - new Date(usage.resetAt).getTimezoneOffset() * 60000).toISOString().slice(0,16) : "";
         return;
       }
@@ -62,7 +63,7 @@
       if (action === "resolve-retry" || action === "resolve-remove") {
         if (!confirm(action === "resolve-retry" ? "请先核对原生对话：确认这条消息没有发送。重新入队可能导致重复发送，是否继续？" : "已核对原生对话，确认从 outbox 移除此未知结果，不再发送？")) return;
       }
-      const payload = action === "save-edit" ? { ...editing, text: $('[name="edit"]').value } : action === "save-usage" ? { revision: usageRevision, total: $('[name="total"]').value, limit: $('[name="limit"]').value, resetAt: $('[name="resetAt"]').value ? new Date($('[name="resetAt"]').value).getTime() : 0 } : { id: item?.id };
+      const payload = action === "save-edit" ? { ...editing, text: $('[name="edit"]').value } : action === "save-usage" ? { revision: usageRevision, total: $('[name="total"]').value, limit: $('[name="limit"]').value, cycleDays: $('[name="cycleDays"]').value, resetAt: $('[name="resetAt"]').value ? new Date($('[name="resetAt"]').value).getTime() : 0 } : { id: item?.id };
       button.disabled = true;
       try {
         await onAction(action, payload);
@@ -95,8 +96,10 @@
       if (lastKey !== next.key) { lastKey = next.key; close(); signature = ""; }
       const usage = globalThis.ChatGPTUsage.summary(next.usage);
       $(".usage").textContent = next.scope ? usage.label : "GPT-6 · 账号未识别";
+      $(".usage").title = next.scope ? usage.resetLabel : "GPT-6 用量设置";
       $(".source").textContent = usage.sourceLabel;
       $(".reset").textContent = usage.resetLabel;
+      $(".config").textContent = `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度，不包含 Thinking、Work 或 Codex。首次使用日期：${usage.firstUseDate}。`;
       for (const name of ["add", "queue"]) $(`[data-action="${name}"]`).hidden = next.mode !== "conversation";
       $('[data-action="add"]').disabled = !next.scope || next.actionBusy;
       $('[data-action="pause"]').textContent = next.queue?.paused ? "继续" : "暂停";

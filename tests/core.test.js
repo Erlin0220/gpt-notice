@@ -129,7 +129,8 @@ test("editing is revision checked and sending items cannot be deleted or reorder
 test("usage starts with unknown history and no fabricated reset or remaining count", () => {
   const s = U.summary(U.fresh(at), at);
   assert.equal(s.used, 0); assert.equal(s.baselineKnown, false); assert.equal(s.resetAt, 0);
-  assert.match(s.label, /本地记录/); assert.equal(s.remaining, undefined);
+  assert.equal(s.cycleDays, 7); assert.match(s.label, /^GPT-6 · 0 \/ 50 · 刷新未知$/);
+  assert.doesNotMatch(s.label, /校正|记录|计算|推算/); assert.equal(s.remaining, undefined);
 });
 test("manual and Queue observed receipts share the same model rules and dedup key", () => {
   let s = U.fresh(at);
@@ -139,11 +140,11 @@ test("manual and Queue observed receipts share the same model rules and dedup ke
 test("manual correction cannot erase concurrent usage and a confirmed schedule rolls over", () => {
   let s = U.apply(U.fresh(at), { op: "record", turnId: "a", model: "gpt-6-pro", at }, at).state;
   assert.throws(() => U.apply(s, { op: "edit", revision: 0, total: 10, limit: 50 }, at));
-  s = U.apply(s, { op: "edit", revision: s.revision, total: 12, limit: 50, resetAt: at + 10000 }, at).state;
+  s = U.apply(s, { op: "edit", revision: s.revision, total: 12, limit: 50, cycleDays: 3, resetAt: at + 10000 }, at).state;
   assert.equal(U.count(s), 12);
   const next = U.normalize(s, at + 11000);
-  assert.equal(U.count(next), 0); assert.equal(next.correction, 0); assert.equal(next.resetAt, at + 10000 + U.WEEK);
-  const later = U.normalize(s, at + 10000 + U.WEEK * 5);
-  assert.equal(later.resetAt, at + 10000 + U.WEEK * 6);
+  assert.equal(U.count(next), 0); assert.equal(next.correction, 0); assert.equal(next.cycleDays, 3); assert.equal(next.resetAt, at + 10000 + U.DAY * 3);
+  const later = U.normalize(s, at + 10000 + U.DAY * 3 * 5);
+  assert.equal(later.resetAt, at + 10000 + U.DAY * 3 * 6);
   assert.equal(U.apply(next, { op: "record", turnId: "a", model: "gpt-6-pro", at }, at + 11000).state.entries.length, 1);
 });
