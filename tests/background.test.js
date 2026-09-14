@@ -8,18 +8,31 @@ const U = require("../usage-core");
 const scope = "a".repeat(64);
 function harness(storage = {}) {
   const created = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a"}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a"}]]);
-  let listener, clicked, failWrite = false, failNotify = false;
+  const session = {};
+  let listener, clicked, webListener, removed, failWrite = false, failNotify = false;
   const clone = value => structuredClone(value);
+  const store = target => ({
+    async get(keys) { if (keys === null) return clone(target); const names = Array.isArray(keys) ? keys : [keys]; return Object.fromEntries(names.filter(k => k in target).map(k => [k,clone(target[k])])); },
+    async set(values) { Object.assign(target,clone(values)); },
+    async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete target[key]; }
+  });
   const chrome = {
     runtime: { onMessage: { addListener(fn) { listener = fn; } }, getURL: p => p },
-    storage: { local: { async get(keys) { if (keys === null) return clone(storage); const names = Array.isArray(keys) ? keys : [keys]; return Object.fromEntries(names.filter(k => k in storage).map(k => [k,clone(storage[k])])); }, async set(values) { if (failWrite) throw new Error("disk full"); Object.assign(storage,clone(values)); }, async remove(keys) { for (const key of Array.isArray(keys) ? keys : [keys]) delete storage[key]; } } },
+    storage: { local: { ...store(storage), async set(values) { if (failWrite) throw new Error("disk full"); Object.assign(storage,clone(values)); } }, session: store(session) },
+    webRequest: { onBeforeRequest: { addListener(fn) { webListener = fn; } } },
     notifications: { onClicked: { addListener(fn) { clicked = fn; } }, onButtonClicked: { addListener() {} }, onClosed: { addListener() {} }, async create(id, value) { if (failNotify) throw new Error("OS denied"); created.push({id,...value}); }, async clear() {} },
-    tabs: { async get(id) { return tabs.get(id); }, async query() { return [...tabs.values()]; }, async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
+    tabs: { onRemoved: { addListener(fn) { removed = fn; } }, async get(id) { return tabs.get(id); }, async query() { return [...tabs.values()]; }, async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
     windows: { async update() {} }
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../background.js"),"utf8"), { chrome, importScripts() {}, ChatGPTQueueCore: Q, ChatGPTUsage: U, Date, console });
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../background.js"),"utf8"), { chrome, importScripts() {}, ChatGPTQueueCore: Q, ChatGPTUsage: U, Date, TextDecoder, console });
   const send = (command, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,command}, {tab:tabs.get(tabId),documentId:`doc-${tabId}`}, resolve));
-  return { send, storage, tabs, created, focused, click: id => clicked(id), writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;} };
+  const sendUsage = (usage, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,usage}, {tab:tabs.get(tabId),documentId:`doc-${tabId}`}, resolve));
+  const observe = async (body, tabId = 1) => {
+    const bytes = new TextEncoder().encode(JSON.stringify(body)).buffer;
+    webListener({ tabId, method:"POST", url:"https://chatgpt.com/backend-api/f/conversation", requestBody:{raw:[{bytes}]}, timeStamp:Date.now() });
+    await new Promise(resolve => setTimeout(resolve, 5));
+  };
+  return { send, sendUsage, observe, storage, session, tabs, created, focused, click: id => clicked(id), closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;} };
 }
 test("service worker serializes concurrent claims and persists intent", async () => {
   const h = harness();
@@ -82,6 +95,20 @@ test("single-tab start repairs a legacy false concurrency pause", async () => {
   assert.equal(h.storage[key].turn.source, "1");
   assert.equal(h.storage[key].paused, false);
   assert.equal(h.storage[key].holdUntil, 0);
+});
+test("eligible Pro usage is recorded from the native outgoing request before completion and deduplicates the later DOM observation", async () => {
+  const h = harness();
+  await h.send({ op:"get" });
+  await h.observe({ action:"next", model:"gpt-6-pro", messages:[{ id:"user-send-1", author:{ role:"user" } }] });
+  const usageKey = U.PREFIX + scope;
+  assert.equal(U.count(h.storage[usageKey]), 1);
+  assert.equal(h.storage[usageKey].entries[0].id, "user-send-1");
+  await h.sendUsage({ op:"record", turnId:"user-send-1", model:"gpt-6-pro", at:Date.now() });
+  assert.equal(U.count(h.storage[usageKey]), 1);
+  await h.observe({ action:"next", model:"gpt-5-6-thinking", messages:[{ id:"user-send-2", author:{ role:"user" } }] });
+  assert.equal(U.count(h.storage[usageKey]), 1);
+  await h.observe({ action:"next", model:"gpt-5-6-pro", messages:[{ id:"user-send-3", author:{ role:"user" } }] });
+  assert.equal(U.count(h.storage[usageKey]), 2);
 });
 test("disabled notifications do not create routing records; clicked records are removed", async () => {
   const h=harness({"notice:notifications":false});await h.send({op:"start",userId:"silent"});await h.send({op:"settle",userId:"silent"});

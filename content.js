@@ -164,7 +164,7 @@
           // Retry on later ticks while this turn is active, then fail closed as
           // an undercount rather than delaying the user's conversation.
           try {
-            await request(null, rt.context, { op: "record", turnId: `${route.id}:${active.generationId}`, model: p.model, at: active.at });
+            await request(null, rt.context, { op: "record", turnId: active.generationId, model: p.model, at: active.at });
             active.counted = true;
           } catch {}
         }

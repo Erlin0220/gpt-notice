@@ -64,9 +64,10 @@ test("draft protection waits without replacing text, then uses native Send",asyn
   expect(await page.evaluate(()=>window.sent[0].text)).toBe("queued");
 });
 test("idle queued messages auto-run without requiring Continue",async({page,extensionServiceWorker})=>{
-  await page.goto("https://chatgpt.com/c/idle-auto");await expect(button(page,"add")).toBeVisible();await enqueue(page,"auto queued");
+  await page.goto("https://chatgpt.com/c/idle-auto");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');await enqueue(page,"auto queued");
   await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.paused),{timeout:3000}).toBe(false);
   await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(1);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0]?.entries.length,{timeout:5000}).toBe(1);
   expect(await page.evaluate(()=>window.sent[0].text)).toBe("auto queued");
   await expect(page.locator(`${host} .count`)).toHaveText("0",{timeout:10000});
 });
@@ -96,9 +97,12 @@ test("streaming and composer replacement keep plugin buttons mounted and clickab
   await page.screenshot({path:testInfo.outputPath('stable-ui.png')});await page.evaluate(()=>clearInterval(window.interval));
 });
 test("usage counts only observed shared Pro models, allows correction, and does not recount reload",async({page,extensionServiceWorker})=>{
-  await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');
+  await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await page.evaluate(()=>{window.model='gpt-6-pro';window.autoReply=false;});
   await page.locator("#prompt-textarea").fill("pro manual");await page.locator("#composer-submit-button").click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0]?.entries.length,{timeout:12000}).toBe(1);
+  await expect(button(page,"usage")).toContainText("GPT-6 · 1 / 50");
+  expect(await page.locator('button[data-testid="copy-turn-action-button"]').count()).toBe(0);
+  await page.evaluate(()=>window.finish('manual pro finished'));
   await page.waitForTimeout(4500);await page.reload();await expect(button(page,"usage")).toContainText("GPT-6 · 1 / 50 · 刷新未知");
   await button(page,"usage").click();await page.locator(`${host} [name="total"]`).fill("12");await page.locator(`${host} [name="cycleDays"]`).fill("3");
   const reset=await page.evaluate(()=>{const d=new Date(Date.now()+2*86400000);d.setSeconds(0,0);const local=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);return {local,month:String(d.getMonth()+1).padStart(2,'0'),day:String(d.getDate()).padStart(2,'0'),hour:String(d.getHours()).padStart(2,'0'),minute:String(d.getMinutes()).padStart(2,'0')};});

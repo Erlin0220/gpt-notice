@@ -7,14 +7,69 @@ const serial = fn => {
   mutations = next.catch(() => {});
   return next;
 };
+const TAB_SCOPE_PREFIX = "notice:tab-scope:";
+const tabScopes = new Map();
+const tabScopeKey = tabId => `${TAB_SCOPE_PREFIX}${tabId}`;
+async function rememberTabScope(tabId, scope) {
+  if (tabScopes.get(tabId) === scope) return;
+  tabScopes.set(tabId, scope);
+  try { await chrome.storage.session.set({ [tabScopeKey(tabId)]: { scope, at: Date.now() } }); } catch {}
+}
+async function scopeForTab(tabId) {
+  const memory = tabScopes.get(tabId);
+  if (memory) return memory;
+  try {
+    const key = tabScopeKey(tabId);
+    const value = (await chrome.storage.session.get(key))[key];
+    if (/^[a-f0-9]{64}$/.test(value?.scope || "")) {
+      tabScopes.set(tabId, value.scope);
+      return value.scope;
+    }
+  } catch {}
+  return "";
+}
+function requestJson(requestBody) {
+  if (!requestBody?.raw?.length) return null;
+  try {
+    const text = requestBody.raw.map(part => part.bytes ? new TextDecoder().decode(part.bytes) : "").join("");
+    return JSON.parse(text);
+  } catch { return null; }
+}
+async function recordSubmittedUsage(details) {
+  if (details.method !== "POST" || !Number.isInteger(details.tabId) || details.tabId < 0) return;
+  const body = requestJson(details.requestBody);
+  const model = String(body?.model || "");
+  if (body?.action !== "next" || !Usage.MODELS.has(model)) return;
+  const message = [...(Array.isArray(body.messages) ? body.messages : [])].reverse().find(item => item?.author?.role === "user");
+  const turnId = String(message?.id || "");
+  if (!/^[\w:-]{1,220}$/.test(turnId)) return;
+  const scope = await scopeForTab(details.tabId);
+  if (!scope) return;
+  const usageKey = Usage.PREFIX + scope;
+  const stored = await chrome.storage.local.get(usageKey);
+  const result = Usage.apply(stored[usageKey], { op: "record", turnId, model, at: Date.now() });
+  if (result.changed) await chrome.storage.local.set({ [usageKey]: result.state });
+}
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   serial(() => handle(message, sender)).then(reply, error => reply({ ok: false, error: error.message }));
   return true;
 });
+chrome.webRequest.onBeforeRequest.addListener(details => {
+  void serial(() => recordSubmittedUsage(details)).catch(() => {});
+}, {
+  urls: [
+    "https://chatgpt.com/backend-api/f/conversation",
+    "https://chat.openai.com/backend-api/f/conversation"
+  ]
+}, ["requestBody"]);
 chrome.notifications.onClicked.addListener(id => void openNotice(id));
 chrome.notifications.onButtonClicked.addListener(id => void openNotice(id));
 chrome.notifications.onClosed.addListener(id => void chrome.storage.local.remove(`notice:notification:${id}`));
+chrome.tabs.onRemoved.addListener(tabId => {
+  tabScopes.delete(tabId);
+  void chrome.storage.session.remove(tabScopeKey(tabId)).catch(() => {});
+});
 
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
@@ -29,6 +84,7 @@ async function handle(message, sender) {
     return { ok: true };
   }
   if (message?.type !== "NOTICE" || !Number.isInteger(sender.tab?.id) || !/^[a-f0-9]{64}$/.test(message.scope || "")) throw new Error("无效的页面上下文");
+  await rememberTabScope(sender.tab.id, message.scope);
   const route = Queue.route(message.url);
   const actual = Queue.route((await chrome.tabs.get(sender.tab.id)).url);
   if (route.mode === "off" || route.mode !== actual.mode || route.id !== actual.id) throw new Error("页面已切换，操作已取消");

@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, "..");
 test("production manifest is local and contains one page controller", () => {
   const m = require("../manifest.json");
   assert.equal(m.version, require("../package.json").version);
-  assert.deepEqual(m.permissions, ["notifications", "storage", "tabs"]);
+  assert.deepEqual(m.permissions, ["notifications", "storage", "tabs", "webRequest"]);
   const files = [m.background.service_worker, ...m.content_scripts[0].js, "popup.js"];
   let bytes = 0;
   for (const file of files) {
