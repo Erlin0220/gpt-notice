@@ -63,7 +63,13 @@
     const busy = local('[role="status"], [data-state="loading"]').some(n => visible(n) && /working|thinking|searching|generating|正在处理|正在思考|正在搜索|正在生成/i.test(n.textContent.slice(0,200)));
     const errors = [...local('[role="alert"], [data-testid*="error"]'), ...(box ? all(box, '[role="alert"], [data-testid*="error"]') : [])];
     const error = errors.some(n => visible(n) && /error|wrong|failed|错误|失败|出错|达到.*限|limit/i.test(n.textContent.slice(0,500)));
-    const attachments = Boolean(box?.querySelector('input[type="file"]')?.files?.length || box?.querySelector('[data-testid*="attachment"], [data-testid*="file-preview"], button[aria-label*="Remove file"], button[aria-label*="删除附件"]'));
+    // Upload inputs may be cleared after upload. Native removal controls remain
+    // the evidence that the composer still owns an attachment (including images).
+    const attachments = Boolean(box && (
+      all(box, 'input[type="file"]').some(n => n.files?.length) ||
+      all(box, '[data-testid*="attachment"], [data-testid*="file-preview"], [data-testid*="image-preview"]').some(visible) ||
+      all(box, 'button[aria-label], button[title]').some(n => visible(n) && /(?:remove|delete)\s+(?:file|attachment|image|photo)|(?:删除|移除|清除)(?:文件|附件|图片|图像|照片)/i.test(`${n.getAttribute("aria-label") || ""} ${n.getAttribute("title") || ""}`))
+    ));
     return { composer: input, anchor: box, ready: enabled(input), empty: !readText(input).trim() && !attachments,
       attachments, stop, waiting, busy, error, running: stop || waiting || busy,
       user, users, userId: messageId(user), assistant, assistantId: afterUser ? messageId(assistant) : "",
@@ -72,20 +78,36 @@
       // Never read or hash streamed answer tokens. Content is sampled only after native controls are idle.
       settledText: completion && afterUser && !stop && !busy && !waiting ? (assistant.textContent || "").slice(0,200000) : "" };
   }
+  function precedes(userId, node, doc = document) {
+    if (!userId || !node?.isConnected) return false;
+    const baseline = doc.querySelector(`[data-message-author-role="user"][data-message-id="${CSS.escape(userId)}"]`);
+    return Boolean(baseline?.isConnected && (baseline.compareDocumentPosition(node) & 4));
+  }
+  function generationMatches(generationId, page, doc = document) {
+    if (generationId === page.userId) return true;
+    if (!generationId?.startsWith(`${page.userId}:`) || !page.assistant) return false;
+    const responseId = generationId.slice(page.userId.length + 1);
+    const marker = doc.querySelector(`[data-message-author-role="assistant"][data-message-id="${CSS.escape(responseId)}"]`);
+    // Another tab may still show the previous answer to this same user message.
+    // Require this regeneration's native marker, allowing subsequent tool segments.
+    return Boolean(marker && (marker === page.assistant || (marker.compareDocumentPosition(page.assistant) & 4)));
+  }
   function receipt(item, page) {
     const baseline = document.querySelector(`[data-message-author-role="user"][data-message-id="${CSS.escape(item.baseline)}"]`);
     if (!baseline) return null; // Missing/virtualized baseline cannot prove delivery.
     return page.users.find(n => (baseline.compareDocumentPosition(n) & 4) && messageId(n) && globalThis.ChatGPTQueueCore.comparable(readText(n)) === globalThis.ChatGPTQueueCore.comparable(item.text)) || null;
   }
-  let bootstrapNode, userId = "", initialAccount = "", scopeIdentity = "", scopeValue = "";
+  let bootstrapNode, bootstrapText = "", userId = "", initialAccount = "", scopeIdentity = "", scopeValue = "";
   async function scope(doc = document) {
     const node = doc.getElementById("client-bootstrap");
-    if (node !== bootstrapNode) {
+    const serialized = node?.textContent || "";
+    if (node !== bootstrapNode || serialized !== bootstrapText) {
       bootstrapNode = node;
+      bootstrapText = serialized;
       userId = "";
       initialAccount = "";
       try {
-        const value = JSON.parse(node?.textContent || "{}");
+        const value = JSON.parse(serialized || "{}");
         userId = String(value.user?.id || value.session?.user?.id || "");
         initialAccount = String(value.session?.account?.id || "");
       } catch {}
@@ -96,6 +118,9 @@
     const identity = `${userId}:${account}`;
     if (scopeIdentity !== identity) {
       const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
+      // Do not publish an old identity if an account change raced the digest.
+      if (doc.getElementById("client-bootstrap") !== node || node?.textContent !== serialized) return "";
+      try { if ((localStorage.getItem("_account") || initialAccount || "personal") !== account) return ""; } catch { return ""; }
       scopeValue = [...new Uint8Array(hash)].map(n => n.toString(16).padStart(2,"0")).join("");
       scopeIdentity = identity;
     }
@@ -119,5 +144,5 @@
     }
     return globalThis.ChatGPTQueueCore.comparable(readText(input)) === globalThis.ChatGPTQueueCore.comparable(value);
   }
-  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, composer, sendButton, snapshot, receipt, scope, write };
+  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, write };
 });

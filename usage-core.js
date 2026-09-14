@@ -35,6 +35,9 @@
       state.baselineKnown = false;
       state.resetSource = "manual-schedule";
     }
+    // Keep the whole counted interval. With an unknown reset, deleting old
+    // entries would silently reduce both observed totals and manual corrections.
+    state.entries = state.entries.filter(e => e.at >= now - MAX_CYCLE_DAYS * DAY || e.at >= state.cycleStart);
     return state;
   }
   function count(state) {
@@ -48,7 +51,6 @@
         const at = Number(command.at);
         if (!Number.isFinite(at) || at < state.recordedSince - 60000 || at > now + 5000) throw new Error("无效的用量观察时间");
         state.entries.push({ id: command.turnId, model: command.model, at });
-        state.entries = state.entries.filter(e => e.at >= now - 90 * 24 * 60 * 60 * 1000);
       }
     } else if (command.op === "edit") {
       if (command.revision !== state.revision) throw new Error("用量设置已变化，请重新打开面板");
@@ -58,7 +60,7 @@
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000) throw new Error("请输入有效的额度");
       if (!Number.isSafeInteger(nextCycleDays) || nextCycleDays < 1 || nextCycleDays > MAX_CYCLE_DAYS) throw new Error(`刷新周期须为 1-${MAX_CYCLE_DAYS} 天`);
       const period = nextCycleDays * DAY;
-      if (resetAt && (!Number.isFinite(resetAt) || resetAt <= now || resetAt > now + 2 * period)) throw new Error("刷新时间须为未来两个刷新周期内的时间");
+      if (!Number.isFinite(resetAt) || resetAt !== 0 && (resetAt <= now || resetAt > now + 2 * period)) throw new Error("刷新时间须为未来两个刷新周期内的时间");
       state.limit = limit;
       if (resetAt !== state.resetAt || nextCycleDays !== state.cycleDays) {
         state.cycleDays = nextCycleDays;

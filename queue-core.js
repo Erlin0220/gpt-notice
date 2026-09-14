@@ -162,8 +162,20 @@
         state.items = state.items.filter(i => i.id !== item.id);
         state.receipts.push({ itemId: item.id, claim: item.claim, userId: command.userId, at: now });
         state.receipts = state.receipts.slice(-100);
-        if (!state.settled.includes(command.userId) && state.turn?.id !== command.userId) state.turn = { id: command.userId, userId: command.userId, at: now, done: false };
-        state.holdUntil = 0;
+        const currentUser = state.turn?.userId || state.turn?.id;
+        if (!state.settled.includes(command.userId) && currentUser !== command.userId) {
+          if (state.turn && currentUser !== item.baseline) {
+            // A late receipt proves delivery, not that this is still the active
+            // branch. Acknowledge the outbox without replacing a newer turn.
+            state.paused = true;
+            state.pauseCause = "conflict";
+            state.reason = CONFLICT_REASON;
+            state.holdUntil = now;
+            result.conflict = true;
+          } else state.turn = { id: command.userId, userId: command.userId, source: source(item.owner), at: now, done: false };
+        } else if (state.turn?.id === command.userId) state.turn.source = source(item.owner);
+        if (!result.conflict) state.holdUntil = 0;
+        if (state.reason === "发送结果未知，请核对对话后处理" && !state.items.some(i => i.state === "unknown")) state.reason = "已确认送达，请检查后继续";
         break;
       }
       case "resolve": {
@@ -180,11 +192,13 @@
         const generationId = command.generationId || command.userId;
         const currentSource = source(owner);
         if (command.userId && !state.settled.includes(generationId) && state.turn?.id !== generationId) {
-          if (state.turn && !state.turn.done && !state.turn.stopped) {
-            // A newer generation from the same browser tab is sequential even
-            // if a prior content script missed its settle event. A different
-            // tab is a real branch/concurrency hazard and still fails closed.
-            const sameSource = Boolean(state.turn.source && state.turn.source === currentSource);
+          if (state.turn && !state.turn.done) {
+            // Same tab is not proof of the same branch. Require a visible
+            // predecessor (or an explicitly observed native retry) as well.
+            const previousUser = state.turn.userId || state.turn.id;
+            const follows = command.previousUserId === previousUser && command.userId !== previousUser;
+            const retry = command.retryOf === state.turn.id && command.userId === previousUser;
+            const sameSource = Boolean(state.turn.source && state.turn.source === currentSource && (follows || retry));
             const legacySingleTab = !state.turn.source && command.singleTab === true;
             if (!sameSource && !legacySingleTab) {
               state.paused = true;
@@ -195,7 +209,7 @@
               break;
             }
             state.settled = [...state.settled.filter(id => id !== state.turn.id), state.turn.id].slice(-200);
-            if (state.pauseCause === "conflict") {
+            if (legacySingleTab && state.pauseCause === "conflict") {
               state.paused = false;
               state.pauseCause = "";
               state.reason = "";
@@ -212,6 +226,14 @@
       case "stop": {
         const generationId = command.generationId || command.userId;
         if (command.userId && !state.settled.includes(generationId)) {
+          if (state.turn && !state.turn.done && state.turn.id !== generationId) {
+            state.paused = true;
+            state.pauseCause = "conflict";
+            state.reason = CONFLICT_REASON;
+            state.holdUntil = now;
+            result.conflict = true;
+            break;
+          }
           if (state.turn?.id !== generationId) state.turn = { id: generationId, userId: command.userId, at: now, done: false };
           state.turn.stopped = true;
         }

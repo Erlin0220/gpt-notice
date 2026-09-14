@@ -8,8 +8,27 @@
     pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false, ticks: 0, maxTickMs: 0 };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
+  const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
+  let interval = 0;
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   const current = context => context === rt.context && location.href === context?.url && !rt.disposed;
+  function disconnect() {
+    rt.disposed = true;
+    clearInterval(interval);
+    events.abort();
+    try { chrome.storage.onChanged.removeListener(storageListener); } catch {}
+    try { chrome.runtime.onMessage.removeListener(scopeListener); } catch {}
+  }
+  function invalidate() {
+    if (rt.disposed) return;
+    disconnect();
+    ui.deactivate(RELOAD_REQUIRED);
+  }
+  function runtime() {
+    const api = globalThis.chrome?.runtime;
+    if (!api?.id || typeof api.sendMessage !== "function") { invalidate(); throw new Error(RELOAD_REQUIRED); }
+    return api;
+  }
   function accept(reply, context) {
     if (!current(context)) return;
     if (reply.queue && (!rt.queue || reply.queue.revision >= rt.queue.revision)) rt.queue = reply.queue;
@@ -18,16 +37,14 @@
   }
   async function request(command, context = rt.context, usage) {
     if (!context?.scope) throw new Error("账号尚未识别，未改动草稿或 Queue");
-    const runtime = globalThis.chrome?.runtime;
-    if (!runtime?.id || typeof runtime.sendMessage !== "function") throw new Error("扩展已更新，请刷新当前页面后再操作；草稿和附件未改动");
+    const api = runtime();
+    if (!current(context)) throw new Error("页面已切换，操作已取消");
     let reply;
     try {
-      reply = await runtime.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
+      reply = await api.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
     } catch (error) {
       const detail = String(error?.message || error || "");
-      if (!globalThis.chrome?.runtime?.id || /extension context invalidated|receiving end does not exist|message port closed|could not establish connection/i.test(detail)) {
-        throw new Error("扩展已更新，请刷新当前页面后再操作；草稿和附件未改动");
-      }
+      if (!globalThis.chrome?.runtime?.id || /extension context invalidated/i.test(detail)) { invalidate(); throw new Error(RELOAD_REQUIRED); }
       throw error;
     }
     if (!reply?.ok) throw new Error(reply?.error || "扩展连接不可用，请重新加载页面");
@@ -38,7 +55,7 @@
     const context = rt.context || { mode: "off", key: "", scope: "" };
     const p = rt.page;
     ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy, attachments: Boolean(p?.attachments),
-      status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
+      status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : (rt.queue?.paused || rt.queue?.holdUntil) && rt.queue.reason ? rt.queue.reason : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
     ui.anchor(p?.anchor || null);
   }
   function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
@@ -62,7 +79,7 @@
       const page = D.snapshot();
       if (page.empty) return;
       if (rt.attempt) rt.attempt.submitted = true;
-      rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", url: location.href, text: D.readText(page.composer), fromUsage: Q.route(location.href).mode === "usage" };
+      rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
       if (!rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
@@ -80,15 +97,26 @@
     if (area !== "local" || !rt.context) return;
     const queue = changes[rt.context.key]?.newValue;
     const usage = changes[U.PREFIX + rt.context.scope]?.newValue;
+    if (Object.hasOwn(changes, rt.context.key) && !queue) rt.queue = null;
+    if (Object.hasOwn(changes, U.PREFIX + rt.context.scope) && !usage) rt.usage = null;
     accept({ queue, usage }, rt.context);
   };
   chrome.storage.onChanged.addListener(storageListener);
+  const scopeListener = (message, sender, reply) => {
+    if (message?.type !== "NOTICE_SCOPE") return;
+    const url = location.href;
+    if (rt.disposed) { reply(null); return; }
+    void D.scope().then(scope => reply(!rt.disposed && location.href === url ? { scope, url } : null), () => reply(null));
+    return true;
+  };
+  chrome.runtime.onMessage.addListener(scopeListener);
 
   async function tick() {
     if (rt.tickBusy || rt.disposed) return;
     rt.tickBusy = true;
     const start = performance.now();
     try {
+      runtime();
       const url = location.href;
       const route = Q.route(url);
       if (route.mode === "off") { rt.context = { mode: "off", url, scope: "", key: "" }; rt.page = null; render(); return; }
@@ -99,7 +127,7 @@
       const changed = rt.context?.url !== url || rt.context.scope !== scope;
       if (changed) {
         const old = rt.context;
-        const firstSendTransition = old?.mode === "usage" && rt.pending?.fromUsage && Date.now() - rt.pending.at < 60000;
+        const firstSendTransition = old?.mode === "usage" && old.scope === scope && rt.pending?.fromUsage && Date.now() - rt.pending.at < 60000;
         const promoting = firstSendTransition && route.mode === "conversation";
         rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
         rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
@@ -111,11 +139,11 @@
       }
       rt.page = p;
       if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
+      const now = Date.now();
+      if (scope && rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
       if (!scope || route.mode !== "conversation") { render(); return; }
       if (rt.previousTail && p.userId && p.userId !== rt.previousTail) rt.previousTail = "";
       if (rt.previousTail) { render(); return; }
-      const now = Date.now();
-      if (rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
       if (rt.queue?.items.some(item => item.state === "sending" && item.expiresAt <= now)) await request({ op: "get" });
       // A refresh may recover an exact receipt, but never infer one merely from Streaming.
       for (const item of rt.queue?.items || []) {
@@ -140,9 +168,10 @@
       const generationId = regenerated ? `${p.userId}:${p.assistantId}` : resume ? storedTurn.id : p.userId;
       const live = p.running && !p.copy && p.userId && !rt.queue?.settled?.includes(generationId);
       if (p.userId && (confirmedSubmission || resume || live || regenerated || recoveredCompleted) && rt.turn?.generationId !== generationId) {
-        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: false, recovered: Boolean(recoveredCompleted && !confirmedSubmission) };
+        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: Boolean(regenerated || recoveredCompleted || generationId !== p.userId), recovered: Boolean(recoveredCompleted && !confirmedSubmission) };
         if (regenerated) rt.stopped = "";
-        const started = await request({ op: "start", userId: p.userId, generationId });
+        const started = await request({ op: "start", userId: p.userId, generationId,
+          previousUserId: D.precedes(storedUser, p.user) ? storedUser : "", retryOf: retry ? storedTurn?.id : "" });
         if (started.conflict || rt.queue?.turn?.id !== generationId) {
           rt.turn = null;
           rt.pending = null;
@@ -157,22 +186,23 @@
       rt.lastUserId = p.userId || rt.lastUserId;
       if (p.running) rt.quietAt = now;
       const active = rt.turn;
-      if (active && p.userId === active.id) {
-        if (!active.counted && p.assistantId && U.MODELS.has(p.model)) {
-          // Usage is auxiliary accounting. A storage/validation failure must not
-          // strand the completion state machine or block the next Queue item.
-          // Retry on later ticks while this turn is active, then fail closed as
-          // an undercount rather than delaying the user's conversation.
-          try {
-            await request(null, rt.context, { op: "record", turnId: active.generationId, model: p.model, at: active.at });
-            active.counted = true;
-          } catch {}
-        }
+      if (active && p.userId === active.id && D.generationMatches(active.generationId, p)) {
         const fingerprint = !p.running && p.copy ? `${p.assistantId}:${p.settledText}` : "";
         if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
         const finished = !p.running && p.ready && fingerprint && now - active.stableAt >= 3000 && now - active.at >= 3000;
         const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
         const failed = !p.running && (p.error || stopped) && now - rt.quietAt >= 2000;
+        if (!active.counted && finished && !p.error && !stopped && U.MODELS.has(p.model)) {
+          // A model label can be rendered optimistically before any request is
+          // sent. Only a confirmed completed answer is a safe DOM fallback.
+          // Usage is auxiliary accounting. A storage/validation failure must not
+          // strand the completion state machine or block the next Queue item.
+          // Prefer a visible undercount to delaying the user's conversation.
+          try {
+            await request(null, rt.context, { op: "record", turnId: active.id, model: p.model, at: active.at });
+            active.counted = true;
+          } catch {}
+        }
         if (finished || failed) {
           await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered) });
           rt.turn = null; rt.stopped = ""; rt.quietAt = now;
@@ -205,6 +235,7 @@
     rt.attempt = attempt;
     rt.sending = true;
     const guard = expected => {
+      runtime();
       const p = D.snapshot();
       if (!current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || p.error || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
       return p;
@@ -248,6 +279,8 @@
     const context = rt.context;
     try {
       if (!current(context)) throw new Error("页面已切换，请重新操作");
+      runtime();
+      if (await D.scope() !== context.scope || !current(context)) throw new Error("账号、Workspace 或页面已切换，草稿未改动");
       if (name === "save-usage") { await request(null, context, { op: "edit", ...payload }); return; }
       if (context.mode !== "conversation") throw new Error("仅正式对话提供 Queue");
       if (name === "add") {
@@ -256,7 +289,8 @@
         if (page.running && page.userId && !rt.queue?.turn) await request({ op: "start", userId: page.userId }, context);
         if (!rt.addAttempt || rt.addAttempt.text !== text || rt.addAttempt.context !== context) rt.addAttempt = { id: Q.id(), text, context };
         await request({ op: "add", id: rt.addAttempt.id, text, running: page.running || Boolean(rt.turn) }, context);
-        if (!current(context) || epoch !== rt.inputEpoch || D.composer() !== page.composer || D.readText(page.composer) !== text || D.snapshot().attachments || rt.composing) { ui.showNotice("已保存 Queue；输入期间有变化，当前草稿保持原样"); return; }
+        if (await D.scope() !== context.scope || !current(context) || epoch !== rt.inputEpoch || D.composer() !== page.composer || D.readText(page.composer) !== text || D.snapshot().attachments || rt.composing) { ui.showNotice("已保存 Queue；输入期间有变化，当前草稿保持原样"); return; }
+        runtime();
         rt.writing = true;
         let cleared;
         try { cleared = D.write(page.composer, ""); } finally { rt.writing = false; }
@@ -272,12 +306,12 @@
       else if (name === "resolve-retry" || name === "resolve-remove") await request({ op: "resolve", id: payload.id, confirmed: true, retry: name === "resolve-retry" }, context);
     } finally { rt.actionBusy = false; render(); }
   }
-  const interval = setInterval(() => void tick(), 1000);
+  interval = setInterval(() => void tick(), 1000);
   addEventListener("popstate", () => void tick(), { signal: events.signal });
   addEventListener("pageshow", () => void tick(), { signal: events.signal });
   globalThis.ChatGPTNotice = {
     stats: () => ({ ticks: rt.ticks, maxTickMs: rt.maxTickMs, mode: rt.context?.mode, sending: rt.sending }),
-    dispose() { rt.disposed = true; clearInterval(interval); events.abort(); chrome.storage.onChanged.removeListener(storageListener); ui.dispose(); delete globalThis.ChatGPTNotice; }
+    dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; }
   };
   void tick();
 })();

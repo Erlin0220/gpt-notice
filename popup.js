@@ -12,7 +12,7 @@
       } catch (error) { status.textContent = error.message; }
     });
     const list = document.getElementById("queues");
-    list.textContent = reply.queues.length ? "" : "当前没有待发消息。";
+    list.textContent = !reply.scopeKnown ? "请先切回已识别账号的 ChatGPT 页面；不会展示其他账号或 Workspace 的 Queue。" : reply.queues.length ? "" : "当前账号 / Workspace 没有待发消息。";
     reply.queues.forEach((queue, index) => {
       if (ChatGPTQueueCore.route(queue.url).mode !== "conversation") return;
       const link = document.createElement("a");

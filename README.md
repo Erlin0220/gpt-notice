@@ -4,11 +4,13 @@
 
 ## 使用
 
-先运行 `npm run build` 生成只包含运行文件的 `dist/`，再在 `chrome://extensions` 中开启开发者模式并加载 `dist/`。不要直接加载仓库根目录；仓库包含测试 Profile、依赖和测试产物，Chrome 会把它们一并计入扩展大小。更新代码后重新运行 `npm run build`、重新加载扩展，并刷新需要使用它的 ChatGPT 标签页。扩展运行本身不需要 Node、后端、API Key 或额外服务。
+先运行 `npm run build` 生成只包含运行文件与必要第三方声明的 `dist/`，再在 `chrome://extensions` 中开启开发者模式并加载 `dist/`。不要直接加载仓库根目录；仓库包含依赖和测试产物。CI 与 Release 也直接打包同一份白名单构建产物。更新代码后重新构建、重新加载扩展，并刷新需要使用它的 ChatGPT 标签页；不要打断仍在生成的对话。新版页面脚本检测到扩展失效后会停用计时器和操作、保留草稿与附件并提示刷新，不自动刷新或重新注入。扩展运行本身不需要 Node、后端、API Key 或额外服务。
 
 首页和项目首页只显示用量。进入正式对话后，在原生输入框输入纯文本，点击外围的“加入 Queue”。Queue 面板提供编辑、删除、排序、暂停/继续及立即发送。空闲时加入 Queue 会自动开始；生成期间添加的消息在当前回复完成后继续。只有用户明确暂停或系统遇到不确定发送/并发状态时才停。任何发送都先检查原生草稿、附件、输入法组合输入及生成状态。
 
 Queue 按账号/工作区及正式 conversation 保存；重开同一对话可恢复，不跟随标签页身份。ChatGPT 首条发送期间自己的 `WEB:` 临时 URL 只显示用量，不建立临时队列。旧版本本地数据作为不执行的备份保留，不自动迁移或发送。
+
+Popup 只显示当前活动 ChatGPT 页已识别账号 / Workspace 的 Queue；无法确认身份时不列出其他账户的数据。维护仅机会性清理超过 30 天、已完成且空闲的空 Queue 记录，不删除待发正文、未知发送结果、暂停意图或活动回复。
 
 发送结果无法确认时，Queue 暂停并标识“未知”，不会自动重发。请先检查原生对话，再明确选择重新入队或移除。关闭浏览器、电脑休眠或关闭相关对话后，不承诺后台继续聊天。找不到可靠 DOM/消息回执时宁可暂停。
 
@@ -20,7 +22,9 @@ Queue 按账号/工作区及正式 conversation 保存；重开同一对话可�
 
 ## GPT-6 用量
 
-当前账号配置为 50 次额度，GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度。扩展在 ChatGPT 原生发送请求离开浏览器时只读取 `model` 和本次用户消息 ID：若实际模型为 `gpt-6-pro` / `gpt-5-6-pro`，立即计数；Thinking、Work 和 Codex 不计入。后续 DOM 回复观察仍作为兜底，并使用同一消息 ID 去重，因此不会因回复完成或页面重载重复加一次。左侧徽标只显示已用次数、额度和下一次刷新时间，不展示“校正/计算”等来源字样，也不伪造官方剩余次数。
+本地额度默认配置为 50 次，GPT-6 Pro 与 GPT-5.6 Pro 计入同一组本地记录；这不是对所有订阅的官方额度声明。扩展只读解析原生发送请求中的 `model` 与本次用户消息 ID，在 Chrome `onSendHeaders` 发送边界立即计数：只接受 `gpt-6-pro` / `gpt-5-6-pro`，Thinking、Work 和 Codex 不计。`onBeforeRequest` 仅捕获必要元数据，发送前取消不计；这一浏览器边界不等于服务端接收或官方扣费成功。
+
+后续 DOM 模型观察只为已确认正常完成的新用户回复兜底，并使用相同原生用户 ID 去重；不凭发送前的乐观模型标记计数。重生成的 assistant ID 仅用于完成状态，不制造新的用量 ID。缺少可靠模型标识时不猜测，其他设备和扩展未观察到的调用无法补齐。左侧徽标显示已用次数、配置额度和下一次刷新时间，详细来源在用量面板中说明。
 
 已知首次使用日期为 2026-09-09，但历史使用次数和官方精确刷新时间未知。点击用量可设置当前周期已用次数、周期额度、刷新周期和下一次刷新时间。默认刷新周期为 7 天；未填写时间就显示未知，填写后按所设周期维护本地刷新计划。其他设备、未打开扩展时的调用和无法观察的模型调用不会自动补齐。官方网页核实记录见 [范围与来源](docs/scope-v080.md)。
 
@@ -35,6 +39,6 @@ npm run e2e:smoke
 
 构建与测试需要 Node，E2E 另外需要 Playwright。Chromium MV3 回归始终加载 `dist/`，并使用系统临时目录里的独立 Profile；测试结束会自动清理，不再把浏览器 Profile 写入仓库。真实 ChatGPT 的只读冒烟可通过已有 `e2e:real` 流程显式启用；它不会自动花费模型额度或向现有用户对话发送内容。受控页面测试与已登录真实服务验证分别记录，不能互相冒充。
 
-运行代码没有 MutationObserver，也不 patch `fetch` / XHR / History。Service Worker 只读观察 ChatGPT 原生 `/backend-api/f/conversation` 发送请求，用于提取实际模型 slug 和消息 ID；不修改请求，也不保存消息正文。一个低频采样器负责页面状态，独立 Shadow DOM 保留稳定 UI，只有原生输入框的外部几何会被追踪。所有本地变更经 Service Worker 串行持久化；outbox 的 lease/intent/receipt 思路及部分操作适配自 MIT `chatgpt-yolo`，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+运行代码没有 MutationObserver，也不 patch `fetch` / XHR / History。Service Worker 只读观察允许列表内的 ChatGPT 原生 conversation POST，不修改或重放请求，不保存正文、Cookie 或 Token。临时请求关联使用 `storage.session`；每次核对真实 document 与当前账号，不长期缓存 tabId → 账号。一个低频采样器负责页面状态，独立 Shadow DOM 保留稳定 UI，原生浮层覆盖 Bar 或打开的 Panel 时主动让位。所有本地变更经 Service Worker 串行持久化；outbox 的 lease/intent/receipt 思路及部分操作适配自 MIT `chatgpt-yolo`，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 v0.8 的当前边界以 [scope-v080.md](docs/scope-v080.md) 为准，早期 ADR 中的 Task/临时 Queue 设计仅是历史记录，不是兼容要求。

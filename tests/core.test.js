@@ -105,7 +105,7 @@ test("simultaneous native generations in two tabs fail closed instead of replaci
 });
 test("a newer generation from the same browser tab supersedes a missed settle without a false concurrency pause", () => {
   let state = Q.apply(undefined, { op: "start", userId: "first" }, "17:doc-a:instance-a", at).state;
-  const next = Q.apply(state, { op: "start", userId: "second" }, "17:doc-b:instance-b", at + 1);
+  const next = Q.apply(state, { op: "start", userId: "second", previousUserId: "first" }, "17:doc-b:instance-b", at + 1);
   assert.equal(next.conflict, undefined);
   assert.equal(next.state.turn.id, "second");
   assert.equal(next.state.turn.source, "17");
@@ -115,7 +115,7 @@ test("a newer generation from the same browser tab supersedes a missed settle wi
 test("same-tab recovery does not override an explicit user pause", () => {
   let state = Q.apply(undefined, { op: "start", userId: "first" }, "17:doc-a:instance-a", at).state;
   state = Q.apply(state, { op: "pause", paused: true }, "17:doc-a:instance-a", at + 1).state;
-  state = Q.apply(state, { op: "start", userId: "second" }, "17:doc-b:instance-b", at + 2).state;
+  state = Q.apply(state, { op: "start", userId: "second", previousUserId: "first" }, "17:doc-b:instance-b", at + 2).state;
   assert.equal(state.turn.id, "second");
   assert.equal(state.paused, true);
   assert.equal(state.pauseCause, "user");
@@ -156,7 +156,7 @@ test("native Stop survives reload and does not poison the next user turn", () =>
   state = Q.apply(state, { op: "stop", userId: "stopped" }, "tab-A", at + 1).state;
   const reloaded = Q.apply(state, { op: "settle", userId: "stopped" }, "tab-B", at + 1000);
   assert.equal(reloaded.notify, false);
-  state = Q.apply(state, { op: "start", userId: "follow-up" }, "tab-A", at + 2).state;
+  state = Q.apply(state, { op: "start", userId: "follow-up", previousUserId: "stopped" }, "tab-A", at + 2).state;
   assert.equal(Q.apply(state, { op: "settle", userId: "follow-up" }, "tab-A", at + 1000).notify, true);
 });
 test("editing is revision checked and sending items cannot be deleted or reordered", () => {
@@ -187,4 +187,77 @@ test("manual correction cannot erase concurrent usage and a confirmed schedule r
   const later = U.normalize(s, at + 10000 + U.DAY * 3 * 5);
   assert.equal(later.resetAt, at + 10000 + U.DAY * 3 * 6);
   assert.equal(U.apply(next, { op: "record", turnId: "a", model: "gpt-6-pro", at }, at + 11000).state.entries.length, 1);
+});
+
+test("same browser tab cannot silently replace an unrelated branch", () => {
+  const state = Q.apply(added(),{op:"start",userId:"branch-a"},"17:doc:one",at).state;
+  const conflict = Q.apply(state,{op:"start",userId:"branch-b"},"17:doc:two",at+1);
+  assert.equal(conflict.conflict,true);
+  assert.equal(conflict.state.turn.id,"branch-a");
+  assert.equal(conflict.state.paused,true);
+  const retry = Q.apply(state,{op:"start",userId:"branch-a",generationId:"branch-a:new-answer",retryOf:"branch-a"},"17:doc:one",at+2);
+  assert.equal(retry.conflict,undefined);
+  assert.equal(retry.state.turn.id,"branch-a:new-answer");
+});
+
+test("a Stop from another branch cannot replace the active generation", () => {
+  const state = Q.apply(added(),{op:"start",userId:"active"},"17:doc:one",at).state;
+  const stopped = Q.apply(state,{op:"stop",userId:"other"},"18:doc:two",at+1);
+  assert.equal(stopped.state.turn.id,"active");
+  assert.equal(stopped.state.turn.stopped,undefined);
+  assert.equal(stopped.conflict,true);
+  assert.equal(stopped.state.paused,true);
+  const follow = Q.apply(stopped.state,{op:"start",userId:"later",previousUserId:"active"},"17:doc:one",at+2);
+  assert.equal(follow.state.paused,true);
+  assert.equal(follow.state.pauseCause,"conflict");
+});
+test("a stopped but unsettled generation still requires proof before changing branches", () => {
+  let state = Q.apply(added(),{op:"start",userId:"stopped"},"17:doc:one",at).state;
+  state = Q.apply(state,{op:"stop",userId:"stopped"},"17:doc:one",at+1).state;
+  const branch = Q.apply(state,{op:"start",userId:"unrelated-history"},"17:doc:one",at+2);
+  assert.equal(branch.conflict,true);
+  assert.equal(branch.state.turn.id,"stopped");
+  const next = Q.apply(state,{op:"start",userId:"next",previousUserId:"stopped"},"17:doc:one",at+2);
+  assert.equal(next.conflict,undefined);
+  assert.equal(next.state.turn.id,"next");
+});
+test("a late receipt acknowledges delivery without overwriting a newer branch", () => {
+  const c = claim();
+  let state = Q.apply(c.state,{op:"intent",id:c.item.id,claim:c.item.claim},"tab-A",at+2).state;
+  state = Q.apply(state,{op:"start",userId:"other-branch"},"tab-B",at+3).state;
+  const result = Q.apply(state,{op:"receipt",id:c.item.id,claim:c.item.claim,userId:"delivered",text:c.item.text},"tab-B",at+4);
+  assert.equal(result.state.items.length,0);
+  assert.equal(result.state.turn.id,"other-branch");
+  assert.equal(result.state.paused,true);
+  assert.equal(result.conflict,true);
+});
+test("receipt ownership comes from the sending lease, not an observing tab", () => {
+  const c = claim();
+  const state = Q.apply(c.state,{op:"intent",id:c.item.id,claim:c.item.claim},"tab-A",at+2).state;
+  const r = Q.apply(state,{op:"receipt",id:c.item.id,claim:c.item.claim,userId:"delivered",text:c.item.text},"tab-B",at+3);
+  assert.equal(r.state.turn.source,"tab-A");
+});
+test("pausing between claim and intent and exact lease expiry both prevent submission", () => {
+  const c = claim();
+  const paused = Q.apply(c.state,{op:"pause",paused:true},"tab-B",at+2).state;
+  assert.throws(()=>Q.apply(paused,{op:"intent",id:c.item.id,claim:c.item.claim},"tab-A",at+3));
+  assert.throws(()=>Q.apply(c.state,{op:"intent",id:c.item.id,claim:c.item.claim},"tab-A",c.item.expiresAt));
+  assert.equal(Q.normalize(c.state,c.item.expiresAt).items[0].state,"pending");
+});
+test("unknown refresh schedules never lose counted history or manual correction after 90 days", () => {
+  let state = U.apply(undefined,{op:"record",turnId:"old",model:"gpt-6-pro",at},at).state;
+  state = U.apply(state,{op:"edit",revision:state.revision,total:12,limit:50,resetAt:0},at).state;
+  const later = at + 100 * U.DAY;
+  state = U.apply(state,{op:"record",turnId:"new",model:"gpt-6-pro",at:later},later).state;
+  assert.equal(U.count(state),13);
+  assert.equal(U.apply(state,{op:"record",turnId:"old",model:"gpt-6-pro",at},later).state.entries.length,2);
+});
+test("known cycles prune old dedup records without changing current totals; invalid dates are rejected", () => {
+  let state = U.apply(undefined,{op:"record",turnId:"old",model:"gpt-6-pro",at},at).state;
+  assert.throws(()=>U.apply(state,{op:"edit",revision:state.revision,limit:50,resetAt:"not-a-date"},at));
+  state = U.apply(state,{op:"edit",revision:state.revision,limit:50,resetAt:at+U.DAY},at).state;
+  const later = at + 100 * U.DAY;
+  state = U.apply(state,{op:"record",turnId:"new",model:"gpt-6-pro",at:later},later).state;
+  assert.equal(U.count(state),1);
+  assert.equal(state.entries.length,1);
 });

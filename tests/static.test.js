@@ -37,3 +37,15 @@ test("dist contains only the thin extension runtime", () => {
     assert.equal(fs.existsSync(path.join(outputDir, forbidden)), false, `${forbidden} must not be packaged`);
   }
 });
+test("CI and releases share the allowlist and include the required upstream license", () => {
+  assert.ok(RUNTIME_FILES.includes("THIRD_PARTY_NOTICES.md"));
+  for (const workflow of ["ci.yml", "auto-release.yml"]) {
+    const source = fs.readFileSync(path.join(root,".github/workflows",workflow),"utf8");
+    assert.match(source,/npm run build/);
+    assert.match(source,/cp -a dist\/\./);
+    assert.doesNotMatch(source,/rsync -a \.\//);
+  }
+  const release = fs.readFileSync(path.join(root,".github/workflows/auto-release.yml"),"utf8");
+  assert.match(release,/paths:\s+- manifest\.json/);
+  assert.ok(release.indexOf("refusing a mismatched release") < release.indexOf('if gh release view "$TAG"'));
+});

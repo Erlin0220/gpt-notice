@@ -12,7 +12,8 @@ const RUNTIME_FILES = [
   "popup.html",
   "popup.css",
   "popup.js",
-  "icons/chatgpt.png"
+  "icons/chatgpt.png",
+  "THIRD_PARTY_NOTICES.md"
 ];
 
 function buildExtension(projectRoot = path.resolve(__dirname, "..")) {

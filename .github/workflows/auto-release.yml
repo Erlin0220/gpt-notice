@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths:
+      - manifest.json
   workflow_dispatch:
 
 permissions:
@@ -50,8 +52,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          TAG_SHA="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
+          if [[ -n "$TAG_SHA" && "$TAG_SHA" != "${{ steps.version.outputs.target_sha }}" ]]; then
+            echo "Tag $TAG does not match the source being packaged; refusing a mismatched release." >&2
+            exit 1
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            TAG_SHA="$(git rev-list -n 1 "$TAG" 2>/dev/null || true)"
             if [[ -z "$TAG_SHA" || "$TAG_SHA" != "${{ steps.version.outputs.target_sha }}" ]]; then
               echo "Release $TAG already exists but does not point to current main." >&2
               exit 1
@@ -87,27 +93,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf dist package
-          mkdir -p package/chatgpt-task-notifier dist
-          rsync -a ./ package/chatgpt-task-notifier/ \
-            --exclude='.git/' \
-            --exclude='.github/' \
-            --exclude='.release/' \
-            --exclude='.release-trigger-*' \
-            --exclude='dist/' \
-            --exclude='package/' \
-            --exclude='node_modules/' \
-            --exclude='tests/' \
-            --exclude='scripts/' \
-            --exclude='docs/' \
-            --exclude='.test-profile/' \
-            --exclude='.playwright-cli/' \
-            --exclude='test-results/' \
-            --exclude='playwright-report/' \
-            --exclude='package.json' \
-            --exclude='package-lock.json' \
-            --exclude='playwright.config.js' \
-            --exclude='.gitignore'
+          npm run build
+          rm -rf package
+          mkdir -p package/chatgpt-task-notifier
+          cp -a dist/. package/chatgpt-task-notifier/
+          rm -rf dist
+          mkdir -p dist
           cd package
           zip -qr "../dist/chatgpt-task-notifier-v${VERSION}.zip" chatgpt-task-notifier
           cd ../dist

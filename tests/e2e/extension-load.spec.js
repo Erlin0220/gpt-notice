@@ -12,6 +12,7 @@ test("MV3 loads and popup lists only pending conversation queues",async({page,ex
   expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.0");
   await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  await page.bringToFront();await popup.reload();
   await expect(popup.locator("h1")).toHaveText("ChatGPT Queue");await expect(popup.locator("#queues a")).toHaveCount(1);
 });
 test("home and project first sends change modes without replacing the UI root",async({page,extensionServiceWorker})=>{
@@ -165,11 +166,16 @@ test("stale content script after extension reload asks for a page refresh instea
   test.setTimeout(30000);
   await page.goto('https://chatgpt.com/c/reload-required');await expect(button(page,'add')).toBeVisible();await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'saved before extension reload');
   await button(page,'queue').click();await expect(page.locator(`${host} .queue-panel`)).toBeVisible();
+  await page.locator('#prompt-textarea').fill('draft survives extension reload');
+  await page.evaluate(()=>{const chip=document.createElement('button');chip.type='button';chip.id='reload-attachment';chip.setAttribute('aria-label','删除图片');chip.textContent='image';document.querySelector('form').append(chip);});
   await extensionServiceWorker.evaluate(()=>chrome.runtime.reload());
-  await page.waitForTimeout(500);
-  await button(page,'remove').click();
+  await page.waitForTimeout(1500);
+  await expect(button(page,'remove')).toBeDisabled();
   await expect(page.locator(`${host} .notice`)).toContainText('扩展已更新，请刷新当前页面后再操作');
   await expect(page.locator(`${host} .count`)).toHaveText('1');
+  await expect(page.locator('#prompt-textarea')).toHaveText('draft survives extension reload');
+  await expect(page.locator('#reload-attachment')).toBeVisible();
+  expect(await page.evaluate(()=>window.clickCount)).toBe(0);
 });
 test("native Send preempting the queue click cannot return a delivered item to pending",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/preempt');await expect(button(page,'add')).toBeVisible();await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'preempted queue text');
@@ -197,14 +203,14 @@ test("a legacy false-concurrency pause recovers on a single conversation tab and
   await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:20000}).toBe(1);
   expect(await page.evaluate(()=>window.sent[0].text)).toBe('recover queued');
 });
-test("regeneration counts and notifies independently without duplicate observations",async({page,extensionServiceWorker})=>{
+test("regeneration notifies independently but never invents another native user usage ID",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/regenerate');await expect(button(page,'add')).toBeVisible();await page.evaluate(()=>window.model='gpt-6-pro');
   await page.locator('#prompt-textarea').fill('first response');await page.locator('#composer-submit-button').click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
   await page.evaluate(()=>{const retry=document.createElement('button');retry.textContent='Retry';retry.id='native-retry';retry.onclick=()=>{const id=crypto.randomUUID();addMessage('assistant',id,'regenerating',window.model);const stop=document.createElement('button');stop.dataset.testid='stop-button';stop.textContent='停止';document.querySelector('form').append(stop);setTimeout(()=>window.finish('regenerated'),400);};document.querySelector('main').append(retry);});
   await page.locator('#native-retry').click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(2);
-  expect((await snapshot(extensionServiceWorker)).usage[0].entries).toHaveLength(2);
+  expect((await snapshot(extensionServiceWorker)).usage[0].entries).toHaveLength(1);
   await page.waitForTimeout(3000);expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(2);
 });
 test("an old error and a stopped previous reply do not poison a successful follow-up",async({page,extensionServiceWorker})=>{
@@ -221,4 +227,122 @@ test("a large historical transcript keeps tail detection and button identity sta
   await page.evaluate(()=>{window.originalQueueButton=document.getElementById('chatgpt-message-queue-root').shadowRoot.querySelector('[data-action="queue"]');const fragment=document.createDocumentFragment();for(let i=0;i<1500;i++){const turn=document.createElement('section');turn.dataset.testid='conversation-turn-history-'+i;const message=document.createElement('div');message.dataset.messageAuthorRole=i%2?'assistant':'user';message.dataset.messageId='history-'+i;message.textContent='historical text '.repeat(20);turn.append(message);fragment.append(turn);}document.getElementById('messages').prepend(fragment);});
   await enqueue(page,'tail still works');await button(page,'queue').click();await expect(page.locator(`${host} .preview`)).toHaveText('tail still works');
   expect(await page.evaluate(()=>window.originalQueueButton===document.getElementById('chatgpt-message-queue-root').shadowRoot.querySelector('[data-action="queue"]'))).toBe(true);
+});
+
+test("native network send increments Pro usage without any assistant model DOM",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/network-only');await expect(button(page,'add')).toBeVisible();
+  await page.evaluate(()=>{window.model='gpt-6-pro';window.autoReply=false;window.renderAssistant=false;document.querySelectorAll('[data-message-model-slug]').forEach(n=>n.removeAttribute('data-message-model-slug'));});
+  await page.locator('#prompt-textarea').fill('fixture-only network observation');await page.locator('#composer-submit-button').click();
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0]?.entries.length,{timeout:5000}).toBe(1);
+  const id=await page.evaluate(()=>window.sent[0].id);
+  expect((await snapshot(extensionServiceWorker)).usage[0].entries[0].id).toBe(id);
+  expect(await page.locator('[data-message-model-slug]').count()).toBe(0);
+});
+
+test("cancelled native request before send headers does not count or create a second send",async({page,persistentContext,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/cancelled-network');await expect(button(page,'add')).toBeVisible();
+  const cdp=await persistentContext.newCDPSession(page);
+  await cdp.send('Network.enable');
+  await cdp.send('Network.setBlockedURLs',{urls:['*://chatgpt.com/backend-api/f/conversation']});
+  await page.evaluate(()=>{window.model='gpt-6-pro';window.autoReply=false;window.renderAssistant=true;});
+  await page.locator('#prompt-textarea').fill('cancelled fixture request');await page.locator('#composer-submit-button').click();
+  await page.waitForTimeout(2500);
+  expect((await snapshot(extensionServiceWorker)).usage[0]?.entries.length||0).toBe(0);
+  await expect(page.locator('[data-message-model-slug="gpt-6-pro"]')).toHaveCount(1);
+  expect(await page.evaluate(()=>window.clickCount)).toBe(1);
+  await cdp.detach();
+});
+
+test("Chinese image removal controls and secondary file inputs protect composer attachments",async({page})=>{
+  await page.goto('https://chatgpt.com/c/chinese-attachments');await expect(button(page,'add')).toBeVisible();
+  await page.evaluate(()=>{const form=document.querySelector('form');const remove=document.createElement('button');remove.type='button';remove.id='remove-image';remove.setAttribute('aria-label','移除图片');remove.textContent='X';form.append(remove);});
+  await page.locator('#prompt-textarea').fill('text stays with image');
+  await expect(button(page,'add')).toBeDisabled();
+  await expect(page.locator('#prompt-textarea')).toHaveText('text stays with image');
+  await page.evaluate(()=>{document.getElementById('remove-image').remove();const form=document.querySelector('form');for(let i=0;i<2;i++){const input=document.createElement('input');input.type='file';input.hidden=true;input.id='upload-'+i;form.append(input);}const transfer=new DataTransfer();transfer.items.add(new File(['fixture'],'local-image.png',{type:'image/png'}));document.getElementById('upload-1').files=transfer.files;});
+  await expect(button(page,'add')).toBeDisabled();
+  await page.evaluate(()=>{document.querySelectorAll('input[type=file]').forEach(n=>n.value='');});
+  await expect(button(page,'add')).toBeEnabled();
+  expect(await page.evaluate(()=>window.clickCount)).toBe(0);
+});
+
+test("native overlay intersecting only an open editor yields without losing its text",async({page},testInfo)=>{
+  await page.goto('https://chatgpt.com/c/panel-overlay');await expect(button(page,'add')).toBeVisible();
+  await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'saved editor text');
+  await button(page,'queue').click();await button(page,'edit').click();await page.locator(`${host} textarea`).fill('unsaved editor draft');
+  const panel=await page.locator(`${host} .edit-panel`).boundingBox();
+  const bar=await page.locator(host).boundingBox();expect(panel.y+panel.height).toBeLessThan(bar.y);
+  await page.evaluate(({x,y})=>{const overlay=document.createElement('div');overlay.id='only-panel-menu';overlay.setAttribute('popover','manual');overlay.style.cssText=`position:fixed;inset:auto;margin:0;left:${x+10}px;top:${y+10}px;width:100px;height:35px;background:white`;overlay.textContent='Native menu';document.body.append(overlay);overlay.showPopover();},panel);
+  await expect(page.locator(host)).toHaveAttribute('data-native-overlay','');
+  await expect(page.locator(`${host} .edit-panel`)).toBeHidden();
+  await page.evaluate(()=>{document.getElementById('only-panel-menu').hidePopover();document.getElementById('only-panel-menu').remove();});
+  await expect(page.locator(host)).not.toHaveAttribute('data-native-overlay','');
+  await expect(page.locator(`${host} textarea`)).toHaveValue('unsaved editor draft');
+  await page.screenshot({path:testInfo.outputPath('editor-survives-native-popover.png')});
+});
+
+test("same-node account bootstrap updates and workspace switches never mix pending queues",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/scope-switch');await expect(button(page,'add')).toBeVisible();
+  await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'account A saved');
+  await page.locator('#prompt-textarea').fill('native draft remains');
+  await page.evaluate(()=>{const node=document.getElementById('client-bootstrap');const value=JSON.parse(node.textContent);value.user.id='another-user';node.textContent=JSON.stringify(value);});
+  await expect(page.locator(`${host} .count`)).toHaveText('0');
+  await expect(page.locator('#prompt-textarea')).toHaveText('native draft remains');
+  await page.evaluate(()=>{const node=document.getElementById('client-bootstrap');const value=JSON.parse(node.textContent);value.user.id='regression-user';node.textContent=JSON.stringify(value);});
+  await expect(page.locator(`${host} .count`)).toHaveText('1');
+  await page.evaluate(()=>localStorage.setItem('_account','another-workspace'));
+  await expect(page.locator(`${host} .count`)).toHaveText('0');
+  expect((await snapshot(extensionServiceWorker)).queues.filter(q=>q.items.length).length).toBe(1);
+  expect(await page.evaluate(()=>window.clickCount)).toBe(0);
+});
+
+test("homepage persists a configured refresh boundary without entering a conversation",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage.length).toBe(1);
+  await extensionServiceWorker.evaluate(async()=>{const all=await chrome.storage.local.get(null);const [key,value]=Object.entries(all).find(([k])=>k.startsWith('notice:usage:'));value.resetAt=Date.now()-1000;value.correction=12;value.baselineKnown=true;value.revision++;await chrome.storage.local.set({[key]:value});});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0].resetAt).toBeGreaterThan(Date.now());
+  expect((await snapshot(extensionServiceWorker)).usage[0].correction).toBe(0);
+  await expect(button(page,'queue')).toBeHidden();
+});
+
+test("a stale tab showing an older answer cannot finish a newer regeneration",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/stale-regeneration');await expect(button(page,'add')).toBeVisible();
+  await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'must wait for actual regeneration');
+  await extensionServiceWorker.evaluate(async()=>{const all=await chrome.storage.local.get(null);const [key,q]=Object.entries(all).find(([k])=>k.startsWith('notice:conversation:'));const user='baseline-/c/stale-regeneration';q.turn={id:user+':new-regeneration',userId:user,source:'other-tab',at:Date.now(),done:false};q.paused=false;q.pauseCause='';q.reason='';q.revision++;await chrome.storage.local.set({[key]:q});});
+  await page.waitForTimeout(6500);
+  expect((await snapshot(extensionServiceWorker)).queues[0].turn.done).toBe(false);
+  expect(await page.evaluate(()=>window.clickCount)).toBe(0);
+  expect((await snapshot(extensionServiceWorker)).notifications.length).toBe(0);
+});
+
+test("a terminated MV3 worker wakes from a queue action with durable state intact",async({page,persistentContext,extensionServiceWorker,extensionId})=>{
+  await page.goto('https://chatgpt.com/c/worker-restart');await expect(button(page,'add')).toBeVisible();
+  await button(page,'queue').click();await button(page,'pause').click();await button(page,'close').first().click();await enqueue(page,'exactly once after worker restart');
+  await extensionServiceWorker.evaluate(()=>{globalThis.ephemeralRestartProbe=true;});
+  const cdp=await persistentContext.newCDPSession(page);
+  const {targetInfos}=await cdp.send('Target.getTargets');
+  const target=targetInfos.find(t=>t.type==='service_worker'&&t.url.startsWith(`chrome-extension://${extensionId}/`));
+  expect(target).toBeTruthy();
+  await cdp.send('Target.closeTarget',{targetId:target.targetId});
+  await button(page,'queue').click();await button(page,'pause').click();
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:18000}).toBe(1);
+  const worker=persistentContext.serviceWorkers().find(w=>w.url().startsWith(`chrome-extension://${extensionId}/`));
+  expect(await worker.evaluate(()=>globalThis.ephemeralRestartProbe)).toBeUndefined();
+  await expect(page.locator(`${host} .count`)).toHaveText('0');
+  await page.waitForTimeout(4500);expect(await page.evaluate(()=>window.sent.length)).toBe(1);
+  await cdp.detach();
+});
+
+test("DOM fallback waits for a confirmed reply and uses the native user ID",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/dom-fallback');await expect(button(page,'add')).toBeVisible();
+  // Fault-inject only the observer in this isolated fixture worker; native UI
+  // and its intercepted request still run, and the usage store remains intact.
+  await extensionServiceWorker.evaluate(()=>{submittedUsage=()=>null;});
+  await page.evaluate(()=>{window.model='gpt-6-pro';window.autoReply=false;});
+  await page.locator('#prompt-textarea').fill('fixture DOM fallback');await page.locator('#composer-submit-button').click();
+  await page.waitForTimeout(2000);
+  expect((await snapshot(extensionServiceWorker)).usage[0]?.entries.length||0).toBe(0);
+  await page.evaluate(()=>window.finish('completed fixture reply'));
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).usage[0]?.entries.length,{timeout:10000}).toBe(1);
+  expect((await snapshot(extensionServiceWorker)).usage[0].entries[0].id).toBe(await page.evaluate(()=>window.sent[0].id));
 });

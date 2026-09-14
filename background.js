@@ -7,48 +7,67 @@ const serial = fn => {
   mutations = next.catch(() => {});
   return next;
 };
-const TAB_SCOPE_PREFIX = "notice:tab-scope:";
-const tabScopes = new Map();
-const tabScopeKey = tabId => `${TAB_SCOPE_PREFIX}${tabId}`;
-async function rememberTabScope(tabId, scope) {
-  if (tabScopes.get(tabId) === scope) return;
-  tabScopes.set(tabId, scope);
-  try { await chrome.storage.session.set({ [tabScopeKey(tabId)]: { scope, at: Date.now() } }); } catch {}
-}
-async function scopeForTab(tabId) {
-  const memory = tabScopes.get(tabId);
-  if (memory) return memory;
+const PAGE_URLS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
+const REQUEST_PREFIX = "notice:request:";
+const CLEANUP_KEY = "notice:last-cleanup";
+const REQUEST_TTL = 10 * 60_000;
+const REQUEST_FILTER = {
+  urls: ["chatgpt.com", "chat.openai.com"].flatMap(host => [
+    `https://${host}/backend-api/f/conversation*`, `https://${host}/backend-api/conversation*`
+  ]), types: ["xmlhttprequest"]
+};
+const nativePost = details => details.method === "POST" && /^https:\/\/(?:chatgpt\.com|chat\.openai\.com)\/backend-api\/(?:f\/)?conversation(?:\?|$)/.test(details.url);
+let lastCleanup = 0;
+async function pageContext(tabId, documentId) {
+  // Tab IDs survive worker restarts, but are not account/document identities.
+  // Ask the exact live document; never reuse an unbounded tab -> account cache.
+  let timer;
   try {
-    const key = tabScopeKey(tabId);
-    const value = (await chrome.storage.session.get(key))[key];
-    if (/^[a-f0-9]{64}$/.test(value?.scope || "")) {
-      tabScopes.set(tabId, value.scope);
-      return value.scope;
-    }
-  } catch {}
-  return "";
+    const value = await Promise.race([
+      chrome.tabs.sendMessage(tabId, { type: "NOTICE_SCOPE" }, { frameId: 0, ...(documentId ? { documentId } : {}) }),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000); })
+    ]);
+    return /^[a-f0-9]{64}$/.test(value?.scope || "") && Queue.route(value.url).mode !== "off" ? value : null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
 }
 function requestJson(requestBody) {
-  if (!requestBody?.raw?.length) return null;
+  const parts = requestBody?.raw;
+  if (!parts?.length || parts.some(part => !part.bytes || part.file) || parts.reduce((n, part) => n + part.bytes.byteLength, 0) > 2_000_000) return null;
   try {
-    const text = requestBody.raw.map(part => part.bytes ? new TextDecoder().decode(part.bytes) : "").join("");
-    return JSON.parse(text);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    return JSON.parse(parts.map(part => decoder.decode(part.bytes, { stream: true })).join("") + decoder.decode());
   } catch { return null; }
 }
-async function recordSubmittedUsage(details) {
-  if (details.method !== "POST" || !Number.isInteger(details.tabId) || details.tabId < 0) return;
+function submittedUsage(details) {
+  if (!nativePost(details) || !Number.isInteger(details.tabId) || details.tabId < 0 || details.frameId !== 0 || !details.documentId || !/^[\w.-]{1,100}$/.test(details.requestId || "")) return null;
+  if (!/^https:\/\/(?:chatgpt\.com|chat\.openai\.com)$/.test(details.initiator || "")) return null;
   const body = requestJson(details.requestBody);
   const model = String(body?.model || "");
-  if (body?.action !== "next" || !Usage.MODELS.has(model)) return;
+  if (body?.action !== "next" || !Usage.MODELS.has(model)) return null;
   const message = [...(Array.isArray(body.messages) ? body.messages : [])].reverse().find(item => item?.author?.role === "user");
   const turnId = String(message?.id || "");
-  if (!/^[\w:-]{1,220}$/.test(turnId)) return;
-  const scope = await scopeForTab(details.tabId);
-  if (!scope) return;
-  const usageKey = Usage.PREFIX + scope;
+  if (!/^[\w:-]{1,220}$/.test(turnId)) return null;
+  // No prompt, attachment, headers, response, token or account ID is retained.
+  return { turnId, model, tabId: details.tabId, documentId: details.documentId, requestId: details.requestId, at: Date.now() };
+}
+async function captureUsage(observation) {
+  const context = await pageContext(observation.tabId, observation.documentId);
+  if (!context) return;
+  await pruneStorage().catch(() => {});
+  await chrome.storage.session.set({ [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope } });
+}
+async function recordSubmittedUsage(details) {
+  const key = REQUEST_PREFIX + details.requestId;
+  const observation = (await chrome.storage.session.get(key))[key];
+  if (!observation || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL) return;
+  const context = await pageContext(details.tabId, details.documentId);
+  if (context?.scope !== observation.scope) { await chrome.storage.session.remove(key); return; }
+  const usageKey = Usage.PREFIX + observation.scope;
   const stored = await chrome.storage.local.get(usageKey);
-  const result = Usage.apply(stored[usageKey], { op: "record", turnId, model, at: Date.now() });
+  const result = Usage.apply(stored[usageKey], { op: "record", turnId: observation.turnId, model: observation.model, at: Date.now() });
   if (result.changed) await chrome.storage.local.set({ [usageKey]: result.state });
+  await chrome.storage.session.remove(key);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
@@ -56,40 +75,46 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   return true;
 });
 chrome.webRequest.onBeforeRequest.addListener(details => {
+  const observation = submittedUsage(details);
+  if (observation) void serial(() => captureUsage(observation)).catch(() => {});
+}, REQUEST_FILTER, ["requestBody"]);
+// onBeforeRequest precedes connection establishment and cancellation. Count at
+// the last read-only send boundary, not on a click or an attempted request.
+chrome.webRequest.onSendHeaders.addListener(details => {
+  if (!nativePost(details)) return;
   void serial(() => recordSubmittedUsage(details)).catch(() => {});
-}, {
-  urls: [
-    "https://chatgpt.com/backend-api/f/conversation",
-    "https://chat.openai.com/backend-api/f/conversation"
-  ]
-}, ["requestBody"]);
-chrome.notifications.onClicked.addListener(id => void openNotice(id));
-chrome.notifications.onButtonClicked.addListener(id => void openNotice(id));
-chrome.notifications.onClosed.addListener(id => void chrome.storage.local.remove(`notice:notification:${id}`));
-chrome.tabs.onRemoved.addListener(tabId => {
-  tabScopes.delete(tabId);
-  void chrome.storage.session.remove(tabScopeKey(tabId)).catch(() => {});
-});
+}, REQUEST_FILTER);
+for (const event of [chrome.webRequest.onCompleted, chrome.webRequest.onErrorOccurred]) {
+  event.addListener(details => { if (nativePost(details)) void serial(() => chrome.storage.session.remove(REQUEST_PREFIX + details.requestId)).catch(() => {}); }, REQUEST_FILTER);
+}
+chrome.notifications.onClicked.addListener(id => void openNotice(id).catch(() => {}));
+chrome.notifications.onButtonClicked.addListener(id => void openNotice(id).catch(() => {}));
+chrome.notifications.onClosed.addListener(id => void chrome.storage.local.remove(`notice:notification:${id}`).catch(() => {}));
 
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可读取概览");
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: PAGE_URLS });
+    const context = tab && await pageContext(tab.id);
     const stored = await chrome.storage.local.get(null);
-    const queues = Object.entries(stored).filter(([k]) => k.startsWith(Queue.PREFIX)).map(([k, q]) => ({ key: k, url: q.url, count: q.items?.length || 0, paused: q.paused })).filter(q => q.count);
-    return { ok: true, queues, enabled: stored["notice:notifications"] !== false };
+    const queues = context ? Object.entries(stored).filter(([k]) => k.startsWith(`${Queue.PREFIX}${context.scope}:`)).map(([k, q]) => ({ key: k, url: q?.url, count: q?.items?.length || 0, paused: q?.paused })).filter(q => q.count && Queue.route(q.url).mode === "conversation") : [];
+    return { ok: true, queues, scopeKnown: Boolean(context), enabled: stored["notice:notifications"] !== false };
   }
   if (message?.type === "NOTICE_SETTING") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可修改设置");
     await chrome.storage.local.set({ "notice:notifications": message.enabled !== false });
     return { ok: true };
   }
-  if (message?.type !== "NOTICE" || !Number.isInteger(sender.tab?.id) || !/^[a-f0-9]{64}$/.test(message.scope || "")) throw new Error("无效的页面上下文");
-  await rememberTabScope(sender.tab.id, message.scope);
+  if (message?.type !== "NOTICE" || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.documentId || !/^[a-f0-9]{64}$/.test(message.scope || "")) throw new Error("无效的页面上下文");
   const route = Queue.route(message.url);
   const actual = Queue.route((await chrome.tabs.get(sender.tab.id)).url);
   if (route.mode === "off" || route.mode !== actual.mode || route.id !== actual.id) throw new Error("页面已切换，操作已取消");
+  const context = await pageContext(sender.tab.id, sender.documentId);
+  const liveRoute = Queue.route(context?.url);
+  if (context?.scope !== message.scope || liveRoute.mode !== route.mode || liveRoute.id !== route.id) throw new Error("账号、Workspace 或页面已切换，操作已取消");
   const usageKey = Usage.PREFIX + message.scope;
   const queueKey = Queue.key(message.scope, message.url);
+  await pruneStorage(queueKey).catch(() => {});
   const owner = `${sender.tab.id}:${sender.documentId || "document"}:${String(message.instance || "").slice(0,80)}`;
   if (message.usage) {
     const stored = await chrome.storage.local.get(usageKey);
@@ -108,7 +133,7 @@ async function handle(message, sender) {
   const raw = stored[queueKey];
   let command = message.command || { op: "get" };
   if (command.op === "start") {
-    const tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.openai.com/*"] });
+    const tabs = await chrome.tabs.query({ url: PAGE_URLS });
     const sameConversation = tabs.filter(tab => Queue.route(tab.url).id === route.id);
     command = { ...command, singleTab: sameConversation.length === 1 };
   }
@@ -138,7 +163,7 @@ async function handle(message, sender) {
         title: "ChatGPT 已完成", message: "当前回复已结束，Queue 已空。点击返回对应对话。", priority: 1
       });
     } catch (error) { notificationError = error.message; }
-    await pruneNotices();
+    await pruneNotices().catch(() => {});
   }
   return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
 }
@@ -148,26 +173,52 @@ async function openNotice(id) {
   const notice = (await chrome.storage.local.get(key))[key];
   if (!notice || Queue.route(notice.url).mode !== "conversation") return;
   const desired = Queue.route(notice.url).id;
-  const tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://chat.openai.com/*"] });
+  const tabs = await chrome.tabs.query({ url: PAGE_URLS });
   // A reused tab may now contain a different conversation.
-  const tab = tabs.find(t => t.id === notice.tabId && Queue.route(t.url).id === desired) || tabs.find(t => Queue.route(t.url).id === desired);
+  const candidates = tabs.filter(t => Queue.route(t.url).id === desired).sort((a, b) => Number(b.id === notice.tabId) - Number(a.id === notice.tabId));
+  let tab;
+  for (const candidate of candidates) {
+    if ((await pageContext(candidate.id))?.scope === notice.scope) { tab = candidate; break; }
+  }
   if (tab) {
     await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
-  } else await chrome.tabs.create({ url: notice.url, active: true });
+  } else {
+    const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: PAGE_URLS });
+    if (!active || (await pageContext(active.id))?.scope !== notice.scope) return;
+    await chrome.tabs.create({ url: notice.url, active: true });
+  }
   await chrome.notifications.clear(id);
   await chrome.storage.local.remove(key);
 }
 
-async function pruneNotices() {
-  const stored = await chrome.storage.local.get(null);
+async function pruneNotices(stored) {
+  stored ||= await chrome.storage.local.get(null);
   const notices = Object.entries(stored).filter(([key]) => key.startsWith("notice:notification:"))
-    .sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
-  const expired = notices.filter(([, value], index) => index >= 100 || Date.now() - value.at > 7 * 86400000).map(([key]) => key);
+    .sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0));
+  const expired = notices.filter(([, value], index) => index >= 100 || !Number.isFinite(value?.at) || Date.now() - value.at > 7 * 86400000).map(([key]) => key);
   if (expired.length) {
     await Promise.all(expired.map(key => chrome.notifications.clear(key.slice("notice:notification:".length))));
     await chrome.storage.local.remove(expired);
   }
 }
 
-// Old storage is an inert backup. No background task runtime or queue migration.
+async function pruneStorage(keepKey = "") {
+  const now = Date.now();
+  if (lastCleanup && now - lastCleanup < 3600_000) return;
+  const previous = (await chrome.storage.session.get(CLEANUP_KEY))[CLEANUP_KEY];
+  if (previous > 0 && previous <= now && now - previous < 3600_000) { lastCleanup = previous; return; }
+  const stored = await chrome.storage.local.get(null);
+  // Never expire user text, unresolved intent, explicit pause or an active turn.
+  // Only empty, completed, inactive v8 bookkeeping can be reclaimed.
+  const expired = Object.entries(stored).filter(([key, q]) => key !== keepKey && key.startsWith(Queue.PREFIX) && q?.version === 8 && Array.isArray(q.items) && q.items.length === 0 && !q.paused && !q.holdUntil && (!q.turn || q.turn.done === true) && q.updatedAt > 0 && now - q.updatedAt > 30 * 86400_000).map(([key]) => key);
+  if (expired.length) await chrome.storage.local.remove(expired);
+  await pruneNotices(stored);
+  const session = await chrome.storage.session.get(null);
+  const abandoned = Object.entries(session).filter(([key, value]) => key.startsWith(REQUEST_PREFIX) && (!Number.isFinite(value?.at) || now - value.at > REQUEST_TTL)).map(([key]) => key);
+  if (abandoned.length) await chrome.storage.session.remove(abandoned);
+  await chrome.storage.session.set({ [CLEANUP_KEY]: now });
+  lastCleanup = now;
+}
+
+// Legacy storage is an inert backup: never migrate or delete unknown user data.

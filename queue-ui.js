@@ -3,7 +3,7 @@
   const CSS = `
     :host{all:initial;position:fixed;display:block;z-index:9;pointer-events:none;font:12px/1.45 system-ui,sans-serif;color:var(--n-fg,#252525);transform:translateY(-100%)}
     *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
-    :host([data-native-overlay]) .bar,:host([data-native-overlay]) .notice{visibility:hidden!important;pointer-events:none!important}
+    :host([data-native-overlay]) .bar,:host([data-native-overlay]) .panel,:host([data-native-overlay]) .notice{visibility:hidden!important;pointer-events:none!important}
     .bar{display:flex;align-items:center;gap:6px;justify-content:flex-end;min-height:32px;pointer-events:none}
     button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--n-line,#ddd);border-radius:9px;padding:6px 10px;background:var(--n-bg,#fff);min-height:30px;pointer-events:auto}
     button:hover{background:var(--n-hover,#f0f0f0)}button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #538ae8;outline-offset:2px}button:disabled{opacity:.45;cursor:default}
@@ -28,18 +28,18 @@
       <section class="panel edit-panel" hidden aria-label="编辑已保存的队列消息"><header><strong>编辑 Queue 消息</strong></header><label>已保存的文本<textarea name="edit" maxlength="200000"></textarea></label><footer><button data-action="cancel-edit">取消</button><button data-action="save-edit">保存</button></footer></section><div class="notice" hidden role="status"></div>`;
     document.body.appendChild(host);
     const $ = s => shadow.querySelector(s);
-    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, overlayTimer = 0, anchorNode = null, geometry = "", signature = "", noticeTimer;
+    let model = {}, editing = null, usageRevision = 0, lastKey = "", frame = 0, overlayTimer = 0, anchorNode = null, geometry = "", signature = "", noticeTimer, retired = false;
     const close = () => { for (const panel of shadow.querySelectorAll(".panel")) panel.hidden = true; $('[data-action="queue"]').setAttribute("aria-expanded", "false"); editing = null; };
-    const showNotice = value => {
+    const showNotice = (value, persistent = false) => {
       clearTimeout(noticeTimer);
       $(".notice").textContent = value || "";
       $(".notice").hidden = !value;
-      noticeTimer = setTimeout(() => { $(".notice").hidden = true; }, 7000);
+      if (!persistent) noticeTimer = setTimeout(() => { $(".notice").hidden = true; }, 7000);
     };
     shadow.addEventListener("keydown", event => { if (event.key === "Escape") { close(); event.stopPropagation(); } });
     shadow.addEventListener("click", async event => {
       const button = event.target.closest("button[data-action]");
-      if (!button || button.disabled) return;
+      if (!button || button.disabled || retired) return;
       const action = button.dataset.action;
       if (["queue", "usage", "edit"].includes(action)) position(true);
       const item = model.queue?.items.find(i => i.id === button.dataset.id);
@@ -70,16 +70,16 @@
         await onAction(action, payload);
         if (action.startsWith("save-")) close();
       } catch (error) { showNotice(error.message); }
-      finally { button.disabled = false; }
+      finally { button.disabled = retired; }
     });
     const observer = new ResizeObserver(() => position());
-    const nativeFloatingSelector = '.popover,[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
+    const nativeFloatingSelector = '.popover,[popover]:popover-open,dialog[open],[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
     const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-    function nativeOverlayOverlaps(rect) {
+    function nativeOverlayOverlaps(regions) {
       for (const node of document.querySelectorAll(nativeFloatingSelector)) {
         const style = getComputedStyle(node);
         const overlay = node.getBoundingClientRect();
-        if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && overlay.width > 0 && overlay.height > 0 && intersects(rect, overlay)) return true;
+        if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && overlay.width > 0 && overlay.height > 0 && regions.some(rect => intersects(rect, overlay))) return true;
       }
       return false;
     }
@@ -93,8 +93,10 @@
       const left = Math.max(12, Math.min(rect.left, innerWidth - width - 12));
       const next = `${Math.round(left)}:${Math.round(rect.top - 6)}:${Math.round(width)}`;
       if (geometry !== next) { geometry = next; host.style.left = `${left}px`; host.style.top = `${rect.top - 6}px`; host.style.width = `${width}px`; }
-      const nativeOverlay = !host.hidden && nativeOverlayOverlaps(host.getBoundingClientRect());
-      if (nativeOverlay) close();
+      // Absolutely positioned panels are outside the host/bar rectangle. Hide,
+      // rather than destroy them, so an in-progress edit survives a native menu.
+      const regions = [host.getBoundingClientRect(), ...[...shadow.querySelectorAll('.panel:not([hidden]), .notice:not([hidden])')].map(n => n.getBoundingClientRect())];
+      const nativeOverlay = !host.hidden && nativeOverlayOverlaps(regions);
       host.toggleAttribute("data-native-overlay", nativeOverlay);
     }
     function position(immediate = false) {
@@ -111,7 +113,9 @@
     };
     document.addEventListener("click", rescanNativeOverlay, { capture: true, passive: true });
     document.addEventListener("keydown", rescanNativeOverlay, { capture: true, passive: true });
+    document.addEventListener("toggle", rescanNativeOverlay, { capture: true, passive: true });
     function render(next) {
+      if (retired) return;
       model = next;
       if (lastKey !== next.key) { lastKey = next.key; close(); signature = ""; }
       const usage = globalThis.ChatGPTUsage.summary(next.usage);
@@ -119,7 +123,7 @@
       $(".usage").title = next.scope ? usage.resetLabel : "GPT-6 用量设置";
       $(".source").textContent = usage.sourceLabel;
       $(".reset").textContent = usage.resetLabel;
-      $(".config").textContent = `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Sol Pro 共用这组 Chat 额度，不包含 Thinking、Work 或 Codex。首次使用日期：${usage.firstUseDate}。`;
+      $(".config").textContent = `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Pro 计入这组本地额度，不包含 Thinking、Work 或 Codex。首次使用日期：${usage.firstUseDate}。`;
       for (const name of ["add", "queue"]) $(`[data-action="${name}"]`).hidden = next.mode !== "conversation";
       $('[data-action="add"]').disabled = !next.scope || next.actionBusy || next.attachments;
       $('[data-action="add"]').title = next.attachments ? "图片/附件暂不支持加入 Queue；请使用 ChatGPT 原生发送" : "把当前纯文本草稿加入 Queue";
@@ -148,8 +152,10 @@
       }
       position();
     }
-    return { host, render, showNotice, anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
-      dispose() { clearTimeout(noticeTimer); clearTimeout(overlayTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("click",rescanNativeOverlay,true); document.removeEventListener("keydown",rescanNativeOverlay,true); host.remove(); } };
+    return { host, render, showNotice,
+      deactivate(message) { retired = true; for (const button of shadow.querySelectorAll('button')) button.disabled = true; showNotice(message, true); },
+      anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
+      dispose() { clearTimeout(noticeTimer); clearTimeout(overlayTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("click",rescanNativeOverlay,true); document.removeEventListener("keydown",rescanNativeOverlay,true); document.removeEventListener("toggle",rescanNativeOverlay,true); host.remove(); } };
   }
   globalThis.ChatGPTQueueUI = { create };
 })();
