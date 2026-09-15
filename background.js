@@ -19,6 +19,19 @@ const REQUEST_FILTER = {
 const nativePost = details => details.method === "POST" && /^https:\/\/(?:chatgpt\.com|chat\.openai\.com)\/backend-api\/(?:f\/)?conversation(?:\?|$)/.test(details.url);
 let lastCleanup = 0;
 const cleanNoticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+function cleanNoticePreview(value, max = 220) {
+  const text = String(value ?? "")
+    .replace(/```[\s\S]*?```/g, "\n\n")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s+|[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1");
+  const paragraph = text.split(/\n\s*\n/).map(part => part.replace(/\s+/g, " ").trim()).find(Boolean) || "";
+  return paragraph.slice(0, max);
+}
 function formatElapsed(elapsedMs) {
   const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -28,8 +41,9 @@ function formatElapsed(elapsedMs) {
 function completionNotice(command) {
   const meta = command?.notice || {};
   return {
-    title: cleanNoticeText(meta.title, 80) || "ChatGPT 回复完成",
-    message: `${formatElapsed(meta.elapsedMs)}，${cleanNoticeText(meta.preview, 240) || "回复已完成"}`
+    title: cleanNoticeText(meta.title, 72) || "ChatGPT 回复完成",
+    message: cleanNoticePreview(meta.preview) || "回复已完成",
+    contextMessage: `ChatGPT · ${formatElapsed(meta.elapsedMs)}`
   };
 }
 async function pageContext(tabId, documentId) {
@@ -175,7 +189,7 @@ async function handle(message, sender) {
       const notice = completionNotice(command);
       await chrome.notifications.create(notificationId, {
         type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
-        title: notice.title, message: notice.message, priority: 1,
+        title: notice.title, message: notice.message, contextMessage: notice.contextMessage, priority: 1,
         buttons: [{ title: "打开对话" }]
       });
     } catch (error) { notificationError = error.message; }

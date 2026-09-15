@@ -12,6 +12,7 @@
   let interval = 0;
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
   const noticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+  const noticePreviewCandidate = value => String(value ?? "").trim().slice(0, 1000);
   const current = context => context === rt.context && location.href === context?.url && !rt.disposed;
   function disconnect() {
     rt.disposed = true;
@@ -206,7 +207,7 @@
         }
         if (finished || failed) {
           await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered),
-            notice: { title: noticeText(D.readText(p.user), 80), preview: noticeText(p.settledText, 240), elapsedMs: Math.max(0, now - active.at) } });
+            notice: { title: noticeText(D.readText(p.user), 72), preview: noticePreviewCandidate(D.readText(p.assistant)), elapsedMs: Math.max(0, now - active.at) } });
           rt.turn = null; rt.stopped = ""; rt.quietAt = now;
         }
       }
