@@ -4,22 +4,50 @@
   const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage;
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
-    tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
+    tickBusy: false, tickScheduled: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
     pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false, ticks: 0, maxTickMs: 0 };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
-  let interval = 0;
+  let interval = 0, observer = null, observedNodes = [];
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  function runScheduledTick() {
+    if (rt.disposed || !rt.tickScheduled || rt.tickBusy) return;
+    rt.tickScheduled = false;
+    void tick();
+  }
+  function scheduleTick() {
+    if (rt.disposed) return;
+    rt.tickScheduled = true;
+    if (!rt.tickBusy) queueMicrotask(runScheduledTick);
+  }
+  function observeState(p) {
+    const turnSelector = '[data-testid^="conversation-turn-"], article';
+    const assistantTurn = p?.assistant?.closest?.(turnSelector) || null;
+    const userTurn = p?.user?.closest?.(turnSelector) || null;
+    const transcript = userTurn?.parentElement || assistantTurn?.parentElement || null;
+    const next = [p?.anchor || null, assistantTurn, transcript].filter((node, index, all) => node && all.indexOf(node) === index);
+    if (next.length === observedNodes.length && next.every((node, index) => node === observedNodes[index])) return;
+    observer ||= new MutationObserver(() => scheduleTick());
+    observer.disconnect();
+    observedNodes = next;
+    if (transcript) observer.observe(transcript, { childList: true });
+    for (const target of [p?.anchor, assistantTurn]) {
+      if (!target || target === transcript) continue;
+      observer.observe(target, { childList: true, attributes: true, attributeFilter: ["data-state", "aria-disabled", "disabled"] });
+    }
+  }
   const noticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
   const noticePreviewCandidate = value => String(value ?? "").trim().slice(0, 1000);
   const current = context => context === rt.context && location.href === context?.url && !rt.disposed;
   function disconnect() {
     rt.disposed = true;
     clearInterval(interval);
+    observer?.disconnect();
+    observedNodes = [];
     events.abort();
     try { chrome.storage.onChanged.removeListener(storageListener); } catch {}
-    try { chrome.runtime.onMessage.removeListener(scopeListener); } catch {}
+    try { chrome.runtime.onMessage.removeListener(runtimeListener); } catch {}
   }
   function invalidate() {
     if (rt.disposed) return;
@@ -104,14 +132,35 @@
     accept({ queue, usage }, rt.context);
   };
   chrome.storage.onChanged.addListener(storageListener);
-  const scopeListener = (message, sender, reply) => {
-    if (message?.type !== "NOTICE_SCOPE") return;
+  const runtimeListener = (message, sender, reply) => {
+    if (message?.type === "NOTICE_SCOPE") {
+      const url = location.href;
+      if (rt.disposed) { reply(null); return; }
+      void D.scope().then(scope => reply(!rt.disposed && location.href === url ? { scope, url } : null), () => reply(null));
+      return true;
+    }
+    if (message?.type !== "NOTICE_COMPLETION_PROBE") return;
     const url = location.href;
     if (rt.disposed) { reply(null); return; }
-    void D.scope().then(scope => reply(!rt.disposed && location.href === url ? { scope, url } : null), () => reply(null));
+    void (async () => {
+      const scope = await D.scope();
+      if (rt.disposed || location.href !== url || scope !== message.scope) { reply(null); return; }
+      const p = D.snapshot(document, true);
+      const sameTurn = p.userId === message.turnId;
+      const state = !sameTurn ? "stale" : p.waiting ? "attention" : p.error ? "failed" : !p.running && p.ready && p.copy && p.assistantId ? "completed" : "running";
+      if (rt.turn?.id === message.turnId) rt.turn.transportDoneAt = Date.now();
+      observeState(p);
+      scheduleTick();
+      reply({
+        scope, url, state, hidden: document.hidden,
+        generationId: rt.turn?.id === message.turnId ? rt.turn.generationId : message.turnId,
+        title: sameTurn ? noticeText(D.readText(p.user), 56) : "",
+        preview: state === "completed" ? noticePreviewCandidate(D.readText(p.assistant)) : ""
+      });
+    })().catch(() => reply(null));
     return true;
   };
-  chrome.runtime.onMessage.addListener(scopeListener);
+  chrome.runtime.onMessage.addListener(runtimeListener);
 
   async function tick() {
     if (rt.tickBusy || rt.disposed) return;
@@ -129,17 +178,21 @@
       const changed = rt.context?.url !== url || rt.context.scope !== scope;
       if (changed) {
         const old = rt.context;
-        const firstSendTransition = old?.mode === "usage" && old.scope === scope && rt.pending?.fromUsage && Date.now() - rt.pending.at < 60000;
-        const promoting = firstSendTransition && route.mode === "conversation";
+        const firstSendPending = old?.scope === scope && rt.pending?.fromUsage && Date.now() - rt.pending.at < 60000;
+        const promotedId = rt.pending?.promotedId || "";
+        const promoting = firstSendPending && route.mode === "conversation" && (!promotedId || promotedId === route.id);
+        const carryingFirstSend = firstSendPending && (route.mode === "usage" || promoting);
+        if (promoting && !rt.pending.promotedId) rt.pending.promotedId = route.id;
         rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
         rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
         rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
         rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
-        if (!firstSendTransition) rt.pending = null;
+        if (!carryingFirstSend) rt.pending = null;
         if (scope) await request({ op: "get" });
         if (!current(rt.context)) return;
       }
       rt.page = p;
+      observeState(p);
       if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
       const now = Date.now();
       if (scope && rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
@@ -220,6 +273,7 @@
       rt.ticks += 1;
       rt.maxTickMs = Math.max(rt.maxTickMs, performance.now() - start);
       rt.tickBusy = false;
+      if (rt.tickScheduled) queueMicrotask(runScheduledTick);
     }
   }
 

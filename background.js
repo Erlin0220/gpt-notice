@@ -67,35 +67,52 @@ function requestJson(requestBody) {
     return JSON.parse(parts.map(part => decoder.decode(part.bytes, { stream: true })).join("") + decoder.decode());
   } catch { return null; }
 }
-function submittedUsage(details) {
+function submittedConversation(details) {
   if (!nativePost(details) || !Number.isInteger(details.tabId) || details.tabId < 0 || details.frameId !== 0 || !details.documentId || !/^[\w.-]{1,100}$/.test(details.requestId || "")) return null;
   if (!/^https:\/\/(?:chatgpt\.com|chat\.openai\.com)$/.test(details.initiator || "")) return null;
   const body = requestJson(details.requestBody);
-  const model = String(body?.model || "");
-  if (body?.action !== "next" || !Usage.MODELS.has(model)) return null;
+  const model = String(body?.model || "").slice(0, 120);
+  if (body?.action !== "next") return null;
   const message = [...(Array.isArray(body.messages) ? body.messages : [])].reverse().find(item => item?.author?.role === "user");
   const turnId = String(message?.id || "");
   if (!/^[\w:-]{1,220}$/.test(turnId)) return null;
-  // No prompt, attachment, headers, response, token or account ID is retained.
+  // Prompt/attachment/response content is never retained. This correlation is
+  // transport metadata only and is cleared at request completion/error.
   return { turnId, model, tabId: details.tabId, documentId: details.documentId, requestId: details.requestId, at: Date.now() };
 }
-async function captureUsage(observation) {
+function submittedUsage(observation) {
+  return observation && Usage.MODELS.has(observation.model) ? observation : null;
+}
+async function captureRequest(observation) {
   const context = await pageContext(observation.tabId, observation.documentId);
   if (!context) return;
   await pruneStorage().catch(() => {});
-  await chrome.storage.session.set({ [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope } });
+  const route = Queue.route(context.url);
+  let queueOwned = false, queueFinal = false;
+  if (route.mode === "conversation") {
+    const queueKey = Queue.key(context.scope, context.url);
+    const queue = queueKey ? (await chrome.storage.local.get(queueKey))[queueKey] : null;
+    const ownerPrefix = `${observation.tabId}:${observation.documentId}:`;
+    queueOwned = Boolean(queue?.items?.some(item => item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(ownerPrefix)));
+    queueFinal = queueOwned && queue.items.length === 1;
+  }
+  await chrome.storage.session.set({
+    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, queueOwned, queueFinal, sentAt: 0 }
+  });
 }
 async function recordSubmittedUsage(details) {
   const key = REQUEST_PREFIX + details.requestId;
   const observation = (await chrome.storage.session.get(key))[key];
   if (!observation || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL) return;
+  const sentAt = Date.now();
+  await chrome.storage.session.set({ [key]: { ...observation, sentAt } });
+  if (!submittedUsage(observation)) return;
   const context = await pageContext(details.tabId, details.documentId);
-  if (context?.scope !== observation.scope) { await chrome.storage.session.remove(key); return; }
+  if (context?.scope !== observation.scope) return;
   const usageKey = Usage.PREFIX + observation.scope;
   const stored = await chrome.storage.local.get(usageKey);
-  const result = Usage.apply(stored[usageKey], { op: "record", turnId: observation.turnId, model: observation.model, at: Date.now() });
+  const result = Usage.apply(stored[usageKey], { op: "record", turnId: observation.turnId, model: observation.model, at: sentAt });
   if (result.changed) await chrome.storage.local.set({ [usageKey]: result.state });
-  await chrome.storage.session.remove(key);
 }
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
@@ -103,8 +120,8 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   return true;
 });
 chrome.webRequest.onBeforeRequest.addListener(details => {
-  const observation = submittedUsage(details);
-  if (observation) void serial(() => captureUsage(observation)).catch(() => {});
+  const observation = submittedConversation(details);
+  if (observation) void serial(() => captureRequest(observation)).catch(() => {});
 }, REQUEST_FILTER, ["requestBody"]);
 // onBeforeRequest precedes connection establishment and cancellation. Count at
 // the last read-only send boundary, not on a click or an attempted request.
@@ -112,11 +129,14 @@ chrome.webRequest.onSendHeaders.addListener(details => {
   if (!nativePost(details)) return;
   void serial(() => recordSubmittedUsage(details)).catch(() => {});
 }, REQUEST_FILTER);
-for (const event of [chrome.webRequest.onCompleted, chrome.webRequest.onErrorOccurred]) {
-  event.addListener(details => { if (nativePost(details)) void serial(() => chrome.storage.session.remove(REQUEST_PREFIX + details.requestId)).catch(() => {}); }, REQUEST_FILTER);
-}
+chrome.webRequest.onCompleted.addListener(details => {
+  if (nativePost(details)) void serial(() => completeConversationRequest(details)).catch(() => {});
+}, REQUEST_FILTER);
+chrome.webRequest.onErrorOccurred.addListener(details => {
+  if (nativePost(details)) void serial(() => chrome.storage.session.remove(REQUEST_PREFIX + details.requestId)).catch(() => {});
+}, REQUEST_FILTER);
 chrome.notifications.onClicked.addListener(id => void openNotice(id).catch(() => {}));
-chrome.notifications.onClosed.addListener(id => void chrome.storage.local.remove(`notice:notification:${id}`).catch(() => {}));
+chrome.notifications.onClosed.addListener(id => void serial(() => markNoticeClosed(id)).catch(() => {}));
 
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
@@ -179,25 +199,134 @@ async function handle(message, sender) {
     result.state.url = route.url;
     writes[queueKey] = result.state;
   }
-  const notificationId = result.notify && stored["notice:notifications"] !== false ? `notice:${message.scope.slice(0,16)}:${route.id}:${command.generationId || command.userId}` : "";
-  if (notificationId) writes[`notice:notification:${notificationId}`] = { url: route.url, scope: message.scope, tabId: sender.tab.id, at: Date.now() };
+  const notificationId = result.notify && stored["notice:notifications"] !== false ? noticeId(message.scope, route.id, command.generationId || command.userId) : "";
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
   if (notificationId) {
-    try {
-      const notice = completionNotice(command);
-      await chrome.notifications.create(notificationId, {
-        type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
-        title: notice.title, message: notice.message, priority: 0
-      });
-    } catch (error) { notificationError = error.message; }
+    const notice = completionNotice(command);
+    notificationError = await publishNotice(notificationId, {
+      url: route.url, scope: message.scope, tabId: sender.tab.id
+    }, notice, "completed");
     await pruneNotices().catch(() => {});
   }
   return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
 }
 
+const NOTICE_RANK = { generic: 1, attention: 2, failed: 3, completed: 4 };
+const noticeKey = id => `notice:notification:${id}`;
+const noticeId = (scope, routeId, generationId) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}`;
+
+async function publishNotice(id, routing, payload, kind) {
+  const key = noticeKey(id);
+  const stored = await chrome.storage.local.get([key, "notice:notifications"]);
+  if (stored["notice:notifications"] === false) return "";
+  const previous = stored[key];
+  if (previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return "";
+  const record = {
+    ...previous, ...routing, at: previous?.at || Date.now(), updatedAt: Date.now(),
+    kind, attempted: true
+  };
+  await chrome.storage.local.set({ [key]: record });
+  const options = {
+    type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
+    title: payload.title, message: payload.message, priority: 0
+  };
+  try {
+    if (previous?.attempted) await chrome.notifications.update(id, options);
+    else await chrome.notifications.create(id, options);
+    return "";
+  } catch (error) {
+    return String(error?.message || error || "notification failed");
+  }
+}
+
+async function markNoticeClosed(id) {
+  const key = noticeKey(id);
+  const notice = (await chrome.storage.local.get(key))[key];
+  if (notice && !notice.closedAt) await chrome.storage.local.set({ [key]: { ...notice, closedAt: Date.now() } });
+}
+
+async function completionProbe(observation, route) {
+  let timer;
+  try {
+    const value = await Promise.race([
+      chrome.tabs.sendMessage(observation.tabId, {
+        type: "NOTICE_COMPLETION_PROBE", scope: observation.scope, turnId: observation.turnId
+      }, { frameId: 0, documentId: observation.documentId }),
+      new Promise(resolve => { timer = setTimeout(() => resolve({ state: "unavailable" }), 700); })
+    ]);
+    if (!value || value.state === "unavailable") return value || { state: "stale" };
+    if (value.scope !== observation.scope) return { state: "stale" };
+    const probedRoute = Queue.route(value.url);
+    if (probedRoute.mode !== "conversation" || probedRoute.id !== route.id) return { state: "stale" };
+    return value;
+  } catch {
+    // An immediate sendMessage failure means the exact document no longer exists.
+    // A frozen page remains pending and is handled by the timeout above.
+    return { state: "stale" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function networkNoticeEligible(observation, route) {
+  const queueKey = Queue.key(observation.scope, route.url);
+  if (!queueKey) return true;
+  const queue = (await chrome.storage.local.get(queueKey))[queueKey];
+  if (!queue?.items?.length) return true;
+  return Boolean(observation.queueFinal && queue.items.length === 1);
+}
+
+async function completeConversationRequest(details) {
+  const key = REQUEST_PREFIX + details.requestId;
+  const observation = (await chrome.storage.session.get(key))[key];
+  await chrome.storage.session.remove(key);
+  if (!observation || !observation.sentAt || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL) return;
+  if (!Number.isFinite(details.statusCode) || details.statusCode < 200 || details.statusCode >= 300) return;
+
+  let tab;
+  try { tab = await chrome.tabs.get(observation.tabId); } catch { return; }
+  const route = Queue.route(tab?.url);
+  const originRoute = Queue.route(observation.url);
+  if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) return;
+  if (!(await networkNoticeEligible(observation, route))) return;
+
+  const probe = tab?.discarded || tab?.frozen ? { state: "unavailable" } : await completionProbe(observation, route);
+  const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
+  const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
+  const id = noticeId(observation.scope, route.id, generationId);
+  let kind = "", payload;
+
+  if (probe?.state === "completed") {
+    kind = "completed";
+    payload = completionNotice({ notice: { title: probe.title, preview: probe.preview, elapsedMs } });
+  } else if (probe?.state === "attention") {
+    kind = "attention";
+    payload = {
+      title: cleanNoticeText(probe.title, 56) || "ChatGPT 需要你处理",
+      message: `${formatElapsed(elapsedMs)} · 等待确认或继续操作`
+    };
+  } else if (probe?.state === "failed") {
+    kind = "failed";
+    payload = {
+      title: cleanNoticeText(probe.title, 56) || "ChatGPT 回复异常",
+      message: `${formatElapsed(elapsedMs)} · 回复出现异常，点击查看对话`
+    };
+  } else if (probe?.state === "stale") return;
+  else if (probe?.state === "unavailable" || probe?.hidden === true) {
+    kind = "generic";
+    payload = {
+      title: cleanNoticeText(probe?.title, 56) || "ChatGPT 有新结果",
+      message: `${formatElapsed(elapsedMs)} · 点击查看对话`
+    };
+  } else return;
+
+  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId }, payload, kind);
+  await pruneNotices().catch(() => {});
+}
+
 async function openNotice(id) {
-  const key = `notice:notification:${id}`;
+  const key = noticeKey(id);
   const notice = (await chrome.storage.local.get(key))[key];
   if (!notice || Queue.route(notice.url).mode !== "conversation") return;
   const desired = Queue.route(notice.url).id;
@@ -216,8 +345,8 @@ async function openNotice(id) {
     if (!active || (await pageContext(active.id))?.scope !== notice.scope) return;
     await chrome.tabs.create({ url: notice.url, active: true });
   }
+  await chrome.storage.local.set({ [key]: { ...notice, consumedAt: Date.now() } });
   await chrome.notifications.clear(id);
-  await chrome.storage.local.remove(key);
 }
 
 async function pruneNotices(stored) {

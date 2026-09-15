@@ -7,10 +7,10 @@ const Q = require("../queue-core");
 const U = require("../usage-core");
 const scope = "a".repeat(64);
 function harness(storage = {}, session = {}) {
-  const created = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a"}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a"}]]);
-  const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]);
+  const created = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
+  const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]), probes = new Map();
   const webEvents = {}, registrations = {};
-  let listener, clicked, removed, failWrite = false, failNotify = false, sequence = 0;
+  let listener, clicked, closed, removed, failWrite = false, failNotify = false, sequence = 0;
   const event = name => ({ addListener(fn, filter, options) { webEvents[name] = fn; registrations[name] = { filter, options }; } });
   const clone = value => structuredClone(value);
   const store = target => ({
@@ -22,9 +22,18 @@ function harness(storage = {}, session = {}) {
     runtime: { onMessage: { addListener(fn) { listener = fn; } }, getURL: p => p },
     storage: { local: { ...store(storage), async set(values) { if (failWrite) throw new Error("disk full"); Object.assign(storage,clone(values)); } }, session: store(session) },
     webRequest: Object.fromEntries(["onBeforeRequest", "onSendHeaders", "onCompleted", "onErrorOccurred"].map(name => [name, event(name)])),
-    notifications: { onClicked: { addListener(fn) { clicked = fn; } }, onButtonClicked: { addListener() {} }, onClosed: { addListener() {} }, async create(id, value) { if (failNotify) throw new Error("OS denied"); created.push({id,...value}); }, async clear() {} },
+    notifications: {
+      onClicked: { addListener(fn) { clicked = fn; } }, onButtonClicked: { addListener() {} }, onClosed: { addListener(fn) { closed = fn; } },
+      async create(id, value) { if (failNotify) throw new Error("OS denied"); created.push({id,...value}); },
+      async update(id, value) { if (failNotify) throw new Error("OS denied"); const index = created.findIndex(item => item.id === id); if (index < 0) return false; created[index] = { id, ...value }; return true; },
+      async clear(id) { closed?.(id); return true; }
+    },
     tabs: { onRemoved: { addListener(fn) { removed = fn; } }, async get(id) { return tabs.get(id); }, async query(query = {}) { return [...tabs.values()].filter(tab => !query.active || tab.id === 1); },
-      async sendMessage(id, message, options) { if (!tabs.has(id) || options.documentId && options.documentId !== documents.get(id)) throw new Error("No matching document"); return { scope: scopes.get(id), url: tabs.get(id).url }; },
+      async sendMessage(id, message, options) {
+        if (!tabs.has(id) || options.documentId && options.documentId !== documents.get(id)) throw new Error("No matching document");
+        if (message?.type === "NOTICE_COMPLETION_PROBE") return probes.get(id) || { scope: scopes.get(id), url: tabs.get(id).url, state:"running", hidden:false, generationId:message.turnId, title:"", preview:"" };
+        return { scope: scopes.get(id), url: tabs.get(id).url };
+      },
       async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
     windows: { async update() {} }
   };
@@ -44,7 +53,7 @@ function harness(storage = {}, session = {}) {
     await emit("onSendHeaders", details);
   };
   const popup = () => new Promise(resolve => listener({ type:"NOTICE_POPUP" }, { url:"popup.html" }, resolve));
-  return { send, sendUsage, observe, before, emit, popup, storage, session, tabs, scopes, documents, registrations, created, focused, click: id => clicked(id), closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;} };
+  return { send, sendUsage, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, registrations, created, focused, click: id => clicked(id), closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;} };
 }
 test("service worker serializes concurrent claims and persists intent", async () => {
   const h = harness();
@@ -87,6 +96,56 @@ test("rich completion notice uses prompt title, elapsed time, and reply preview 
   assert.equal(h.created[0].contextMessage,undefined);
   assert.equal(h.created[0].buttons,undefined);
   assert.equal(JSON.stringify(h.storage).includes("已修复通知层级"),false);
+});
+test("hidden network completion notifies before DOM settle and the later semantic settle upgrades the same notice", async () => {
+  const h = harness();
+  await h.send({op:"start",userId:"network-user"});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"network-user",title:"后台问题",preview:""});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"network-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"后台问题");
+  assert.match(h.created[0].message,/点击查看对话/);
+  assert.equal(Object.keys(h.session).some(key=>key.startsWith("notice:request:")),false);
+  await h.send({op:"settle",userId:"network-user",notice:{title:"后台问题",preview:"最终摘要",elapsedMs:2200}});
+  assert.equal(h.created.length,1);
+  assert.match(h.created[0].message,/最终摘要/);
+  assert.equal(Object.values(h.storage).find(value=>value?.kind==="completed")?.kind,"completed");
+});
+test("visible running request stays silent until semantic completion", async () => {
+  const h = harness();
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:false,generationId:"visible-user",title:"前台问题",preview:""});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"visible-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,0);
+});
+test("frozen final request gets a generic background notice without waiting for page JavaScript", async () => {
+  const h = harness();
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  h.tabs.get(1).frozen = true;
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"ChatGPT 有新结果");
+});
+test("pending Queue work suppresses interim network notifications", async () => {
+  const h = harness();
+  await h.send({op:"add",id:"pending-work",text:"next queued message"});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"manual-user",title:"manual",preview:"done"});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"manual-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,0);
+});
+test("a responsive scope mismatch is stale and never falls back to a generic notice", async () => {
+  const h = harness();
+  h.probes.set(1,{scope:"b".repeat(64),url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"wrong-scope"});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"wrong-scope",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,0);
 });
 test("notification click does not focus a tab reused for another conversation", async () => {
   const h=harness(); await h.send({op:"start",userId:"user-a"}); await h.send({op:"settle",userId:"user-a"});
@@ -137,11 +196,13 @@ test("eligible Pro usage is recorded from the native outgoing request before com
   await h.observe({ action:"next", model:"gpt-5-6-pro", messages:[{ id:"user-send-3", author:{ role:"user" } }] });
   assert.equal(U.count(h.storage[usageKey]), 2);
 });
-test("disabled notifications do not create routing records; clicked records are removed", async () => {
+test("disabled notifications create no records; clicked notices remain only as consumed dedupe markers", async () => {
   const h=harness({"notice:notifications":false});await h.send({op:"start",userId:"silent"});await h.send({op:"settle",userId:"silent"});
   assert.equal(Object.keys(h.storage).filter(k=>k.startsWith('notice:notification:')).length,0);
-  const active=harness();await active.send({op:"start",userId:"normal"});await active.send({op:"settle",userId:"normal"});active.click(active.created[0].id);await new Promise(r=>setTimeout(r,10));
-  assert.equal(Object.keys(active.storage).filter(k=>k.startsWith('notice:notification:')).length,0);
+  const active=harness();await active.send({op:"start",userId:"normal"});await active.send({op:"settle",userId:"normal"});active.click(active.created[0].id);await new Promise(r=>setTimeout(r,20));
+  const records=Object.values(active.storage).filter(value=>value?.consumedAt);
+  assert.equal(records.length,1);
+  assert.ok(records[0].closedAt);
 });
 
 const proBody = (id = "native-user", model = "gpt-6-pro") => ({ action:"next", model, messages:[{ id, author:{role:"user"}, content:{parts:["private prompt must never be persisted"]} }] });

@@ -57,6 +57,26 @@ test("manual native sends still complete when the rendered user turn contains at
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
   expect(await page.evaluate(()=>window.sent.length)).toBe(1);
 });
+test("network completion can notify when the page probe is unavailable, then DOM upgrades the same notice",async({page,extensionServiceWorker})=>{
+  test.setTimeout(30000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/background-network");await expect(button(page,"add")).toBeVisible();
+  await page.evaluate(()=>{window.autoReply=false;window.model="gpt-5-6-thinking";});
+  await page.locator("#prompt-textarea").fill("fixture background notification");await page.locator("#composer-submit-button").click();
+  await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.turn),{timeout:1200}).toBe(true);
+  await extensionServiceWorker.evaluate(()=>{const original=chrome.tabs.get.bind(chrome.tabs);globalThis.__restoreTabsGet=()=>{chrome.tabs.get=original;delete globalThis.__restoreTabsGet;};chrome.tabs.get=async id=>({...await original(id),frozen:true});});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:6000}).toBe(1);
+  let state=await snapshot(extensionServiceWorker);expect(state.queues[0].turn.done).toBe(false);
+  const generic=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="generic"));
+  expect(generic).toBeTruthy();
+  await extensionServiceWorker.evaluate(()=>globalThis.__restoreTabsGet?.());
+  await page.evaluate(()=>window.finish("final background fixture reply"));
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].turn.done,{timeout:10000}).toBe(true);
+  await page.waitForTimeout(500);
+  state=await snapshot(extensionServiceWorker);expect(state.notifications).toHaveLength(1);
+  const completed=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="completed"));
+  expect(completed).toBeTruthy();
+});
 test("draft protection waits without replacing text, then uses native Send",async({page})=>{
   await page.goto("https://chatgpt.com/c/draft");await expect(button(page,"add")).toBeVisible();await enqueue(page,"queued");
   await page.locator("#prompt-textarea").fill("do not touch");
