@@ -310,7 +310,15 @@ async function completeConversationRequest(details) {
   const id = noticeId(observation.scope, route.id, generationId);
   let kind = "", payload;
 
-  if (probe?.state === "completed") {
+  if (probe?.state === "stale" || probe?.state === "running") return;
+  const hiddenTerminal = probe?.hidden === true && ["completed", "attention", "failed"].includes(probe?.state);
+  if (probe?.state === "unavailable" || hiddenTerminal) {
+    kind = "generic";
+    payload = {
+      title: cleanNoticeText(probe?.prompt, 56) || "ChatGPT 有新结果",
+      message: `${formatElapsed(elapsedMs)} · 点击查看对话`
+    };
+  } else if (probe?.state === "completed") {
     kind = "completed";
     payload = completionNotice({ notice: { prompt: probe.prompt, response: probe.response, elapsedMs } });
   } else if (probe?.state === "attention") {
@@ -324,13 +332,6 @@ async function completeConversationRequest(details) {
     payload = {
       title: cleanNoticeText(probe.prompt, 56) || "ChatGPT 回复异常",
       message: `${formatElapsed(elapsedMs)} · 回复出现异常，点击查看对话`
-    };
-  } else if (probe?.state === "stale") return;
-  else if (probe?.state === "unavailable" || probe?.hidden === true) {
-    kind = "generic";
-    payload = {
-      title: cleanNoticeText(probe?.prompt, 56) || "ChatGPT 有新结果",
-      message: `${formatElapsed(elapsedMs)} · 点击查看对话`
     };
   } else return;
 

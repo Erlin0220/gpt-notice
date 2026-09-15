@@ -78,6 +78,23 @@ test("network completion can notify when the page probe is unavailable, then DOM
   const completed=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="completed"));
   expect(completed).toBeTruthy();
 });
+test("switching tabs never turns a still-running reply into a completion notice",async({page,persistentContext,extensionServiceWorker})=>{
+  test.setTimeout(30000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/background-running");await expect(button(page,"add")).toBeVisible();
+  await page.evaluate(()=>{window.autoReply=false;window.model="gpt-5-6-thinking";});
+  await page.locator("#prompt-textarea").fill("keep running after tab switch");await page.locator("#composer-submit-button").click();
+  const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
+  // Headless Chromium keeps every target visible. Mirror the browser visibility
+  // bit that a real background tab reports so the exact completion-probe branch runs.
+  await page.evaluate(()=>Object.defineProperty(document,"hidden",{configurable:true,value:true}));
+  await page.waitForTimeout(2500);
+  expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(0);
+  await expect(page.locator('[data-testid="stop-button"]')).toHaveCount(1);
+  await page.evaluate(()=>window.finish("completed after background wait"));
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:10000}).toBe(1);
+  await foreground.close();
+});
 test("no-copy completion waits for transport, then continues Queue without refocus",async function({page,persistentContext,extensionServiceWorker}){test.setTimeout(35000);await page.route("https://chatgpt.com/backend-api/f/conversation",async function(route){await new Promise(function(resolve){setTimeout(resolve,6000);});await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});await page.goto("https://chatgpt.com/c/background-queue");await expect(button(page,"add")).toBeVisible();await page.evaluate(function(){window.autoReply=false;window.model="gpt-5-6-thinking";});await page.locator("#prompt-textarea").fill("manual background turn");await page.locator("#composer-submit-button").click();await enqueue(page,"queued after hidden completion");const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();await page.evaluate(function(){window.finishWithoutActions("finished without copy action");});await page.waitForTimeout(2000);expect(await page.evaluate(function(){return window.sent.length;})).toBe(1);await page.evaluate(function(){window.autoReply=true;});await expect.poll(function(){return page.evaluate(function(){return window.sent.length;});},{timeout:15000}).toBe(2);expect(await page.evaluate(function(){return window.sent[1].text;})).toBe("queued after hidden completion");await expect.poll(async function(){return (await snapshot(extensionServiceWorker)).notifications.length;},{timeout:15000}).toBe(1);await foreground.close();});
 test("draft protection waits without replacing text, then uses native Send",async({page})=>{
   await page.goto("https://chatgpt.com/c/draft");await expect(button(page,"add")).toBeVisible();await enqueue(page,"queued");

@@ -98,16 +98,14 @@ test("rich completion notice uses prompt title, elapsed time, and reply preview 
   assert.equal(h.created[0].buttons,undefined);
   assert.equal(JSON.stringify(h.storage).includes("已修复通知层级"),false);
 });
-test("hidden network completion notifies before DOM settle and the later semantic settle upgrades the same notice", async () => {
+test("hidden running request stays silent until semantic completion", async () => {
   const h = harness();
   await h.send({op:"start",userId:"network-user"});
   h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"network-user",prompt:"后台问题",response:""});
   const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"network-user",author:{role:"user"}}]});
   await h.emit("onSendHeaders",request);
   await h.emit("onCompleted",{...request,statusCode:200});
-  assert.equal(h.created.length,1);
-  assert.equal(h.created[0].title,"后台问题");
-  assert.match(h.created[0].message,/点击查看对话/);
+  assert.equal(h.created.length,0);
   assert.equal(Object.keys(h.session).some(key=>key.startsWith("notice:request:")),false);
   await h.send({op:"settle",userId:"network-user",notice:{prompt:"后台问题",response:"最终摘要",elapsedMs:2200}});
   assert.equal(h.created.length,1);
@@ -172,7 +170,7 @@ test("notification click does not focus a tab reused for another conversation", 
 });
 test("notification failures never mark delivery and a later semantic completion can retry", async () => {
   const h=harness();h.notifyFailure(true);
-  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"user-a",prompt:"retry notice",response:""});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"user-a",prompt:"retry notice",response:"hidden result"});
   const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"user-a",author:{role:"user"}}]});
   await h.emit("onSendHeaders",request);await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(Object.values(h.storage).some(value=>value?.kind),false);
@@ -225,7 +223,7 @@ test("eligible Pro usage is recorded from the native outgoing request before com
 });
 test("system closes do not suppress enrichment, but explicit user closes do", async () => {
   const h=harness();await h.send({op:"start",userId:"normal"});
-  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"normal",prompt:"q",response:""});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"normal",prompt:"q",response:"hidden result"});
   const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"normal",author:{role:"user"}}]});await h.emit("onSendHeaders",request);await h.emit("onCompleted",{...request,statusCode:200});
   const id=h.created[0].id;h.closeNotice(id,false);await new Promise(r=>setTimeout(r,20));
   assert.equal(Object.values(h.storage).some(value=>value?.dismissedAt),false);
@@ -234,7 +232,7 @@ test("system closes do not suppress enrichment, but explicit user closes do", as
 });
 
 test("missing OS notification is recreated when a richer result arrives", async () => {
-  const h=harness();h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"upgrade",prompt:"q",response:""});
+  const h=harness();h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"upgrade",prompt:"q",response:"hidden result"});
   const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"upgrade",author:{role:"user"}}]});await h.emit("onSendHeaders",request);await h.emit("onCompleted",{...request,statusCode:200});
   const id=h.created[0].id;h.dropNotification(id);await h.send({op:"start",userId:"upgrade"});await h.send({op:"settle",userId:"upgrade",notice:{prompt:"q",response:"rich",elapsedMs:1000}});
   assert.equal(h.created.length,1);assert.equal(h.created[0].id,id);assert.match(h.created[0].message,/rich/);
