@@ -156,7 +156,7 @@ test("request-time Queue provenance prevents an older request from borrowing a l
   await h.send({op:"add",id:"queue-one",text:"one"});await h.send({op:"add",id:"queue-two",text:"two"});
   const first=(await h.send({op:"claim",baseline:"baseline-user"})).item;await h.send({op:"intent",id:first.id,claim:first.claim});
   const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"sent-one",author:{role:"user"}}]});await h.emit("onSendHeaders",request);
-  const captured=Object.values(h.session).find(value=>value?.requestId===request.requestId);assert.equal(captured.finalQueueRequest,false);
+  const captured=Object.values(h.session).find(value=>value?.requestId===request.requestId);assert.equal(captured.finalQueueRequest,undefined);
   await h.send({op:"receipt",id:first.id,claim:first.claim,userId:"sent-one",text:"one"});await h.send({op:"settle",userId:"sent-one"});
   const second=(await h.send({op:"claim",baseline:"sent-one"})).item;await h.send({op:"intent",id:second.id,claim:second.claim});
   h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"sent-one",prompt:"old",response:"done"});
@@ -169,6 +169,31 @@ test("a responsive scope mismatch is stale and never falls back to a generic not
   await h.emit("onSendHeaders",request);
   await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(h.created.length,0);
+});
+test("a late network completion cannot announce a stopped or superseded generation", async () => {
+  for (const superseded of [false,true]) {
+    const h=harness();await h.send({op:"start",userId:"original"});
+    const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"original",author:{role:"user"}}]});await h.emit("onSendHeaders",request);
+    if(superseded)await h.send({op:"start",userId:"newer",previousUserId:"original"});else await h.send({op:"stop",userId:"original"});
+    h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:false,generationId:"original",response:"must not notify"});
+    await h.emit("onCompleted",{...request,statusCode:200});assert.equal(h.created.length,0);
+  }
+});
+test("an old native request cannot borrow the same user message's later regeneration", async () => {
+  const h=harness();await h.send({op:"start",userId:"original"});
+  const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"original",author:{role:"user"}}]});await h.emit("onSendHeaders",request);
+  await h.send({op:"start",userId:"original",generationId:"original:retry",retryOf:"original"});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:false,generationId:"original:retry"});
+  await h.emit("onCompleted",{...request,statusCode:200});assert.equal(h.created.length,0);
+});
+test("attention and blocking errors notify even with pending work, without success wording or persisted preview", async () => {
+  for(const outcome of ["attention","blocked","failed"]) {
+    const h=harness();await h.send({op:"add",id:"pending-work",text:"next"});await h.send({op:"start",userId:"original"});
+    await h.send({op:outcome==="attention"?"attention":"settle",userId:"original",outcome,notice:{prompt:"fixture",response:"private prose",hidden:true}});
+    assert.equal(h.created.length,1);assert.doesNotMatch(h.created[0].message,/回复已完成|private prose/);
+    assert.equal(h.storage[Q.key(scope,"https://chatgpt.com/c/a")].turn.done,outcome!=="attention");
+    assert.equal(JSON.stringify(h.storage).includes("private prose"),false);
+  }
 });
 test("notification click does not focus a tab reused for another conversation", async () => {
   const h=harness(); await h.send({op:"start",userId:"user-a"}); await h.send({op:"settle",userId:"user-a"});

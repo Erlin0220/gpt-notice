@@ -2,11 +2,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test: base, chromium, expect } = require("@playwright/test");
-const { buildExtension } = require("../../scripts/build-extension");
 
 const projectRoot = path.resolve(__dirname, "../..");
 const extensionPath = path.join(projectRoot, "dist");
-buildExtension(projectRoot);
 
 function resolveProfilePath(testInfo) {
   const configured = process.env.GPT_NOTICE_E2E_PROFILE;
@@ -58,6 +56,18 @@ const test = base.extend({
         "--no-default-browser-check"
       ]
     });
+
+    const live = testInfo.file.endsWith("real-chatgpt.spec.js") && process.env.GPT_NOTICE_REAL_CHATGPT === "1";
+    // The fallback is a hard outbound deny, not just an assumed model choice.
+    // Controlled fixtures registered later must fulfill locally; unknown URLs
+    // (including a future generation endpoint) can never reach ChatGPT.
+    await context.route("**/*", route => {
+      const request = route.request(), url = new URL(request.url());
+      if (url.protocol === "chrome-extension:") return route.continue();
+      const mutation = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method());
+      return live && !(mutation && ["chatgpt.com", "chat.openai.com"].includes(url.hostname)) ? route.continue() : route.abort("blockedbyclient");
+    });
+    if (!live) await context.routeWebSocket("**/*", socket => socket.close());
 
     const attachPageLogging = (page) => {
       page.on("console", (message) => appendLog("page", message.type(), message.text()));

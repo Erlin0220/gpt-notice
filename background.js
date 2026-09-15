@@ -63,8 +63,8 @@ function genericCompletionNotice(meta = {}) {
   };
 }
 function completionPublication(state, hidden, meta = {}) {
-  if (["stale", "running", "unavailable"].includes(state)) return null;
-  if (hidden === true) return { kind: "generic", payload: genericCompletionNotice(meta) };
+  if (!["completed", "attention", "recoverable", "blocked", "failed"].includes(state)) return null;
+  if (hidden === true && state === "completed") return { kind: "generic", payload: genericCompletionNotice(meta) };
   if (state === "completed") return { kind: "completed", payload: completionNotice({ notice: meta }) };
   if (state === "attention") return {
     kind: "attention",
@@ -73,11 +73,11 @@ function completionPublication(state, hidden, meta = {}) {
       message: `${formatElapsed(meta.elapsedMs)} · 等待确认或继续操作`
     }
   };
-  if (state === "failed") return {
+  if (["failed", "blocked", "recoverable"].includes(state)) return {
     kind: "failed",
     payload: {
       title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 回复异常",
-      message: `${formatElapsed(meta.elapsedMs)} · 回复出现异常，点击查看对话`
+      message: `${formatElapsed(meta.elapsedMs)} · ${state === "blocked" ? "限额、策略或账号受限，请处理原生提示" : "回复出现异常，点击查看对话"}`
     }
   };
   return null;
@@ -120,16 +120,8 @@ async function captureRequest(observation) {
   const context = await pageContext(observation.tabId, observation.documentId);
   if (!context) return;
   await pruneStorage().catch(() => {});
-  let finalQueueRequest = false;
-  const route = Queue.route(context.url);
-  if (route.mode === "conversation") {
-    const queueKey = Queue.key(context.scope, context.url);
-    const queue = queueKey ? (await chrome.storage.local.get(queueKey))[queueKey] : null;
-    const item = queue?.items?.length === 1 ? queue.items[0] : null;
-    finalQueueRequest = Boolean(item && item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(`${observation.tabId}:${observation.documentId}:`));
-  }
   await chrome.storage.session.set({
-    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, finalQueueRequest, sentAt: 0 }
+    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, sentAt: 0 }
   });
 }
 function readUsage(raw) {
@@ -239,7 +231,7 @@ async function handle(message, sender) {
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
   if (notificationId) {
-    const publication = completionPublication("completed", command.notice?.hidden === true, command.notice);
+    const publication = completionPublication(result.outcome || "completed", command.notice?.hidden === true, command.notice);
     notificationError = await publishNotice(notificationId, {
       url: route.url, scope: message.scope, tabId: sender.tab.id
     }, publication.payload, publication.kind);
@@ -305,14 +297,17 @@ async function completionProbe(observation, route) {
   }
 }
 
-async function networkNoticeEligible(observation, route) {
+async function networkNoticeEligible(observation, route, probe) {
   const queueKey = Queue.key(observation.scope, route.url);
-  if (!queueKey) return true;
+  if (!queueKey) return false;
   const queue = (await chrome.storage.local.get(queueKey))[queueKey];
-  if (!queue?.items?.length) return true;
-  if (!observation.finalQueueRequest || queue.items.length !== 1) return false;
-  const item = queue.items[0];
-  return item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(`${observation.tabId}:${observation.documentId}:`);
+  const generationId = probe?.generationId || observation.turnId;
+  if (generationId !== observation.turnId) return false;
+  if (queue?.holdUntil || queue?.turn && (queue.turn.id !== generationId || queue.turn.stopped || queue.turn.outcome === "stopped")) return false;
+  // Unknown/sending outbox entries have no receipt yet. Network activity must
+  // neither retire them nor borrow the identity of a later final Queue item.
+  if (queue?.items?.some(item => item.state !== "pending")) return false;
+  return !queue?.items?.length || ["attention", "blocked", "failed"].includes(probe?.state);
 }
 
 async function completeConversationRequest(details) {
@@ -327,10 +322,8 @@ async function completeConversationRequest(details) {
   const route = Queue.route(tab?.url);
   const originRoute = Queue.route(observation.url);
   if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) return;
-  const notificationEligible = await networkNoticeEligible(observation, route);
-
   const probe = tab?.discarded ? { state: "unavailable" } : await completionProbe(observation, route);
-  if (!notificationEligible) return;
+  if (!await networkNoticeEligible(observation, route, probe)) return;
   const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
   const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
   const id = noticeId(observation.scope, route.id, generationId);

@@ -2,6 +2,7 @@ const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const Q = require("../queue-core");
 const U = require("../usage-core");
+const D = require("../chatgpt-dom");
 const at = Date.parse("2026-09-14T12:00:00Z");
 const scope = "a".repeat(64);
 function added(text = "next prompt") { return Q.apply(undefined, { op: "add", id: "item-12345", text }, "tab-A", at).state; }
@@ -146,17 +147,63 @@ test("completion with pending items does not notify; the final turn notifies onc
   assert.equal(Q.apply(result.state, { op: "settle", userId: "last" }, "tab-B", at + 11000).notify, undefined);
   assert.equal(Q.apply(result.state, { op: "start", userId: "last" }, "tab-B", at + 11000).state.turn.done, true);
 });
-test("native stop/error pauses without success notification", () => {
+test("unclassified terminal errors pause with an error intent, not a success intent", () => {
   const state = Q.apply(added(), { op: "start", userId: "stopped" }, "tab-A", at).state;
   const result = Q.apply(state, { op: "settle", userId: "stopped", failed: true }, "tab-A", at + 1000);
-  assert.equal(result.notify, false); assert.equal(result.state.paused, true);
+  assert.equal(result.notify, true); assert.equal(result.outcome, "failed"); assert.equal(result.state.paused, true);
+});
+test("native failure classification distinguishes transient errors, blockers and explicit stops", () => {
+  for (const text of ["无法思考", "Unable to think", "Network error", "Something went wrong"]) assert.equal(D.failureKind(text), "recoverable", text);
+  for (const text of ["Network error: quota exceeded", "You've reached your usage limit", "Policy violation", "重新登录", "上下文长度超出限制"]) assert.equal(D.failureKind(text), "blocked", text);
+  assert.equal(D.failureKind("You stopped this response"), "stopped");
+  assert.equal(D.failureKind("Unrecognized service error"), "failed");
+  assert.equal(D.failureKind("Thinking"), "");
+});
+test("recoverable terminal errors advance only existing work and stop after two consecutive failures", () => {
+  let state = Q.apply(added(), { op:"start", userId:"first" }, "tab-A", at).state;
+  let result = Q.apply(state, {op:"settle", userId:"first", outcome:"recoverable"}, "tab-A", at+1);
+  assert.equal(result.state.paused,false); assert.equal(result.notify,false); assert.equal(result.state.failureStreak,1);
+  assert.equal(Q.apply(result.state,{op:"claim",baseline:"first"},"tab-A",at+2).item.text,"next prompt");
+  state=Q.apply(result.state,{op:"start",userId:"second"},"tab-A",at+3).state;
+  result=Q.apply(state,{op:"settle",userId:"second",outcome:"recoverable"},"tab-A",at+4);
+  assert.equal(result.state.paused,true);assert.equal(result.notify,true);assert.match(result.state.reason,/连续两轮/);
+  state=Q.apply(result.state,{op:"pause",paused:false},"tab-A",at+5).state;
+  assert.equal(state.failureStreak,0);
+  state=Q.apply(state,{op:"start",userId:"third"},"tab-A",at+6).state;
+  state=Q.apply(state,{op:"settle",userId:"third",outcome:"completed"},"tab-A",at+7).state;
+  assert.equal(state.failureStreak,0);
+});
+test("recoverable outcomes never override user pauses, unknown deliveries or Stop", () => {
+  let state=Q.apply(added(),{op:"start",userId:"first"},"tab-A",at).state;
+  state=Q.apply(state,{op:"pause",paused:true},"tab-A",at+1).state;
+  let result=Q.apply(state,{op:"settle",userId:"first",outcome:"recoverable"},"tab-A",at+2);
+  assert.equal(result.state.paused,true);assert.equal(result.state.pauseCause,"user");
+  state=Q.apply(state,{op:"stop",userId:"first"},"tab-A",at+2).state;
+  result=Q.apply(state,{op:"settle",userId:"first",outcome:"completed"},"tab-A",at+3);
+  assert.equal(result.outcome,"stopped");assert.equal(result.notify,false);
+  const c=claim();state=Q.apply(c.state,{op:"intent",id:c.item.id,claim:c.item.claim},"tab-A",at+2).state;
+  state=Q.apply(state,{op:"start",userId:"first"},"tab-A",at+3).state;
+  result=Q.apply(state,{op:"settle",userId:"first",outcome:"recoverable"},"tab-A",at+40000);
+  assert.equal(result.state.items[0].state,"unknown");assert.equal(result.state.paused,true);
+  assert.throws(()=>Q.apply(result.state,{op:"claim",baseline:"first"},"tab-A",at+40001));
+});
+test("attention is nonterminal, idempotent and can be followed by final completion", () => {
+  let state=Q.apply(added(),{op:"start",userId:"first"},"tab-A",at).state;
+  let result=Q.apply(state,{op:"attention",userId:"first"},"tab-A",at+1);
+  assert.equal(result.notify,true);assert.equal(result.outcome,"attention");assert.equal(result.state.turn.done,false);
+  assert.equal(Q.apply(result.state,{op:"attention",userId:"first"},"tab-A",at+2).notify,undefined);
+  assert.throws(()=>Q.apply(result.state,{op:"claim",baseline:"first"},"tab-A",at+3));
+  state=Q.apply(result.state,{op:"settle",userId:"first",outcome:"completed"},"tab-A",at+4).state;
+  assert.equal(state.turn.done,true);assert.equal(state.paused,false);
 });
 test("native Stop survives reload and does not poison the next user turn", () => {
   let state = Q.apply(undefined, { op: "start", userId: "stopped" }, "tab-A", at).state;
   state = Q.apply(state, { op: "stop", userId: "stopped" }, "tab-A", at + 1).state;
+  assert.equal(state.paused,true);assert.equal(state.pauseCause,"user");
   const reloaded = Q.apply(state, { op: "settle", userId: "stopped" }, "tab-B", at + 1000);
   assert.equal(reloaded.notify, false);
   state = Q.apply(state, { op: "start", userId: "follow-up", previousUserId: "stopped" }, "tab-A", at + 2).state;
+  assert.equal(state.paused,true);
   assert.equal(Q.apply(state, { op: "settle", userId: "follow-up" }, "tab-A", at + 1000).notify, true);
 });
 test("editing is revision checked and sending items cannot be deleted or reordered", () => {

@@ -13,8 +13,19 @@
   const enabled = n => Boolean(n && !n.disabled && n.getAttribute("aria-disabled") !== "true");
   const readText = n => String(n?.value ?? n?.innerText ?? n?.textContent ?? "").replace(/\r\n?/g, "\n");
   const messageId = n => n?.getAttribute("data-message-id") || "";
-  const turn = n => n?.closest('[data-testid^="conversation-turn-"], article');
+  const TURN = '[data-testid^="conversation-turn-"], article';
+  const turn = n => n?.closest(TURN);
   const MESSAGE = '[data-message-author-role]';
+  // Classify native UI only, never prose produced by the assistant. Blocking
+  // signals win over transient wording (e.g. "network error: quota exceeded").
+  function failureKind(value) {
+    const text = String(value || "").replace(/\s+/g, " ").trim().slice(0, 500);
+    if (/quota|rate.?limit|usage.?limit|message.?limit|too many requests|limit.{0,40}(?:reached|exceeded)|reached.{0,40}limit|额度|配额|上限|达到.{0,20}限|请求过多|频率限制|policy|safety|access denied|unauthori[sz]ed|forbidden|sign in|log in|context.{0,20}(?:length|limit)|策略|政策|安全限制|拒绝访问|重新登录|上下文.{0,12}(?:长度|限制)/i.test(text)) return "blocked";
+    if (/^(?:you stopped this response|response stopped|用户已停止|你已停止|已停止生成)[.!。！]?$/i.test(text)) return "stopped";
+    if (/unable to think|could(?: not|n't) think|thinking failed|无法思考|未能思考|思考失败|something went wrong|network error|network connection.{0,20}(?:lost|error)|request timed out|连接中断|网络错误|网络异常|请求超时|生成.{0,12}(?:错误|出错)/i.test(text)) return "recoverable";
+    if (/error|wrong|failed|错误|失败|出错/i.test(text)) return "failed";
+    return "";
+  }
   let messageRoot = null, cachedUser = null, discoveryAfter = 0;
   function tail(doc) {
     if (!messageRoot?.isConnected || messageRoot.ownerDocument !== doc) {
@@ -57,12 +68,22 @@
     const assistant = assistants.at(-1) || null;
     const afterUser = Boolean(user && assistant && (user.compareDocumentPosition(assistant) & 4));
     const assistantTurn = turn(assistant);
-    const activeTurn = afterUser ? assistantTurn : turn(user);
+    // An error-only turn need not contain an assistant message at all.
+    const lastGroup = messageRoot?.lastElementChild;
+    const trailingTurn = lastGroup?.matches(TURN) ? lastGroup : lastGroup?.querySelector(TURN);
+    const activeTurn = user && trailingTurn && (user.compareDocumentPosition(trailingTurn) & 4) ? trailingTurn : afterUser ? assistantTurn : turn(user);
     const local = selector => activeTurn ? all(activeTurn, selector) : [];
-    const waiting = local('button').some(n => visible(n) && /^(allow|approve|confirm|continue|allow once|always allow|允许|批准|确认|继续|允许一次|始终允许)$/i.test(n.innerText.trim()));
-    const busy = local('[role="status"], [data-state="loading"]').some(n => visible(n) && /working|thinking|searching|generating|正在处理|正在思考|正在搜索|正在生成/i.test(n.textContent.slice(0,200)));
-    const errors = [...local('[role="alert"], [data-testid*="error"]'), ...(box ? all(box, '[role="alert"], [data-testid*="error"]') : [])];
-    const error = errors.some(n => visible(n) && /error|wrong|failed|错误|失败|出错|达到.*限|limit/i.test(n.textContent.slice(0,500)));
+    const nativeUI = n => visible(n) && !n.closest('.markdown, .prose, pre, code, [data-message-author-role="user"]');
+    const waiting = local('button').some(n => nativeUI(n) && /^(allow|approve|confirm|continue|continue generating|allow once|always allow|允许|批准|确认|继续|继续生成|允许一次|始终允许)$/i.test(n.innerText.trim()));
+    const busy = local('[role="status"], [data-state="loading"]').some(n => nativeUI(n) && !failureKind(n.textContent) && /working|thinking|searching|generating|正在处理|正在思考|正在搜索|正在生成/i.test(n.textContent.slice(0,200)));
+    const errors = [...local('[role="alert"], [data-testid*="error"]'), ...(box ? all(box, '[role="alert"], [data-testid*="error"]') : [])].filter(nativeUI);
+    // Some native reasoning failures are short button/status labels rather than alerts.
+    const labels = local('button, [role="status"]').filter(nativeUI).map(n => (n.getAttribute('aria-label') || n.textContent || '').trim());
+    const kinds = errors.map(n => failureKind(n.textContent) || "failed");
+    for (const label of labels) if (/^(?:unable to think|could(?: not|n't) think|thinking failed|无法思考|未能思考|思考失败|you stopped this response|response stopped|用户已停止|你已停止|已停止生成)[.!。！]?$/i.test(label)) kinds.push(failureKind(label));
+    const failure = ["blocked", "stopped", "failed", "recoverable"].find(kind => kinds.includes(kind)) || "";
+    const copy = afterUser && Boolean(assistantTurn?.querySelector('button[data-testid="copy-turn-action-button"]'));
+    const outcome = waiting ? "attention" : stop || busy ? "running" : failure || (copy && messageId(assistant) ? "completed" : "idle");
     // Upload inputs may be cleared after upload. Native removal controls remain
     // the evidence that the composer still owns an attachment (including images).
     const attachments = Boolean(box && (
@@ -71,12 +92,12 @@
       all(box, 'button[aria-label], button[title]').some(n => visible(n) && /(?:remove|delete)\s+(?:file|attachment|image|photo)|(?:删除|移除|清除)(?:文件|附件|图片|图像|照片)/i.test(`${n.getAttribute("aria-label") || ""} ${n.getAttribute("title") || ""}`))
     ));
     return { composer: input, anchor: box, ready: enabled(input), empty: !readText(input).trim() && !attachments,
-      attachments, stop, waiting, busy, error, running: stop || waiting || busy,
+      attachments, stop, waiting, busy, error: Boolean(failure), failure, outcome, running: stop || waiting || busy,
       user, users, userId: messageId(user), assistant, assistantId: afterUser ? messageId(assistant) : "",
       model: afterUser ? assistant?.getAttribute("data-message-model-slug") || "" : "",
-      copy: afterUser && Boolean(assistantTurn?.querySelector('button[data-testid="copy-turn-action-button"]')),
+      copy,
       // Never read or hash streamed answer tokens. Content is sampled only after native controls are idle.
-      settledText: completion && afterUser && !stop && !busy && !waiting ? (assistant.textContent || "").slice(0,200000) : "" };
+      settledText: completion && afterUser && outcome === "completed" ? (assistant.textContent || "").slice(0,200000) : "" };
   }
   function precedes(userId, node, doc = document) {
     if (!userId || !node?.isConnected) return false;
@@ -144,5 +165,5 @@
     }
     return globalThis.ChatGPTQueueCore.comparable(readText(input)) === globalThis.ChatGPTQueueCore.comparable(value);
   }
-  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, write };
+  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, failureKind, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, write };
 });

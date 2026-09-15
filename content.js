@@ -5,7 +5,7 @@
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
     tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
-    pending: null, retryBaseline: null, transportDone: "", attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false };
+    pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
@@ -54,7 +54,7 @@
     const context = rt.context || { mode: "off", key: "", scope: "" };
     const p = rt.page;
     ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy, attachments: Boolean(p?.attachments),
-      status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : (rt.queue?.paused || rt.queue?.holdUntil) && rt.queue.reason ? rt.queue.reason : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
+      status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : (rt.queue?.paused || rt.queue?.holdUntil) && rt.queue.reason ? rt.queue.reason : p?.waiting ? "等待你处理原生确认或继续操作；Queue 不会自动批准" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : p?.error && !errorAllowsNext(p) ? "原生页面仍有阻塞或异常提示；请先处理后继续" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
     ui.anchor(p?.anchor || null);
   }
   function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
@@ -71,7 +71,6 @@
     if (event.type === "click" && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
       const page = D.snapshot();
       rt.retryBaseline = { userId: page.userId, assistantId: page.assistantId };
-      rt.transportDone = "";
       if (rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
     const nativeSend = event.type === "click" && button?.matches(D.SEND) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
@@ -79,7 +78,6 @@
       const page = D.snapshot();
       if (page.empty) return;
       if (rt.attempt) rt.attempt.submitted = true;
-      rt.transportDone = "";
       rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
       if (!rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
@@ -103,6 +101,18 @@
     accept({ queue, usage }, rt.context);
   };
   chrome.storage.onChanged.addListener(storageListener);
+  function observedOutcome(p, active, now = Date.now()) {
+    if (!active || p.userId !== active.id || !D.generationMatches(active.generationId, p)) return "running";
+    const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
+    const outcome = stopped && !p.running ? "stopped" : p.outcome;
+    // Both the sampler and a network-woken probe use this same semantic gate.
+    // Transport completion, disappearing Stop, and an idle composer are not finality.
+    const terminal = outcome === "attention" || ["completed", "recoverable", "blocked", "failed", "stopped"].includes(outcome) && !p.running;
+    const fingerprint = terminal && (outcome !== "completed" || p.ready) ? `${outcome}:${p.assistantId}:${outcome === "completed" ? p.settledText : ""}` : "";
+    if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
+    const delay = outcome === "completed" ? 3000 : 2000;
+    return fingerprint && now - active.stableAt >= delay && now - active.at >= delay ? outcome : "running";
+  }
   const runtimeListener = (message, sender, reply) => {
     if (message?.type === "NOTICE_SCOPE") {
       const url = location.href;
@@ -117,9 +127,8 @@
       const scope = await D.scope();
       if (rt.disposed || location.href !== url || scope !== message.scope) { reply(null); return; }
       const p = D.snapshot(document, true);
-      const sameTurn = p.userId === message.turnId;
-      const state = !sameTurn ? "stale" : p.waiting ? "attention" : p.error ? "failed" : !p.running && p.ready && p.copy && p.assistantId ? "completed" : "running";
-      if (sameTurn) rt.transportDone = message.turnId;
+      const sameTurn = p.userId === message.turnId && current(rt.context) && rt.context.scope === scope;
+      const state = !sameTurn ? "stale" : observedOutcome(p, rt.turn);
       reply({
         scope, url, state, hidden: document.hidden,
         generationId: rt.turn?.id === message.turnId ? rt.turn.generationId : message.turnId,
@@ -154,7 +163,7 @@
         rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
         rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
         rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
-        rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.transportDone = ""; rt.addAttempt = null;
+        rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
         if (!carryingFirstSend) rt.pending = null;
         if (scope) await request({ op: "get" });
         if (!current(rt.context)) return;
@@ -209,13 +218,8 @@
       if (p.running) rt.quietAt = now;
       const active = rt.turn;
       if (active && p.userId === active.id && D.generationMatches(active.generationId, p)) {
-        const completionEvidence = p.copy || rt.transportDone === active.id;
-        const fingerprint = !p.running && p.assistantId && completionEvidence ? `${p.assistantId}:${p.settledText}` : "";
-        if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
-        const finished = !p.running && p.ready && fingerprint && now - active.stableAt >= 3000 && now - active.at >= 3000;
-        const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
-        const failed = !p.running && (p.error || stopped) && now - rt.quietAt >= 2000;
-        if (!active.counted && finished && !p.error && !stopped && U.MODELS.has(p.model)) {
+        const outcome = observedOutcome(p, active, now);
+        if (!active.counted && outcome === "completed" && U.MODELS.has(p.model)) {
           // A model label can be rendered optimistically before any request is
           // sent. Only a confirmed completed answer is a safe DOM fallback.
           // Usage is auxiliary accounting. A storage/validation failure must not
@@ -226,12 +230,13 @@
             active.counted = true;
           } catch {}
         }
-        if (finished || failed) {
+        if (outcome !== "running" && (outcome !== "attention" || !rt.queue?.turn?.attention)) {
           const hidden = document.hidden;
-          await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered),
-            notice: { prompt: D.readText(p.user).slice(0, 1000), response: hidden ? "" : D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at), hidden } });
-          if (rt.transportDone === active.id) rt.transportDone = "";
-          rt.turn = null; rt.stopped = ""; if (failed) rt.quietAt = now;
+          await request({ op: outcome === "attention" ? "attention" : "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, outcome, suppressNotify: Boolean(active.recovered),
+            notice: { prompt: D.readText(p.user).slice(0, 1000), response: hidden || outcome !== "completed" ? "" : D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at), hidden } });
+          if (outcome !== "attention") {
+            rt.turn = null; rt.stopped = ""; if (outcome !== "completed") rt.quietAt = now;
+          }
         }
       }
       render();
@@ -242,9 +247,13 @@
     } finally { rt.tickBusy = false; }
   }
 
+  function errorAllowsNext(p) {
+    const turn = rt.queue?.turn;
+    return !p.error || p.failure === "recoverable" && turn?.done && turn.outcome === "recoverable" && (turn.userId || turn.id) === p.userId && D.generationMatches(turn.id, p);
+  }
   function safeToSend(p) {
     return Boolean(rt.context?.mode === "conversation" && rt.context.scope && current(rt.context) && !rt.previousTail &&
-      p.userId && p.ready && p.empty && !p.running && !p.error && !rt.turn && !rt.composing &&
+      p.userId && p.ready && p.empty && !p.running && errorAllowsNext(p) && !rt.turn && !rt.composing &&
       !rt.queue?.holdUntil && (!rt.queue?.turn || rt.queue.turn.done && (rt.queue.turn.userId || rt.queue.turn.id) === p.userId) && Date.now() - rt.quietAt >= 4000);
   }
   async function dispatch(id, manual) {
@@ -259,7 +268,7 @@
     const guard = expected => {
       runtime();
       const p = D.snapshot();
-      if (!current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || p.error || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
+      if (!current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || !errorAllowsNext(p) || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
       return p;
     };
     try {

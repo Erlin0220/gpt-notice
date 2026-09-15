@@ -38,7 +38,7 @@
     return /^[a-f0-9]{32,64}$/.test(scope || "") && r.id ? `${PREFIX}${scope}:${r.id}` : "";
   }
   function fresh() {
-    return { version: 8, revision: 0, paused: false, pauseCause: "", reason: "", items: [], receipts: [], turn: null, settled: [], holdUntil: 0, updatedAt: 0 };
+    return { version: 8, revision: 0, paused: false, pauseCause: "", reason: "", items: [], receipts: [], turn: null, settled: [], failureStreak: 0, holdUntil: 0, updatedAt: 0 };
   }
   function normalize(raw, now = Date.now()) {
     if (raw && (raw.version !== 8 || !Array.isArray(raw.items) || !Array.isArray(raw.receipts) || !Array.isArray(raw.settled))) throw new Error("本地 Queue 数据格式异常；未覆盖原始数据，请先备份检查");
@@ -116,7 +116,7 @@
         state.paused = Boolean(command.paused);
         state.pauseCause = state.paused ? "user" : "";
         state.reason = state.paused ? "已暂停" : "";
-        if (!state.paused) state.holdUntil = 0;
+        if (!state.paused) { state.holdUntil = 0; state.failureStreak = 0; }
         break;
       case "claim": {
         if (state.holdUntil) reject("正在等待原生提交确认");
@@ -235,20 +235,47 @@
             result.conflict = true;
             break;
           }
-          if (state.turn?.id !== generationId) state.turn = { id: generationId, userId: command.userId, at: now, done: false };
+          if (state.turn?.id !== generationId) state.turn = { id: generationId, userId: command.userId, source: source(owner), at: now, done: false };
           state.turn.stopped = true;
+          // Persist the user's intent now, not on a later sampler tick: a
+          // fast manual follow-up may supersede this turn before it settles.
+          if (!state.paused) {
+            state.pauseCause = "user";
+            state.reason = "当前回复已手动停止，Queue 已暂停";
+          }
+          state.paused = true;
         }
         break;
       }
-      case "settle":
+      case "attention":
+        if (state.turn?.id !== (command.generationId || command.userId) || state.turn.done || state.turn.stopped || state.turn.attention || state.holdUntil) break;
+        state.turn.attention = true;
+        result.notify = true;
+        result.outcome = "attention";
+        break;
+      case "settle": {
         if (state.turn?.id !== (command.generationId || command.userId) || state.turn.done) break;
+        const outcome = state.turn.stopped ? "stopped" : command.outcome || (command.failed ? "failed" : "completed");
+        if (!["completed", "recoverable", "blocked", "failed", "stopped"].includes(outcome)) reject("没有明确的回复终态");
         state.turn.done = true;
+        state.turn.outcome = outcome;
         state.turn.assistantId = String(command.assistantId || "");
         state.settled = [...state.settled, state.turn.id].slice(-200);
+        state.failureStreak = outcome === "recoverable" ? Math.min(2, (state.failureStreak || 0) + 1) : 0;
+        const exhausted = state.failureStreak >= 2;
+        if (["blocked", "failed", "stopped"].includes(outcome) || exhausted) {
+          state.paused = true;
+          // Never downgrade an existing explicit pause or branch-conflict guard.
+          if (!["user", "conflict"].includes(state.pauseCause)) {
+            state.pauseCause = "safety";
+            state.reason = exhausted ? "连续两轮异常，Queue 已暂停；请检查后继续" : outcome === "stopped" ? "当前回复已手动停止，Queue 已暂停" : outcome === "blocked" ? "限额、策略或账号受限，Queue 已暂停；请先处理原生提示" : "当前回复异常，Queue 已暂停；请检查后继续";
+          }
+        }
         // Return notification intent only after the completion state is durable.
-        result.notify = state.items.length === 0 && !command.failed && !command.suppressNotify && !state.turn.stopped && !state.holdUntil;
-        if (command.failed || state.turn.stopped) { state.paused = true; state.pauseCause = "safety"; state.reason = "当前回复异常或已停止，请检查后继续"; }
+        result.outcome = outcome;
+        result.notify = !command.suppressNotify && outcome !== "stopped" && !state.holdUntil && (state.items.length === 0 || ["blocked", "failed"].includes(outcome) || exhausted);
         break;
+      }
       default: reject("未知队列操作");
     }
     const changed = JSON.stringify(state) !== before || JSON.stringify(raw || fresh()) !== JSON.stringify(state);

@@ -8,10 +8,10 @@
 
 Queue 文本属于浏览器本地明文数据，能访问本机浏览器配置的人可能读取它；不要将本地存储视为加密保险库。卸载扩展可清除扩展存储。旧版本数据仅保留为不执行的备份。
 
-原生 conversation POST 只在内存中解析 `action`、模型和最后一个原生用户消息 ID，正文与附件内容随即丢弃。为支持后台完成提醒，`storage.session` 会临时保留 requestId、模型、用户消息 ID、tab/document 标识、账号/Workspace 摘要、当时的 conversation URL、Queue 是否为最终项及时间戳；请求完成或失败后删除，异常残留机会性清理，扩展 reload 或浏览器重启也会清空 session。扩展不读取请求头、响应体、Cookie、Token 或认证凭据。只有 `gpt-6-pro` / `gpt-5-6-pro` 会在 `onSendHeaders` 进入永久本地用量记录；其他模型的临时请求关联只用于完成候选事件，不计额度。
+原生 conversation POST 只在内存中解析 `action`、模型和最后一个原生用户消息 ID，正文与附件内容随即丢弃。为支持后台完成提醒，`storage.session` 会临时保留 requestId、模型、用户消息 ID、tab/document 标识、账号/Workspace 摘要、当时的 conversation URL 及时间戳；请求完成或失败后删除，异常残留机会性清理，扩展 reload 或浏览器重启也会清空 session。扩展不读取请求头、响应体、Cookie、Token 或认证凭据。只有 `gpt-6-pro` / `gpt-5-6-pro` 会在 `onSendHeaders` 进入永久本地用量记录；其他模型的临时请求关联只用于完成候选事件，不计额度。
 
-网络完成提醒不会读取服务器回复正文。页面可响应并已语义完成时，短标题和回复短预览只在当前页面内生成并交给 Chrome / 操作系统通知中心，不写入扩展持久化存储；页面隐藏、冻结或探针不可用时的保守通知不含回复正文。通知路由与已创建/已关闭/已点击的去重状态会短期保存在本地，以防后台候选提醒与后续 DOM 确认重复弹出。
+网络完成提醒不会读取服务器回复正文。页面可响应并已语义完成时，短标题和回复短预览只在当前页面内生成并交给 Chrome / 操作系统通知中心，不写入扩展持久化存储。隐藏页面的已确认正常完成通知不含回复正文；探针不可用或超时则静默，不推测完成。错误分类仅保存类别和有界连续次数，不持久化原生错误详情。通知路由与去重状态会短期保存在本地，以防后台候选提醒与后续 DOM 确认重复弹出。
 
 Popup 与通知跳转均核对当前账号 / Workspace，不按相同对话 URL 跨账号跳转。过期清理只针对无正文、无活动或暂停意图的空闲 Queue bookkeeping；待发和未知结果不会自动清除。
 
-权限用途：`storage` 用于本地持久化与临时关联，`notifications` 用于系统完成提醒，`tabs` 用于校验页面身份与定位正确标签页，`webRequest` 用于只读观察上述原生发送边界。不使用 `webRequestBlocking`、Cookie、debugger、scripting 或无限存储权限。仅在 `chatgpt.com` / `chat.openai.com` 页面注入，不监控其他网站。
+权限用途：`storage` 用于本地持久化与临时关联，`notifications` 用于系统提醒，`webRequest` 用于只读观察上述原生发送边界。通过已授予的站点权限使用 tabs API 校验页面身份和定位标签页，不另申请 `tabs` 权限。不使用 `webRequestBlocking`、Cookie、debugger、scripting 或无限存储权限。仅在 `chatgpt.com` / `chat.openai.com` 页面注入，不监控其他网站。

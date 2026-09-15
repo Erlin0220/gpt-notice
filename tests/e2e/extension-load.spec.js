@@ -91,7 +91,93 @@ test("switching tabs never turns a still-running reply into a completion notice"
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:10000}).toBe(1);
   await foreground.close();
 });
-test("no-copy completion waits for transport, then continues Queue without refocus",async function({page,persistentContext,extensionServiceWorker}){test.setTimeout(35000);await page.route("https://chatgpt.com/backend-api/f/conversation",async function(route){await new Promise(function(resolve){setTimeout(resolve,6000);});await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});await page.goto("https://chatgpt.com/c/background-queue");await expect(button(page,"add")).toBeVisible();await page.evaluate(function(){window.autoReply=false;window.model="gpt-5-6-thinking";});await page.locator("#prompt-textarea").fill("manual background turn");await page.locator("#composer-submit-button").click();await enqueue(page,"queued after hidden completion");const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();await page.evaluate(function(){window.finishWithoutActions("finished without copy action");});await page.waitForTimeout(2000);expect(await page.evaluate(function(){return window.sent.length;})).toBe(1);await page.evaluate(function(){window.autoReply=true;});await expect.poll(function(){return page.evaluate(function(){return window.sent.length;});},{timeout:15000}).toBe(2);expect(await page.evaluate(function(){return window.sent[1].text;})).toBe("queued after hidden completion");await expect.poll(async function(){return (await snapshot(extensionServiceWorker)).notifications.length;},{timeout:15000}).toBe(1);await foreground.close();});
+test("transport completion without native final controls never releases Queue",async({page,persistentContext,extensionServiceWorker})=>{
+  test.setTimeout(40000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(r=>setTimeout(r,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/background-queue");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("manual background turn");await page.locator("#composer-submit-button").click();await enqueue(page,"queued after semantic completion");
+  const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
+  await page.evaluate(()=>window.finishWithoutActions("intermediate segment without final controls"));await page.waitForTimeout(6000);
+  expect(await page.evaluate(()=>window.sent.length)).toBe(1);expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(0);
+  expect((await snapshot(extensionServiceWorker)).queues.find(q=>q.key.endsWith(':background-queue')).turn.done).toBe(false);
+  await page.evaluate(()=>{window.autoReply=true;window.finish("semantically complete");});
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(2);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);await foreground.close();
+});
+
+test("Unable to think in an error-only native turn continues existing Queue without retrying the failed message",async({page,extensionServiceWorker})=>{
+  test.setTimeout(35000);
+  await page.goto("https://chatgpt.com/c/recoverable-error");await expect(button(page,"add")).toBeVisible();
+  await page.evaluate(()=>{window.autoReply=false;window.renderAssistant=false;});
+  await page.locator("#prompt-textarea").fill("original request");await page.locator("#composer-submit-button").click();await enqueue(page,"different queued task");
+  await page.evaluate(()=>{window.fail("无法思考",true);window.autoReply=true;window.renderAssistant=true;});
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:18000}).toBe(2);
+  expect(await page.evaluate(()=>window.sent.map(s=>s.text))).toEqual(["original request","different queued task"]);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].turn.outcome,{timeout:12000}).toBe("completed");
+  expect((await snapshot(extensionServiceWorker)).queues[0].paused).toBe(false);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length).toBe(1);
+});
+
+for(const [name,error] of [["quota","Network error: usage limit reached"],["policy","Policy restriction"],["unknown-error","Unrecognized service failed"]]) {
+  test(`${name} pauses pending work and remains blocked after pressing Continue`,async({page,extensionServiceWorker})=>{
+    await page.goto(`https://chatgpt.com/c/${name}`);await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+    await page.locator("#prompt-textarea").fill("original");await page.locator("#composer-submit-button").click();await enqueue(page,"must not send");
+    await page.evaluate(text=>window.fail(text),error);
+    await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].paused,{timeout:10000}).toBe(true);
+    await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length).toBe(1);
+    await button(page,"queue").click();await button(page,"pause").click();await page.waitForTimeout(5000);
+    expect(await page.evaluate(()=>window.sent.length)).toBe(1);expect((await snapshot(extensionServiceWorker)).queues[0].items).toHaveLength(1);
+    await expect(page.locator(`${host} .status`)).toContainText("原生页面仍有阻塞或异常提示");
+  });
+}
+
+test("manual Stop with leftover completion controls neither sends Queue nor announces success",async({page,extensionServiceWorker})=>{
+  await page.goto("https://chatgpt.com/c/explicit-stop");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("stop me");await page.locator("#composer-submit-button").click();await enqueue(page,"must remain queued");
+  await page.locator('[data-testid="stop-button"]').click();await page.evaluate(()=>window.finish("partial answer left after stop"));
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].turn.outcome,{timeout:10000}).toBe("stopped");
+  await page.waitForTimeout(4500);expect(await page.evaluate(()=>window.sent.length)).toBe(1);
+  expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(0);
+});
+test("Stop immediately followed by a manual message preserves Queue pause intent",async({page,extensionServiceWorker})=>{
+  await page.goto("https://chatgpt.com/c/fast-stop");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("stop first");await page.locator("#composer-submit-button").click();await enqueue(page,"remain queued");
+  await page.locator('[data-testid="stop-button"]').click();
+  await page.locator("#prompt-textarea").fill("manual follow-up");await page.locator("#composer-submit-button").click();await page.evaluate(()=>window.finish("manual completion"));
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0]?.turn?.outcome,{timeout:12000}).toBe("completed");
+  await page.waitForTimeout(4500);expect(await page.evaluate(()=>window.sent.length)).toBe(2);
+  const q=(await snapshot(extensionServiceWorker)).queues[0];expect(q.paused).toBe(true);expect(q.pauseCause).toBe("user");expect(q.items[0].text).toBe("remain queued");
+});
+
+test("native approval stays nonterminal and notifies once without auto-approving",async({page,extensionServiceWorker})=>{
+  test.setTimeout(35000);
+  await page.goto("https://chatgpt.com/c/approval");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("requires approval");await page.locator("#composer-submit-button").click();await enqueue(page,"next after real completion");
+  await page.evaluate(()=>{window.approvalClicks=0;const b=document.createElement('button');b.id='native-approval';b.textContent='Allow once';b.onclick=()=>window.approvalClicks++;document.querySelectorAll('[data-message-author-role="assistant"]').item(1).parentElement.append(b);});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:10000}).toBe(1);
+  await page.waitForTimeout(3500);expect(await page.evaluate(()=>window.approvalClicks)).toBe(0);expect(await page.evaluate(()=>window.sent.length)).toBe(1);
+  expect((await snapshot(extensionServiceWorker)).queues[0].turn.done).toBe(false);
+  await page.evaluate(()=>{document.getElementById('native-approval').remove();window.autoReply=true;window.finish('approved and genuinely completed');});
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(2);
+});
+
+test("consecutive recoverable failures pause before draining the rest of Queue",async({page,extensionServiceWorker})=>{
+  test.setTimeout(35000);
+  await page.goto("https://chatgpt.com/c/error-streak");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("first");await page.locator("#composer-submit-button").click();await enqueue(page,"one permitted follow-up");await enqueue(page,"keep this queued");
+  await page.evaluate(()=>window.fail("Unable to think"));await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:18000}).toBe(2);
+  await page.evaluate(()=>window.fail("Network error"));await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].paused,{timeout:10000}).toBe(true);
+  await page.waitForTimeout(4500);expect(await page.evaluate(()=>window.sent.length)).toBe(2);
+  const q=(await snapshot(extensionServiceWorker)).queues[0];expect(q.items[0].text).toBe("keep this queued");expect(q.failureStreak).toBe(2);
+});
+
+test("error and quota words inside assistant prose never control Queue",async({page,extensionServiceWorker})=>{
+  await page.goto("https://chatgpt.com/c/prose");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("explain failures");await page.locator("#composer-submit-button").click();
+  await page.evaluate(()=>{window.finish('normal prose');const a=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);a.innerHTML='<div class="markdown"><div role="alert">Unable to think; quota exceeded; policy; error</div></div>';});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0]?.turn?.outcome,{timeout:12000}).toBe("completed");
+  expect((await snapshot(extensionServiceWorker)).queues[0].paused).toBe(false);
+});
 test("draft protection waits without replacing text, then uses native Send",async({page})=>{
   await page.goto("https://chatgpt.com/c/draft");await expect(button(page,"add")).toBeVisible();await enqueue(page,"queued");
   await page.locator("#prompt-textarea").fill("do not touch");
@@ -248,14 +334,15 @@ test("regeneration notifies independently but never invents another native user 
   expect((await snapshot(extensionServiceWorker)).usage[0].entries).toHaveLength(1);
   await page.waitForTimeout(3000);expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(2);
 });
-test("an old error and a stopped previous reply do not poison a successful follow-up",async({page,extensionServiceWorker})=>{
+test("historical errors do not poison a successful manual follow-up, while Stop pause survives",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/old-error');await expect(button(page,'add')).toBeVisible();
   await page.evaluate(()=>{const error=document.createElement('div');error.setAttribute('role','alert');error.textContent='Historical error: request failed';document.querySelector('[data-message-author-role="assistant"]').parentElement.append(error);window.autoReply=false;});
   await page.locator('#prompt-textarea').fill('will stop');await page.locator('#composer-submit-button').click();await page.waitForTimeout(1100);
   await page.locator('[data-testid="stop-button"]').click();await page.evaluate(()=>window.autoReply=true);
   await page.locator('#prompt-textarea').fill('successful follow up');await page.locator('#composer-submit-button').click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
-  expect((await snapshot(extensionServiceWorker)).queues[0].paused).toBe(false);
+  const q=(await snapshot(extensionServiceWorker)).queues[0];
+  expect(q.turn.outcome).toBe("completed");expect(q.paused).toBe(true);expect(q.pauseCause).toBe("user");
 });
 test("a large historical transcript keeps tail detection and button identity stable",async({page})=>{
   await page.goto('https://chatgpt.com/c/large');await expect(button(page,'add')).toBeVisible();

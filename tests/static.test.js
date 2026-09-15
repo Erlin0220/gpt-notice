@@ -23,7 +23,9 @@ test("production manifest is local and contains one page controller", () => {
   const content = fs.readFileSync(path.join(root, "content.js"), "utf8");
   assert.doesNotMatch(content, /MutationObserver/);
   assert.match(content, /const hidden = document\.hidden;/);
-  assert.match(content, /response: hidden \? "" : D\.readText\(p\.assistant\)/);
+  assert.match(content, /response: hidden \|\| outcome !== "completed" \? "" : D\.readText\(p\.assistant\)/);
+  assert.doesNotMatch(content, /transportDone/);
+  assert.match(content, /observedOutcome\(p, rt\.turn\)/);
   assert.ok(bytes < 100000, `runtime should remain thin: ${bytes}`);
   assert.equal(m.content_scripts[0].js.filter(f => f === "content.js").length, 1);
   for (const obsolete of ["queue-v060.js", "queue-lease-guard.js", "diagnostics.js"]) assert.equal(fs.existsSync(path.join(root, obsolete)), false);

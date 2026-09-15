@@ -6,6 +6,8 @@
 
 `npm run e2e:smoke` 使用独立 Chromium 配置和本地 ChatGPT fixture，加载真实 Manifest V3 扩展，但不会访问或发送真实 ChatGPT 消息，因此不会消耗任何模型额度。
 
+fixture 之外的网络请求和 WebSocket 默认全部阻断，仅放行 `chrome-extension:` 本地资源。不能只依赖默认 Thinking 模型或单个已知 endpoint 的 mock 来保证零额度。
+
 覆盖重点：
 
 - 首页、项目首页与正式普通/项目对话的 SPA 路由切换。
@@ -41,6 +43,14 @@ npm run e2e:chrome:probe
 
 该流程仅附加当前已登录 Chrome，不复制 Cookie 或浏览器配置。`DevToolsActivePort` 不可用时，应把真人 CDP 核查记为未完成，而不是回退到独立登录、复制 Profile 或自动发送真实消息。
 
+已有明确选定、可附加的 Profile 时，优先使用可复现只读核查：
+
+```sh
+node scripts/e2e-live-readonly.mjs "<selected-profile-directory>" "<project-home-url>" "<already-open-conversation-url>"
+```
+
+脚本只读取端口文件，不获取登录凭据；对已有对话仅在隔离 world 中运行本轮 Queue 路由/DOM 适配器的读取方法。独立首页/项目页阻断全部写请求及 WebSocket，验证已安装的用量 UI；不刷新扩展、不安装本轮完整控制器、不修改或重新加载已有对话。结束仅关闭自己创建的页面并断开测试进程。`test-results/live-readonly-audit.json` 记录适配器 SHA-256、布尔事实、阻断数量、生成请求数和原标签页保留情况；截图只留在本机测试目录。
+
 ## 真人验证边界
 
 - 未经明确授权，不发送真实 prompt，也不使用受限模型做回归。
@@ -54,5 +64,5 @@ npm run e2e:chrome:probe
 
 - `.test-profile/`、`test-results/`、Playwright trace 和临时连接信息不得提交到 Git。
 - 不读取或保存 Cookie、Token、登录凭据。
-- 不通过测试注入第二套聊天 Runtime、网络拦截或 ChatGPT 私有 API 客户端。
+- 不注入第二套聊天 Runtime 或私有 API 客户端；测试专用出站阻断只用于防止发送，不进入扩展发布产物、不修改生产 fetch/XHR。
 - 真人核查与 fixture 证据必须分开描述，不能把 fixture 行为宣称为线上 ChatGPT 已实发验证。

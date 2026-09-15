@@ -2,6 +2,7 @@ const { defineConfig } = require("@playwright/test");
 
 module.exports = defineConfig({
   testDir: "./tests/e2e",
+  globalSetup: "./tests/e2e/global-setup.js",
   outputDir: "test-results/artifacts",
   timeout: 60_000,
   expect: {
