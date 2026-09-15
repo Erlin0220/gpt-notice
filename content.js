@@ -227,8 +227,9 @@
           } catch {}
         }
         if (finished || failed) {
+          const hidden = document.hidden;
           await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered),
-            notice: { prompt: D.readText(p.user).slice(0, 1000), response: D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at) } });
+            notice: { prompt: D.readText(p.user).slice(0, 1000), response: hidden ? "" : D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at), hidden } });
           if (rt.transportDone === active.id) rt.transportDone = "";
           rt.turn = null; rt.stopped = ""; if (failed) rt.quietAt = now;
         }

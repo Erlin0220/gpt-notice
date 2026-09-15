@@ -56,6 +56,32 @@ function completionNotice(command) {
     message: `${formatElapsed(meta.elapsedMs)} \u00b7 ${preview}`
   };
 }
+function genericCompletionNotice(meta = {}) {
+  return {
+    title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 有新结果",
+    message: `${formatElapsed(meta.elapsedMs)} · 点击查看对话`
+  };
+}
+function completionPublication(state, hidden, meta = {}) {
+  if (["stale", "running", "unavailable"].includes(state)) return null;
+  if (hidden === true) return { kind: "generic", payload: genericCompletionNotice(meta) };
+  if (state === "completed") return { kind: "completed", payload: completionNotice({ notice: meta }) };
+  if (state === "attention") return {
+    kind: "attention",
+    payload: {
+      title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 需要你处理",
+      message: `${formatElapsed(meta.elapsedMs)} · 等待确认或继续操作`
+    }
+  };
+  if (state === "failed") return {
+    kind: "failed",
+    payload: {
+      title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 回复异常",
+      message: `${formatElapsed(meta.elapsedMs)} · 回复出现异常，点击查看对话`
+    }
+  };
+  return null;
+}
 async function pageContext(tabId, documentId) {
   // Tab IDs survive worker restarts, but are not account/document identities.
   // Ask the exact live document; never reuse an unbounded tab -> account cache.
@@ -213,10 +239,10 @@ async function handle(message, sender) {
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
   if (notificationId) {
-    const notice = completionNotice(command);
+    const publication = completionPublication("completed", command.notice?.hidden === true, command.notice);
     notificationError = await publishNotice(notificationId, {
       url: route.url, scope: message.scope, tabId: sender.tab.id
-    }, notice, "completed");
+    }, publication.payload, publication.kind);
     await pruneNotices().catch(() => {});
   }
   return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
@@ -272,7 +298,7 @@ async function completionProbe(observation, route) {
     return value;
   } catch {
     // An immediate sendMessage failure means the exact document no longer exists.
-    // A frozen page remains pending and is handled by the timeout above.
+    // A timeout or missing document is not evidence that the reply completed.
     return { state: "stale" };
   } finally {
     clearTimeout(timer);
@@ -308,34 +334,12 @@ async function completeConversationRequest(details) {
   const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
   const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
   const id = noticeId(observation.scope, route.id, generationId);
-  let kind = "", payload;
+  const publication = completionPublication(probe?.state, probe?.hidden === true, {
+    prompt: probe?.prompt, response: probe?.response, elapsedMs
+  });
+  if (!publication) return;
 
-  if (probe?.state === "stale" || probe?.state === "running") return;
-  const hiddenTerminal = probe?.hidden === true && ["completed", "attention", "failed"].includes(probe?.state);
-  if (probe?.state === "unavailable" || hiddenTerminal) {
-    kind = "generic";
-    payload = {
-      title: cleanNoticeText(probe?.prompt, 56) || "ChatGPT 有新结果",
-      message: `${formatElapsed(elapsedMs)} · 点击查看对话`
-    };
-  } else if (probe?.state === "completed") {
-    kind = "completed";
-    payload = completionNotice({ notice: { prompt: probe.prompt, response: probe.response, elapsedMs } });
-  } else if (probe?.state === "attention") {
-    kind = "attention";
-    payload = {
-      title: cleanNoticeText(probe.prompt, 56) || "ChatGPT 需要你处理",
-      message: `${formatElapsed(elapsedMs)} · 等待确认或继续操作`
-    };
-  } else if (probe?.state === "failed") {
-    kind = "failed";
-    payload = {
-      title: cleanNoticeText(probe.prompt, 56) || "ChatGPT 回复异常",
-      message: `${formatElapsed(elapsedMs)} · 回复出现异常，点击查看对话`
-    };
-  } else return;
-
-  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId }, payload, kind);
+  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId }, publication.payload, publication.kind);
   await pruneNotices().catch(() => {});
 }
 

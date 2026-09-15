@@ -112,6 +112,16 @@ test("hidden running request stays silent until semantic completion", async () =
   assert.match(h.created[0].message,/最终摘要/);
   assert.equal(Object.values(h.storage).find(value=>value?.kind==="completed")?.kind,"completed");
 });
+test("hidden semantic completion publishes only a generic notice without reply preview", async () => {
+  const h = harness();
+  await h.send({op:"start",userId:"hidden-semantic"});
+  await h.send({op:"settle",userId:"hidden-semantic",notice:{prompt:"后台问题",response:"private final reply",elapsedMs:3200,hidden:true}});
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"后台问题");
+  assert.match(h.created[0].message,/点击查看对话/);
+  assert.equal(h.created[0].message.includes("private final reply"),false);
+  assert.equal(Object.values(h.storage).find(value=>value?.kind)?.kind,"generic");
+});
 test("visible running request stays silent until semantic completion", async () => {
   const h = harness();
   h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:false,generationId:"visible-user",prompt:"前台问题",response:""});
@@ -120,7 +130,7 @@ test("visible running request stays silent until semantic completion", async () 
   await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(h.created.length,0);
 });
-test("frozen final request queues the exact-document probe and falls back to a generic notice on timeout", async () => {
+test("probe timeout alone stays silent instead of guessing completion", async () => {
   const h = harness();
   const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-user",author:{role:"user"}}]});
   await h.emit("onSendHeaders",request);
@@ -129,8 +139,7 @@ test("frozen final request queues the exact-document probe and falls back to a g
   await h.emit("onCompleted",{...request,statusCode:200});
   await new Promise(resolve=>setTimeout(resolve,750));
   assert.equal(h.probeCalls.length,1);
-  assert.equal(h.created.length,1);
-  assert.equal(h.created[0].title,"ChatGPT 有新结果");
+  assert.equal(h.created.length,0);
 });
 test("pending Queue work suppresses interim network notifications", async () => {
   const h = harness();

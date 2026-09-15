@@ -58,18 +58,17 @@ test("manual native sends still complete when the rendered user turn contains at
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
   expect(await page.evaluate(()=>window.sent.length)).toBe(1);
 });
-test("network completion can notify when the page probe is unavailable, then DOM upgrades the same notice",async({page,extensionServiceWorker})=>{
+test("unavailable network probe stays silent until DOM semantic completion",async({page,extensionServiceWorker})=>{
   test.setTimeout(30000);
   await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
   await page.goto("https://chatgpt.com/c/background-network");await expect(button(page,"add")).toBeVisible();
   await page.evaluate(()=>{window.autoReply=false;window.model="gpt-5-6-thinking";});
   await page.locator("#prompt-textarea").fill("fixture background notification");await page.locator("#composer-submit-button").click();
   await extensionServiceWorker.evaluate(()=>{const originalGet=chrome.tabs.get.bind(chrome.tabs),originalSend=chrome.tabs.sendMessage.bind(chrome.tabs);globalThis.__restoreFrozenProbe=()=>{chrome.tabs.get=originalGet;chrome.tabs.sendMessage=originalSend;delete globalThis.__restoreFrozenProbe;};chrome.tabs.get=async id=>({...await originalGet(id),frozen:true});chrome.tabs.sendMessage=(id,message,options)=>message?.type==="NOTICE_COMPLETION_PROBE"?new Promise(()=>{}):originalSend(id,message,options);});
-  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:6000}).toBe(1);
+  await page.waitForTimeout(2500);
+  expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(0);
   await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.turn),{timeout:3000}).toBe(true);
   let state=await snapshot(extensionServiceWorker);expect(state.queues[0].turn.done).toBe(false);
-  const generic=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="generic"));
-  expect(generic).toBeTruthy();
   await extensionServiceWorker.evaluate(()=>globalThis.__restoreFrozenProbe?.());
   await page.evaluate(()=>window.finish("final background fixture reply"));
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].turn.done,{timeout:10000}).toBe(true);
@@ -85,9 +84,6 @@ test("switching tabs never turns a still-running reply into a completion notice"
   await page.evaluate(()=>{window.autoReply=false;window.model="gpt-5-6-thinking";});
   await page.locator("#prompt-textarea").fill("keep running after tab switch");await page.locator("#composer-submit-button").click();
   const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
-  // Headless Chromium keeps every target visible. Mirror the browser visibility
-  // bit that a real background tab reports so the exact completion-probe branch runs.
-  await page.evaluate(()=>Object.defineProperty(document,"hidden",{configurable:true,value:true}));
   await page.waitForTimeout(2500);
   expect((await snapshot(extensionServiceWorker)).notifications).toHaveLength(0);
   await expect(page.locator('[data-testid="stop-button"]')).toHaveCount(1);
