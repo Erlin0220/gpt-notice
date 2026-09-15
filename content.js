@@ -4,47 +4,16 @@
   const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage;
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
-    tickBusy: false, tickScheduled: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
-    pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false, ticks: 0, maxTickMs: 0 };
+    tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
+    pending: null, retryBaseline: null, transportDone: "", attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
-  let interval = 0, observer = null, observedNodes = [];
-  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-  function runScheduledTick() {
-    if (rt.disposed || !rt.tickScheduled || rt.tickBusy) return;
-    rt.tickScheduled = false;
-    void tick();
-  }
-  function scheduleTick() {
-    if (rt.disposed) return;
-    rt.tickScheduled = true;
-    if (!rt.tickBusy) queueMicrotask(runScheduledTick);
-  }
-  function observeState(p) {
-    const turnSelector = '[data-testid^="conversation-turn-"], article';
-    const assistantTurn = p?.assistant?.closest?.(turnSelector) || null;
-    const userTurn = p?.user?.closest?.(turnSelector) || null;
-    const transcript = userTurn?.parentElement || assistantTurn?.parentElement || null;
-    const next = [p?.anchor || null, assistantTurn, transcript].filter((node, index, all) => node && all.indexOf(node) === index);
-    if (next.length === observedNodes.length && next.every((node, index) => node === observedNodes[index])) return;
-    observer ||= new MutationObserver(() => scheduleTick());
-    observer.disconnect();
-    observedNodes = next;
-    if (transcript) observer.observe(transcript, { childList: true });
-    for (const target of [p?.anchor, assistantTurn]) {
-      if (!target || target === transcript) continue;
-      observer.observe(target, { childList: true, attributes: true, attributeFilter: ["data-state", "aria-disabled", "disabled"] });
-    }
-  }
-  const noticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
-  const noticePreviewCandidate = value => String(value ?? "").trim().slice(0, 1000);
+  let interval = 0;
   const current = context => context === rt.context && location.href === context?.url && !rt.disposed;
   function disconnect() {
     rt.disposed = true;
     clearInterval(interval);
-    observer?.disconnect();
-    observedNodes = [];
     events.abort();
     try { chrome.storage.onChanged.removeListener(storageListener); } catch {}
     try { chrome.runtime.onMessage.removeListener(runtimeListener); } catch {}
@@ -102,6 +71,7 @@
     if (event.type === "click" && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
       const page = D.snapshot();
       rt.retryBaseline = { userId: page.userId, assistantId: page.assistantId };
+      rt.transportDone = "";
       if (rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
     const nativeSend = event.type === "click" && button?.matches(D.SEND) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
@@ -109,6 +79,7 @@
       const page = D.snapshot();
       if (page.empty) return;
       if (rt.attempt) rt.attempt.submitted = true;
+      rt.transportDone = "";
       rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
       if (!rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
@@ -148,14 +119,12 @@
       const p = D.snapshot(document, true);
       const sameTurn = p.userId === message.turnId;
       const state = !sameTurn ? "stale" : p.waiting ? "attention" : p.error ? "failed" : !p.running && p.ready && p.copy && p.assistantId ? "completed" : "running";
-      if (rt.turn?.id === message.turnId) rt.turn.transportDoneAt = Date.now();
-      observeState(p);
-      scheduleTick();
+      if (sameTurn) rt.transportDone = message.turnId;
       reply({
         scope, url, state, hidden: document.hidden,
         generationId: rt.turn?.id === message.turnId ? rt.turn.generationId : message.turnId,
-        title: sameTurn ? noticeText(D.readText(p.user), 56) : "",
-        preview: state === "completed" ? noticePreviewCandidate(D.readText(p.assistant)) : ""
+        prompt: sameTurn ? D.readText(p.user).slice(0, 1000) : "",
+        response: state === "completed" ? D.readText(p.assistant).slice(0, 1000) : ""
       });
     })().catch(() => reply(null));
     return true;
@@ -165,7 +134,6 @@
   async function tick() {
     if (rt.tickBusy || rt.disposed) return;
     rt.tickBusy = true;
-    const start = performance.now();
     try {
       runtime();
       const url = location.href;
@@ -186,13 +154,12 @@
         rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
         rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
         rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
-        rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
+        rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.transportDone = ""; rt.addAttempt = null;
         if (!carryingFirstSend) rt.pending = null;
         if (scope) await request({ op: "get" });
         if (!current(rt.context)) return;
       }
       rt.page = p;
-      observeState(p);
       if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
       const now = Date.now();
       if (scope && rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
@@ -242,7 +209,8 @@
       if (p.running) rt.quietAt = now;
       const active = rt.turn;
       if (active && p.userId === active.id && D.generationMatches(active.generationId, p)) {
-        const fingerprint = !p.running && p.copy ? `${p.assistantId}:${p.settledText}` : "";
+        const completionEvidence = p.copy || rt.transportDone === active.id;
+        const fingerprint = !p.running && p.assistantId && completionEvidence ? `${p.assistantId}:${p.settledText}` : "";
         if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
         const finished = !p.running && p.ready && fingerprint && now - active.stableAt >= 3000 && now - active.at >= 3000;
         const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
@@ -260,8 +228,9 @@
         }
         if (finished || failed) {
           await request({ op: "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, failed: Boolean(p.error || stopped), suppressNotify: Boolean(active.recovered),
-            notice: { title: noticeText(D.readText(p.user), 56), preview: noticePreviewCandidate(D.readText(p.assistant)), elapsedMs: Math.max(0, now - active.at) } });
-          rt.turn = null; rt.stopped = ""; rt.quietAt = now;
+            notice: { prompt: D.readText(p.user).slice(0, 1000), response: D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at) } });
+          if (rt.transportDone === active.id) rt.transportDone = "";
+          rt.turn = null; rt.stopped = ""; if (failed) rt.quietAt = now;
         }
       }
       render();
@@ -269,12 +238,7 @@
     } catch (error) {
       // Missing adapters, storage failures and route races do not fall back to sending.
       render(error.message);
-    } finally {
-      rt.ticks += 1;
-      rt.maxTickMs = Math.max(rt.maxTickMs, performance.now() - start);
-      rt.tickBusy = false;
-      if (rt.tickScheduled) queueMicrotask(runScheduledTick);
-    }
+    } finally { rt.tickBusy = false; }
   }
 
   function safeToSend(p) {
@@ -309,7 +273,7 @@
       if (!written) throw new Error("原生输入框未接受文本，Queue 已保留");
       const deadline = Date.now() + 2500;
       do {
-        await delay(100);
+        await new Promise(resolve => setTimeout(resolve, 100));
         if (await D.scope() !== context.scope) throw new Error("账号已切换，发送已停止");
         page = guard(item.text);
         if (!manual && rt.queue?.paused) throw new Error("队列已暂停，草稿保留");
@@ -345,7 +309,7 @@
         if (!text.trim() || !page.composer || page.attachments || rt.composing) throw new Error("仅支持已完成输入的纯文本；草稿和附件未改动");
         if (page.running && page.userId && !rt.queue?.turn) await request({ op: "start", userId: page.userId }, context);
         if (!rt.addAttempt || rt.addAttempt.text !== text || rt.addAttempt.context !== context) rt.addAttempt = { id: Q.id(), text, context };
-        await request({ op: "add", id: rt.addAttempt.id, text, running: page.running || Boolean(rt.turn) }, context);
+        await request({ op: "add", id: rt.addAttempt.id, text }, context);
         if (await D.scope() !== context.scope || !current(context) || epoch !== rt.inputEpoch || D.composer() !== page.composer || D.readText(page.composer) !== text || D.snapshot().attachments || rt.composing) { ui.showNotice("已保存 Queue；输入期间有变化，当前草稿保持原样"); return; }
         runtime();
         rt.writing = true;
@@ -366,9 +330,6 @@
   interval = setInterval(() => void tick(), 1000);
   addEventListener("popstate", () => void tick(), { signal: events.signal });
   addEventListener("pageshow", () => void tick(), { signal: events.signal });
-  globalThis.ChatGPTNotice = {
-    stats: () => ({ ticks: rt.ticks, maxTickMs: rt.maxTickMs, mode: rt.context?.mode, sending: rt.sending }),
-    dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; }
-  };
+  globalThis.ChatGPTNotice = { dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; } };
   void tick();
 })();

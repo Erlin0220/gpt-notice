@@ -7,16 +7,26 @@ const serial = fn => {
   mutations = next.catch(() => {});
   return next;
 };
-const PAGE_URLS = ["https://chatgpt.com/*", "https://chat.openai.com/*"];
+const PAGE_URLS = [...Queue.HOSTS].map(host => `https://${host}/*`);
 const REQUEST_PREFIX = "notice:request:";
 const CLEANUP_KEY = "notice:last-cleanup";
 const REQUEST_TTL = 10 * 60_000;
 const REQUEST_FILTER = {
-  urls: ["chatgpt.com", "chat.openai.com"].flatMap(host => [
+  urls: [...Queue.HOSTS].flatMap(host => [
     `https://${host}/backend-api/f/conversation*`, `https://${host}/backend-api/conversation*`
   ]), types: ["xmlhttprequest"]
 };
-const nativePost = details => details.method === "POST" && /^https:\/\/(?:chatgpt\.com|chat\.openai\.com)\/backend-api\/(?:f\/)?conversation(?:\?|$)/.test(details.url);
+const nativePost = details => {
+  if (details.method !== "POST") return false;
+  try {
+    const url = new URL(details.url);
+    return url.protocol === "https:" && Queue.HOSTS.has(url.hostname) && /^\/backend-api\/(?:f\/)?conversation$/.test(url.pathname);
+  } catch { return false; }
+};
+const trustedOrigin = value => {
+  try { const url = new URL(value); return url.protocol === "https:" && Queue.HOSTS.has(url.hostname) && url.origin === value; }
+  catch { return false; }
+};
 let lastCleanup = 0;
 const cleanNoticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 function cleanNoticePreview(value, max = 220) {
@@ -40,9 +50,9 @@ function formatElapsed(elapsedMs) {
 }
 function completionNotice(command) {
   const meta = command?.notice || {};
-  const preview = cleanNoticePreview(meta.preview, 160) || "\u56de\u590d\u5df2\u5b8c\u6210";
+  const preview = cleanNoticePreview(meta.response, 160) || "\u56de\u590d\u5df2\u5b8c\u6210";
   return {
-    title: cleanNoticeText(meta.title, 56) || "ChatGPT \u56de\u590d\u5b8c\u6210",
+    title: cleanNoticeText(meta.prompt, 56) || "ChatGPT \u56de\u590d\u5b8c\u6210",
     message: `${formatElapsed(meta.elapsedMs)} \u00b7 ${preview}`
   };
 }
@@ -69,7 +79,7 @@ function requestJson(requestBody) {
 }
 function submittedConversation(details) {
   if (!nativePost(details) || !Number.isInteger(details.tabId) || details.tabId < 0 || details.frameId !== 0 || !details.documentId || !/^[\w.-]{1,100}$/.test(details.requestId || "")) return null;
-  if (!/^https:\/\/(?:chatgpt\.com|chat\.openai\.com)$/.test(details.initiator || "")) return null;
+  if (!trustedOrigin(details.initiator || "")) return null;
   const body = requestJson(details.requestBody);
   const model = String(body?.model || "").slice(0, 120);
   if (body?.action !== "next") return null;
@@ -80,25 +90,25 @@ function submittedConversation(details) {
   // transport metadata only and is cleared at request completion/error.
   return { turnId, model, tabId: details.tabId, documentId: details.documentId, requestId: details.requestId, at: Date.now() };
 }
-function submittedUsage(observation) {
-  return observation && Usage.MODELS.has(observation.model) ? observation : null;
-}
 async function captureRequest(observation) {
   const context = await pageContext(observation.tabId, observation.documentId);
   if (!context) return;
   await pruneStorage().catch(() => {});
+  let finalQueueRequest = false;
   const route = Queue.route(context.url);
-  let queueOwned = false, queueFinal = false;
   if (route.mode === "conversation") {
     const queueKey = Queue.key(context.scope, context.url);
     const queue = queueKey ? (await chrome.storage.local.get(queueKey))[queueKey] : null;
-    const ownerPrefix = `${observation.tabId}:${observation.documentId}:`;
-    queueOwned = Boolean(queue?.items?.some(item => item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(ownerPrefix)));
-    queueFinal = queueOwned && queue.items.length === 1;
+    const item = queue?.items?.length === 1 ? queue.items[0] : null;
+    finalQueueRequest = Boolean(item && item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(`${observation.tabId}:${observation.documentId}:`));
   }
   await chrome.storage.session.set({
-    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, queueOwned, queueFinal, sentAt: 0 }
+    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, finalQueueRequest, sentAt: 0 }
   });
+}
+function readUsage(raw) {
+  try { return Usage.apply(raw, { op: "get" }); }
+  catch { return { state: raw && typeof raw === "object" ? raw : { version: 0, revision: 0 }, changed: false }; }
 }
 async function recordSubmittedUsage(details) {
   const key = REQUEST_PREFIX + details.requestId;
@@ -106,7 +116,7 @@ async function recordSubmittedUsage(details) {
   if (!observation || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL) return;
   const sentAt = Date.now();
   await chrome.storage.session.set({ [key]: { ...observation, sentAt } });
-  if (!submittedUsage(observation)) return;
+  if (!Usage.MODELS.has(observation.model)) return;
   const context = await pageContext(details.tabId, details.documentId);
   if (context?.scope !== observation.scope) return;
   const usageKey = Usage.PREFIX + observation.scope;
@@ -135,8 +145,8 @@ chrome.webRequest.onCompleted.addListener(details => {
 chrome.webRequest.onErrorOccurred.addListener(details => {
   if (nativePost(details)) void serial(() => chrome.storage.session.remove(REQUEST_PREFIX + details.requestId)).catch(() => {});
 }, REQUEST_FILTER);
-chrome.notifications.onClicked.addListener(id => void openNotice(id).catch(() => {}));
-chrome.notifications.onClosed.addListener(id => void serial(() => markNoticeClosed(id)).catch(() => {}));
+chrome.notifications.onClicked.addListener(id => void serial(() => openNotice(id)).catch(() => {}));
+chrome.notifications.onClosed.addListener((id, byUser) => { if (byUser) void serial(() => markNoticeClosed(id)).catch(() => {}); });
 
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
@@ -145,7 +155,7 @@ async function handle(message, sender) {
     const context = tab && await pageContext(tab.id);
     const stored = await chrome.storage.local.get(null);
     const queues = context ? Object.entries(stored).filter(([k]) => k.startsWith(`${Queue.PREFIX}${context.scope}:`)).map(([k, q]) => ({ key: k, url: q?.url, count: q?.items?.length || 0, paused: q?.paused })).filter(q => q.count && Queue.route(q.url).mode === "conversation") : [];
-    return { ok: true, queues, scopeKnown: Boolean(context), enabled: stored["notice:notifications"] !== false };
+    return { ok: true, queues, scopeKnown: Boolean(context), enabled: stored["notice:notifications"] !== false, permission: await chrome.notifications.getPermissionLevel() };
   }
   if (message?.type === "NOTICE_SETTING") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可修改设置");
@@ -172,14 +182,14 @@ async function handle(message, sender) {
   if (!queueKey) {
     if (message.command?.op && message.command.op !== "get") throw new Error("仅正式对话支持 Queue");
     const stored = await chrome.storage.local.get(usageKey);
-    const usage = Usage.apply(stored[usageKey], { op: "get" });
+    const usage = readUsage(stored[usageKey]);
     if (usage.changed) await chrome.storage.local.set({ [usageKey]: usage.state });
     return { ok: true, queue: null, usage: usage.state };
   }
   const stored = await chrome.storage.local.get([queueKey, usageKey, "notice:notifications"]);
   const raw = stored[queueKey];
   let command = message.command || { op: "get" };
-  if (command.op === "start") {
+  if (command.op === "start" && raw?.turn && !raw.turn.done && !raw.turn.source) {
     const tabs = await chrome.tabs.query({ url: PAGE_URLS });
     const sameConversation = tabs.filter(tab => Queue.route(tab.url).id === route.id);
     command = { ...command, singleTab: sameConversation.length === 1 };
@@ -192,7 +202,7 @@ async function handle(message, sender) {
     if (recovered.changed) await chrome.storage.local.set({ [queueKey]: recovered.state });
     throw error;
   }
-  const usage = Usage.apply(stored[usageKey], { op: "get" });
+  const usage = readUsage(stored[usageKey]);
   const writes = {};
   if (usage.changed) writes[usageKey] = usage.state;
   if (result.changed) {
@@ -221,19 +231,19 @@ async function publishNotice(id, routing, payload, kind) {
   const stored = await chrome.storage.local.get([key, "notice:notifications"]);
   if (stored["notice:notifications"] === false) return "";
   const previous = stored[key];
-  if (previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return "";
-  const record = {
-    ...previous, ...routing, at: previous?.at || Date.now(), updatedAt: Date.now(),
-    kind, attempted: true
-  };
-  await chrome.storage.local.set({ [key]: record });
+  if (previous?.dismissedAt || previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return "";
   const options = {
     type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
     title: payload.title, message: payload.message, priority: 0
   };
+  const routingRecord = { ...previous, ...routing, at: previous?.at || Date.now() };
   try {
-    if (previous?.attempted) await chrome.notifications.update(id, options);
-    else await chrome.notifications.create(id, options);
+    // Persist only routing before the OS call. The delivered rank is written
+    // after create/update succeeds, so a failed notification remains retryable.
+    await chrome.storage.local.set({ [key]: routingRecord });
+    const updated = previous ? await chrome.notifications.update(id, options) : false;
+    if (!updated) await chrome.notifications.create(id, options);
+    await chrome.storage.local.set({ [key]: { ...routingRecord, kind } });
     return "";
   } catch (error) {
     return String(error?.message || error || "notification failed");
@@ -243,7 +253,7 @@ async function publishNotice(id, routing, payload, kind) {
 async function markNoticeClosed(id) {
   const key = noticeKey(id);
   const notice = (await chrome.storage.local.get(key))[key];
-  if (notice && !notice.closedAt) await chrome.storage.local.set({ [key]: { ...notice, closedAt: Date.now() } });
+  if (notice && !notice.dismissedAt) await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } });
 }
 
 async function completionProbe(observation, route) {
@@ -274,7 +284,9 @@ async function networkNoticeEligible(observation, route) {
   if (!queueKey) return true;
   const queue = (await chrome.storage.local.get(queueKey))[queueKey];
   if (!queue?.items?.length) return true;
-  return Boolean(observation.queueFinal && queue.items.length === 1);
+  if (!observation.finalQueueRequest || queue.items.length !== 1) return false;
+  const item = queue.items[0];
+  return item.state === "sending" && item.phase === "submitting" && String(item.owner || "").startsWith(`${observation.tabId}:${observation.documentId}:`);
 }
 
 async function completeConversationRequest(details) {
@@ -289,9 +301,10 @@ async function completeConversationRequest(details) {
   const route = Queue.route(tab?.url);
   const originRoute = Queue.route(observation.url);
   if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) return;
-  if (!(await networkNoticeEligible(observation, route))) return;
+  const notificationEligible = await networkNoticeEligible(observation, route);
 
-  const probe = tab?.discarded || tab?.frozen ? { state: "unavailable" } : await completionProbe(observation, route);
+  const probe = tab?.discarded ? { state: "unavailable" } : await completionProbe(observation, route);
+  if (!notificationEligible) return;
   const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
   const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
   const id = noticeId(observation.scope, route.id, generationId);
@@ -299,24 +312,24 @@ async function completeConversationRequest(details) {
 
   if (probe?.state === "completed") {
     kind = "completed";
-    payload = completionNotice({ notice: { title: probe.title, preview: probe.preview, elapsedMs } });
+    payload = completionNotice({ notice: { prompt: probe.prompt, response: probe.response, elapsedMs } });
   } else if (probe?.state === "attention") {
     kind = "attention";
     payload = {
-      title: cleanNoticeText(probe.title, 56) || "ChatGPT 需要你处理",
+      title: cleanNoticeText(probe.prompt, 56) || "ChatGPT 需要你处理",
       message: `${formatElapsed(elapsedMs)} · 等待确认或继续操作`
     };
   } else if (probe?.state === "failed") {
     kind = "failed";
     payload = {
-      title: cleanNoticeText(probe.title, 56) || "ChatGPT 回复异常",
+      title: cleanNoticeText(probe.prompt, 56) || "ChatGPT 回复异常",
       message: `${formatElapsed(elapsedMs)} · 回复出现异常，点击查看对话`
     };
   } else if (probe?.state === "stale") return;
   else if (probe?.state === "unavailable" || probe?.hidden === true) {
     kind = "generic";
     payload = {
-      title: cleanNoticeText(probe?.title, 56) || "ChatGPT 有新结果",
+      title: cleanNoticeText(probe?.prompt, 56) || "ChatGPT 有新结果",
       message: `${formatElapsed(elapsedMs)} · 点击查看对话`
     };
   } else return;
@@ -345,7 +358,7 @@ async function openNotice(id) {
     if (!active || (await pageContext(active.id))?.scope !== notice.scope) return;
     await chrome.tabs.create({ url: notice.url, active: true });
   }
-  await chrome.storage.local.set({ [key]: { ...notice, consumedAt: Date.now() } });
+  await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } });
   await chrome.notifications.clear(id);
 }
 

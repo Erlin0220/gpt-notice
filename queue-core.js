@@ -8,6 +8,7 @@
 })(globalThis, function () {
   "use strict";
   const PREFIX = "notice:conversation:";
+  const HOSTS = new Set(["chatgpt.com", "chat.openai.com"]);
   const MAX_ITEMS = 50;
   const MAX_TEXT = 200_000;
   const MAX_TOTAL = 1_000_000;
@@ -21,7 +22,7 @@
   function route(value) {
     try {
       const url = new URL(value);
-      if (!/^https:$/.test(url.protocol) || !["chatgpt.com", "chat.openai.com"].includes(url.hostname)) return { mode: "off", id: "" };
+      if (!/^https:$/.test(url.protocol) || !HOSTS.has(url.hostname)) return { mode: "off", id: "" };
       const path = url.pathname.replace(/\/+$/, "") || "/";
       const conversation = path.match(/(?:^|\/)c\/([a-zA-Z0-9_-]+)$/)?.[1];
       if (conversation) return { mode: "conversation", id: conversation, url: `${url.origin}${path}` };
@@ -244,7 +245,7 @@
         state.turn.done = true;
         state.turn.assistantId = String(command.assistantId || "");
         state.settled = [...state.settled, state.turn.id].slice(-200);
-        // Store notification intent before touching chrome.notifications: at-most-once.
+        // Return notification intent only after the completion state is durable.
         result.notify = state.items.length === 0 && !command.failed && !command.suppressNotify && !state.turn.stopped && !state.holdUntil;
         if (command.failed || state.turn.stopped) { state.paused = true; state.pauseCause = "safety"; state.reason = "当前回复异常或已停止，请检查后继续"; }
         break;
@@ -254,5 +255,5 @@
     if (changed) { state.revision += 1; state.updatedAt = now; }
     return { state, changed, ...result };
   }
-  return { PREFIX, MAX_ITEMS, MAX_TEXT, LEASE_MS, CONFLICT_REASON, id, text, comparable, route, key, fresh, normalize, apply };
+  return { PREFIX, HOSTS, MAX_ITEMS, MAX_TEXT, LEASE_MS, CONFLICT_REASON, id, text, comparable, route, key, fresh, normalize, apply };
 });

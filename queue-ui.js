@@ -123,7 +123,7 @@
       $(".usage").title = next.scope ? usage.resetLabel : "GPT-6 用量设置";
       $(".source").textContent = usage.sourceLabel;
       $(".reset").textContent = usage.resetLabel;
-      $(".config").textContent = `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Pro 计入这组本地额度，不包含 Thinking、Work 或 Codex。首次使用日期：${usage.firstUseDate}。`;
+      $(".config").textContent = usage.incompatible ? "本地用量数据由不兼容版本创建；当前版本不会覆盖。" : `当前设置：每 ${usage.cycleDays} 天 ${usage.limit} 次；GPT-6 Pro 与 GPT-5.6 Pro 计入这组本地额度，不包含 Thinking、Work 或 Codex。`;
       for (const name of ["add", "queue"]) $(`[data-action="${name}"]`).hidden = next.mode !== "conversation";
       $('[data-action="add"]').disabled = !next.scope || next.actionBusy || next.attachments;
       $('[data-action="add"]').title = next.attachments ? "图片/附件暂不支持加入 Queue；请使用 ChatGPT 原生发送" : "把当前纯文本草稿加入 Queue";

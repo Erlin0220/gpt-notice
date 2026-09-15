@@ -4,7 +4,7 @@ const Q = require("../queue-core");
 const U = require("../usage-core");
 const at = Date.parse("2026-09-14T12:00:00Z");
 const scope = "a".repeat(64);
-function added(text = "next prompt") { return Q.apply(undefined, { op: "add", id: "item-12345", text, running: true }, "tab-A", at).state; }
+function added(text = "next prompt") { return Q.apply(undefined, { op: "add", id: "item-12345", text }, "tab-A", at).state; }
 function claim(state = added()) { return Q.apply(state, { op: "claim", baseline: "user-before" }, "tab-A", at + 1); }
 
 test("route keys only exist for stable formal conversations, independent of tab and project label", () => {
@@ -24,10 +24,10 @@ test("enqueue is idempotent and rejects overflow without truncating", () => {
   assert.equal(state.items.length, 1);
 });
 test("idle enqueue starts active unless the user explicitly paused the queue", () => {
-  let state = Q.apply(undefined, { op: "add", id: "item-idle-1", text: "run me", running: false }, "tab-A", at).state;
+  let state = Q.apply(undefined, { op: "add", id: "item-idle-1", text: "run me" }, "tab-A", at).state;
   assert.equal(state.paused, false);
   state = Q.apply(state, { op: "pause", paused: true }, "tab-A", at + 1).state;
-  state = Q.apply(state, { op: "add", id: "item-idle-2", text: "wait too", running: false }, "tab-A", at + 2).state;
+  state = Q.apply(state, { op: "add", id: "item-idle-2", text: "wait too" }, "tab-A", at + 2).state;
   assert.equal(state.paused, true);
   assert.equal(state.pauseCause, "user");
 });
@@ -171,6 +171,15 @@ test("usage starts with unknown history and no fabricated reset or remaining cou
   assert.equal(s.used, 0); assert.equal(s.baselineKnown, false); assert.equal(s.resetAt, 0);
   assert.equal(s.cycleDays, 7); assert.match(s.label, /^GPT-6 · 0 \/ 50 · 刷新未知$/);
   assert.doesNotMatch(s.label, /校正|记录|计算|推算/); assert.equal(s.remaining, undefined);
+});
+test("usage rejects unknown schemas without overwriting them and normalizes obsolete v1 fields", () => {
+  assert.throws(() => U.apply({version:2,entries:[],limit:99},{op:"get"},at),/数据格式异常/);
+  const legacy={...U.fresh(at),firstUseDate:"2026-09-09",resetSource:"manual",updatedAt:at};
+  const normalized=U.apply(legacy,{op:"get"},at).state;
+  assert.equal(normalized.firstUseDate,undefined);assert.equal(normalized.resetSource,undefined);assert.equal(normalized.updatedAt,undefined);assert.equal(U.WEEK,undefined);
+});
+test("usage summary can report an incompatible schema without making it writable", () => {
+  const view=U.summary({version:2,revision:7,entries:[]},at);assert.equal(view.incompatible,true);assert.match(view.label,/数据需升级/);assert.equal(view.revision,7);
 });
 test("manual and Queue observed receipts share the same model rules and dedup key", () => {
   let s = U.fresh(at);

@@ -4,7 +4,7 @@
   "version": "0.8.0",
   "description": "保留原生 ChatGPT 输入体验，提供本地 Queue、完成通知与来源明确的 GPT-6 用量记录。",
   "minimum_chrome_version": "120",
-  "permissions": ["notifications", "storage", "tabs", "webRequest"],
+  "permissions": ["notifications", "storage", "webRequest"],
   "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js" },
   "action": {

@@ -10,10 +10,11 @@ test.beforeEach(async({persistentContext,extensionServiceWorker})=>{
 });
 test("MV3 loads and popup lists only pending conversation queues",async({page,extensionServiceWorker,persistentContext,extensionId})=>{
   expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.0");
+  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().permissions)).toEqual(["notifications","storage","webRequest"]);
   await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await page.bringToFront();await popup.reload();
-  await expect(popup.locator("h1")).toHaveText("ChatGPT Queue");await expect(popup.locator("#queues a")).toHaveCount(1);
+  await expect(popup.locator("h1")).toHaveText("ChatGPT Queue");await expect(popup.locator("#permission")).toContainText("系统通知权限：允许");await expect(popup.locator("#queues a")).toHaveCount(1);
 });
 test("home and project first sends change modes without replacing the UI root",async({page,extensionServiceWorker})=>{
   await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await expect(button(page,"queue")).toBeHidden();
@@ -63,13 +64,13 @@ test("network completion can notify when the page probe is unavailable, then DOM
   await page.goto("https://chatgpt.com/c/background-network");await expect(button(page,"add")).toBeVisible();
   await page.evaluate(()=>{window.autoReply=false;window.model="gpt-5-6-thinking";});
   await page.locator("#prompt-textarea").fill("fixture background notification");await page.locator("#composer-submit-button").click();
-  await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.turn),{timeout:1200}).toBe(true);
-  await extensionServiceWorker.evaluate(()=>{const original=chrome.tabs.get.bind(chrome.tabs);globalThis.__restoreTabsGet=()=>{chrome.tabs.get=original;delete globalThis.__restoreTabsGet;};chrome.tabs.get=async id=>({...await original(id),frozen:true});});
+  await extensionServiceWorker.evaluate(()=>{const originalGet=chrome.tabs.get.bind(chrome.tabs),originalSend=chrome.tabs.sendMessage.bind(chrome.tabs);globalThis.__restoreFrozenProbe=()=>{chrome.tabs.get=originalGet;chrome.tabs.sendMessage=originalSend;delete globalThis.__restoreFrozenProbe;};chrome.tabs.get=async id=>({...await originalGet(id),frozen:true});chrome.tabs.sendMessage=(id,message,options)=>message?.type==="NOTICE_COMPLETION_PROBE"?new Promise(()=>{}):originalSend(id,message,options);});
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:6000}).toBe(1);
+  await expect.poll(async()=>Boolean((await snapshot(extensionServiceWorker)).queues[0]?.turn),{timeout:3000}).toBe(true);
   let state=await snapshot(extensionServiceWorker);expect(state.queues[0].turn.done).toBe(false);
   const generic=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="generic"));
   expect(generic).toBeTruthy();
-  await extensionServiceWorker.evaluate(()=>globalThis.__restoreTabsGet?.());
+  await extensionServiceWorker.evaluate(()=>globalThis.__restoreFrozenProbe?.());
   await page.evaluate(()=>window.finish("final background fixture reply"));
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0].turn.done,{timeout:10000}).toBe(true);
   await page.waitForTimeout(500);
@@ -77,6 +78,7 @@ test("network completion can notify when the page probe is unavailable, then DOM
   const completed=await extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.kind==="completed"));
   expect(completed).toBeTruthy();
 });
+test("no-copy completion waits for transport, then continues Queue without refocus",async function({page,persistentContext,extensionServiceWorker}){test.setTimeout(35000);await page.route("https://chatgpt.com/backend-api/f/conversation",async function(route){await new Promise(function(resolve){setTimeout(resolve,6000);});await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});await page.goto("https://chatgpt.com/c/background-queue");await expect(button(page,"add")).toBeVisible();await page.evaluate(function(){window.autoReply=false;window.model="gpt-5-6-thinking";});await page.locator("#prompt-textarea").fill("manual background turn");await page.locator("#composer-submit-button").click();await enqueue(page,"queued after hidden completion");const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();await page.evaluate(function(){window.finishWithoutActions("finished without copy action");});await page.waitForTimeout(2000);expect(await page.evaluate(function(){return window.sent.length;})).toBe(1);await page.evaluate(function(){window.autoReply=true;});await expect.poll(function(){return page.evaluate(function(){return window.sent.length;});},{timeout:15000}).toBe(2);expect(await page.evaluate(function(){return window.sent[1].text;})).toBe("queued after hidden completion");await expect.poll(async function(){return (await snapshot(extensionServiceWorker)).notifications.length;},{timeout:15000}).toBe(1);await foreground.close();});
 test("draft protection waits without replacing text, then uses native Send",async({page})=>{
   await page.goto("https://chatgpt.com/c/draft");await expect(button(page,"add")).toBeVisible();await enqueue(page,"queued");
   await page.locator("#prompt-textarea").fill("do not touch");
@@ -355,9 +357,9 @@ test("a terminated MV3 worker wakes from a queue action with durable state intac
 
 test("DOM fallback waits for a confirmed reply and uses the native user ID",async({page,extensionServiceWorker})=>{
   await page.goto('https://chatgpt.com/c/dom-fallback');await expect(button(page,'add')).toBeVisible();
-  // Fault-inject only the observer in this isolated fixture worker; native UI
-  // and its intercepted request still run, and the usage store remains intact.
-  await extensionServiceWorker.evaluate(()=>{submittedUsage=()=>null;});
+  // Fault-inject native request accounting in this isolated fixture worker; native UI
+  // and its intercepted request still run, so only the DOM fallback can record usage.
+  await extensionServiceWorker.evaluate(()=>{recordSubmittedUsage=async()=>{};});
   await page.evaluate(()=>{window.model='gpt-6-pro';window.autoReply=false;});
   await page.locator('#prompt-textarea').fill('fixture DOM fallback');await page.locator('#composer-submit-button').click();
   await page.waitForTimeout(2000);

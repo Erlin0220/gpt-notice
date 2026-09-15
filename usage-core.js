@@ -6,7 +6,6 @@
   "use strict";
   const PREFIX = "notice:usage:";
   const DAY = 24 * 60 * 60 * 1000;
-  const WEEK = 7 * DAY;
   const DEFAULT_CYCLE_DAYS = 7;
   const MAX_CYCLE_DAYS = 90;
   // This account's configured Chat allowance is shared by these two Pro
@@ -20,11 +19,15 @@
     return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} 刷新`;
   };
   function fresh(now = Date.now()) {
-    return { version: 1, revision: 0, limit: 50, firstUseDate: "2026-09-09", recordedSince: now,
-      cycleDays: DEFAULT_CYCLE_DAYS, cycleStart: 0, resetAt: 0, resetSource: "unknown", correction: 0, baselineKnown: false, entries: [], updatedAt: now };
+    return { version: 1, revision: 0, limit: 50, recordedSince: now,
+      cycleDays: DEFAULT_CYCLE_DAYS, cycleStart: 0, resetAt: 0, correction: 0, baselineKnown: false, entries: [] };
   }
   function normalize(raw, now = Date.now()) {
+    if (raw && (raw.version !== 1 || !Array.isArray(raw.entries))) throw new Error("本地用量数据格式异常；未覆盖原始数据，请先备份检查");
     const state = raw?.version === 1 ? structuredClone(raw) : fresh(now);
+    delete state.firstUseDate;
+    delete state.resetSource;
+    delete state.updatedAt;
     state.cycleDays = cycleDays(state.cycleDays);
     const period = state.cycleDays * DAY;
     if (state.resetAt > 0 && now >= state.resetAt) {
@@ -33,7 +36,6 @@
       state.resetAt = boundary + period;
       state.correction = 0;
       state.baselineKnown = false;
-      state.resetSource = "manual-schedule";
     }
     // Keep the whole counted interval. With an unknown reset, deleting old
     // entries would silently reduce both observed totals and manual corrections.
@@ -66,7 +68,6 @@
         state.cycleDays = nextCycleDays;
         state.resetAt = resetAt;
         state.cycleStart = resetAt ? resetAt - period : 0;
-        state.resetSource = resetAt ? "manual" : "unknown";
         state.correction = 0;
         state.baselineKnown = false;
       }
@@ -81,15 +82,19 @@
       }
     } else if (command.op !== "get") throw new Error("未知用量操作");
     const changed = !raw || JSON.stringify(raw) !== JSON.stringify(state) || JSON.stringify(state) !== before;
-    if (changed) { state.revision += 1; state.updatedAt = now; }
+    if (changed) state.revision += 1;
     return { state, changed };
   }
   function summary(raw, now = Date.now()) {
+    if (raw && (raw.version !== 1 || !Array.isArray(raw.entries))) {
+      return { incompatible: true, revision: Number.isSafeInteger(raw.revision) ? raw.revision : 0, used: 0, limit: "", cycleDays: "", resetAt: 0, baselineKnown: false,
+        label: "GPT-6 · 数据需升级", resetLabel: "本地用量数据版本不兼容", sourceLabel: "请更新扩展；原数据未被覆盖" };
+    }
     const state = normalize(raw, now);
     const used = count(state);
     return { ...state, used, label: `GPT-6 · ${used} / ${state.limit} · ${shortReset(state.resetAt)}`,
       resetLabel: state.resetAt ? `下一次刷新：${new Date(state.resetAt).toLocaleString()} · 每 ${state.cycleDays} 天` : `下一次刷新：未知 · 每 ${state.cycleDays} 天`,
       sourceLabel: state.baselineKnown ? "手动基数 + 本机观察；不是官方实时余额" : "仅本机观察；此前及其他设备用量未知，不能据此计算官方剩余次数" };
   }
-  return { PREFIX, DAY, WEEK, DEFAULT_CYCLE_DAYS, MAX_CYCLE_DAYS, MODELS, fresh, normalize, count, apply, summary };
+  return { PREFIX, DAY, DEFAULT_CYCLE_DAYS, MAX_CYCLE_DAYS, MODELS, fresh, normalize, count, apply, summary };
 });

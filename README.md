@@ -16,9 +16,9 @@ Popup 只显示当前活动 ChatGPT 页已识别账号 / Workspace 的 Queue；�
 
 ## 完成提醒
 
-系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的成功完成事件，因此隐藏、冻结或暂时不渲染最终 DOM 的标签页不再完全依赖页面 1 秒采样器；页面可响应时会精确核对当前 document / scope / conversation，并区分正常完成、等待确认和失败。页面隐藏、冻结或探针暂不可用时只发送不含回复正文的“有新结果”保守提醒；后续页面确认正常完成后使用同一个通知 ID 升级为问题标题、耗时和回复摘要。Queue 还有后续消息时仍抑制中间提醒，点击通知时继续核对账号 / Workspace / conversation，绝不只凭旧 tabId 跳转。
+系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的成功完成事件，因此隐藏、冻结或暂时不渲染最终 DOM 的标签页不再完全依赖页面 1 秒采样器；页面可响应时会精确核对当前 document / scope / conversation，并区分正常完成、等待确认和失败。页面隐藏或探针暂不可用时只发送不含回复正文的“有新结果”保守提醒；冻结页仍向精确 document 投递探针，由 Chrome 在恢复后处理，700ms 内未响应时先发 generic。后续页面确认正常完成后使用同一个通知 ID 升级为问题标题、耗时和回复摘要。Queue 还有后续消息时仍抑制中间提醒，点击通知时继续核对账号 / Workspace / conversation，绝不只凭旧 tabId 跳转。
 
-网络完成只代表 transport 完成，不等于 Queue 可以继续发送。Queue 的 settle、下一条自动发送、Stop / HITL / 错误处理仍必须由当前页面的语义状态、原生消息身份和 Composer ready 共同证明。通知意图先持久化再调用系统通知，并保留短期去重记录；用户已关闭或点击过的提醒不会被后来的 DOM enrichment 重新弹出。
+网络完成只代表 transport 完成，不等于 Queue 可以继续发送。Queue 的 settle、下一条自动发送、Stop / HITL / 错误处理仍必须由当前页面的语义状态、原生消息身份和 Composer ready 共同证明。系统通知先持久化不含正文的跳转路由，create/update 真正成功后才记录 delivered 等级；update 找不到既有系统通知时用同一 ID 重新 create。只有用户主动关闭或点击的提醒才写 dismissed marker，系统自动收起不会阻止后续 enrichment。Popup 同时显示扩展开关和浏览器/系统通知权限。
 
 ## GPT-6 用量
 
@@ -39,6 +39,6 @@ npm run e2e:smoke
 
 构建与测试需要 Node，E2E 另外需要 Playwright。Chromium MV3 回归始终加载 `dist/`，并使用系统临时目录里的独立 Profile；测试结束会自动清理，不再把浏览器 Profile 写入仓库。真实 ChatGPT 的只读冒烟可通过已有 `e2e:real` 流程显式启用；它不会自动花费模型额度或向现有用户对话发送内容。受控页面测试与已登录真实服务验证分别记录，不能互相冒充。
 
-运行代码不 patch `fetch` / XHR / History。Service Worker 只读观察 ChatGPT 原生 conversation POST 的请求生命周期，不修改或重放请求，也不读取响应正文、Cookie 或 Token。临时 requestId / turnId / document / scope 关联使用 `storage.session`；每次核对真实 document 与当前账号，不长期缓存 tabId → 账号。页面侧只有一个低频采样器和一个限定在当前 assistant turn、Composer action 区及其直接 transcript 结构的 MutationObserver；只观察 childList 与少量状态属性，不观察 `characterData` token 重绘，也不挂在 `document` / `body` 上。独立 Shadow DOM 保留稳定 UI，原生浮层覆盖 Bar 或打开的 Panel 时主动让位。所有本地变更经 Service Worker 串行持久化；outbox 的 lease/intent/receipt 思路及部分操作适配自 MIT `chatgpt-yolo`，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+运行代码不 patch `fetch` / XHR / History。Service Worker 只读观察 ChatGPT 原生 conversation POST 的请求生命周期，不修改或重放请求，也不读取响应正文、Cookie 或 Token。临时 requestId / turnId / document / scope 关联使用 `storage.session`；每次核对真实 document 与当前账号，不长期缓存 tabId → 账号。页面侧只有一个低频采样器；Service Worker 在原生请求完成后只向精确 document 发一次语义探针，不使用 MutationObserver。独立 Shadow DOM 保留稳定 UI，原生浮层覆盖 Bar 或打开的 Panel 时主动让位。所有本地变更经 Service Worker 串行持久化；outbox 的 lease/intent/receipt 思路及部分操作适配自 MIT `chatgpt-yolo`，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 v0.8 的当前边界以 [scope-v080.md](docs/scope-v080.md) 为准，早期 ADR 中的 Task/临时 Queue 设计仅是历史记录，不是兼容要求。

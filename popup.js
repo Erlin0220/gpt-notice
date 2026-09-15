@@ -5,6 +5,7 @@
     if (!reply.ok) throw new Error(reply.error);
     const enabled = document.getElementById("enabled");
     enabled.checked = reply.enabled;
+    document.getElementById("permission").textContent = reply.permission === "granted" ? "系统通知权限：允许" : "系统通知权限：已被浏览器或系统禁止";
     enabled.addEventListener("change", async () => {
       try {
         const result = await chrome.runtime.sendMessage({ type: "NOTICE_SETTING", enabled: enabled.checked });
