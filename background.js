@@ -36,14 +36,14 @@ function formatElapsed(elapsedMs) {
   const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return minutes ? `思考了 ${minutes}m ${seconds}s` : `思考了 ${seconds}s`;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 function completionNotice(command) {
   const meta = command?.notice || {};
+  const preview = cleanNoticePreview(meta.preview, 160) || "\u56de\u590d\u5df2\u5b8c\u6210";
   return {
-    title: cleanNoticeText(meta.title, 72) || "ChatGPT 回复完成",
-    message: cleanNoticePreview(meta.preview) || "回复已完成",
-    contextMessage: `ChatGPT · ${formatElapsed(meta.elapsedMs)}`
+    title: cleanNoticeText(meta.title, 56) || "ChatGPT \u56de\u590d\u5b8c\u6210",
+    message: `${formatElapsed(meta.elapsedMs)} \u00b7 ${preview}`
   };
 }
 async function pageContext(tabId, documentId) {
@@ -116,7 +116,6 @@ for (const event of [chrome.webRequest.onCompleted, chrome.webRequest.onErrorOcc
   event.addListener(details => { if (nativePost(details)) void serial(() => chrome.storage.session.remove(REQUEST_PREFIX + details.requestId)).catch(() => {}); }, REQUEST_FILTER);
 }
 chrome.notifications.onClicked.addListener(id => void openNotice(id).catch(() => {}));
-chrome.notifications.onButtonClicked.addListener(id => void openNotice(id).catch(() => {}));
 chrome.notifications.onClosed.addListener(id => void chrome.storage.local.remove(`notice:notification:${id}`).catch(() => {}));
 
 async function handle(message, sender) {
@@ -189,8 +188,7 @@ async function handle(message, sender) {
       const notice = completionNotice(command);
       await chrome.notifications.create(notificationId, {
         type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
-        title: notice.title, message: notice.message, contextMessage: notice.contextMessage, priority: 1,
-        buttons: [{ title: "打开对话" }]
+        title: notice.title, message: notice.message, priority: 0
       });
     } catch (error) { notificationError = error.message; }
     await pruneNotices().catch(() => {});

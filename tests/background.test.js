@@ -83,9 +83,9 @@ test("rich completion notice uses prompt title, elapsed time, and reply preview 
   }});
   assert.equal(h.created.length,1);
   assert.equal(h.created[0].title,"审核 gpt-notice 的通知体验");
-  assert.equal(h.created[0].message,"已修复通知层级 支持 摘要 和 打开对话");
-  assert.equal(h.created[0].contextMessage,"ChatGPT · 思考了 2m 5s");
-  assert.equal(h.created[0].buttons[0].title,"打开对话");
+  assert.equal(h.created[0].message,"2m 5s \u00b7 \u5df2\u4fee\u590d\u901a\u77e5\u5c42\u7ea7 \u652f\u6301 \u6458\u8981 \u548c \u6253\u5f00\u5bf9\u8bdd");
+  assert.equal(h.created[0].contextMessage,undefined);
+  assert.equal(h.created[0].buttons,undefined);
   assert.equal(JSON.stringify(h.storage).includes("已修复通知层级"),false);
 });
 test("notification click does not focus a tab reused for another conversation", async () => {
