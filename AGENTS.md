@@ -18,7 +18,7 @@
 
 用量模型使用明确允许列表 `gpt-6-pro` / `gpt-5-6-pro`；Thinking、Work、Codex 不计。Chrome `onBeforeRequest` 发生在建连前，只用于提取必要元数据；`onSendHeaders` 是只读发送边界，在此立即计数，不等回复结束。它仍不是服务端接收/官方扣费证明。DOM 兜底只接受已确认正常完成的新回复，以相同原生用户 message ID 去重；发送前可能出现的乐观模型标记、assistant ID、重生成 ID、点击次数或所选模型都不能制造用量。未知请求结构/身份/模型宁可漏记并允许手动校正。ChatGPT 路径、bootstrap 字段和模型 slug 都是适配观察，不是稳定公开契约；不得伪造官方历史、余额或刷新时间。
 
-请求正文、Cookie、Token、响应内容不写入用量存储或诊断；临时 requestId 关联及时删除。机会性清理只删除长期空闲、无正文、无活动 turn、无暂停/未知意图的空 Queue bookkeeping。不得自动删除 pending/unknown 或未知旧版数据。未知刷新周期的累计 ID 仍参与计数，不能按固定保留天数删除；有明确周期时才清理过期非计额 ID。
+请求正文、Cookie、Token、响应内容不写入用量存储或诊断；临时 requestId 关联及时删除。完成通知可以把当前问题的短标题、耗时和已完成回复的短预览交给 Chrome / 操作系统通知中心显示，但这些预览不得写入扩展持久化存储；通知跳转仍按账号 / Workspace / conversation 校验。机会性清理只删除长期空闲、无正文、无活动 turn、无暂停/未知意图的空 Queue bookkeeping。不得自动删除 pending/unknown 或未知旧版数据。未知刷新周期的累计 ID 仍参与计数，不能按固定保留天数删除；有明确周期时才清理过期非计额 ID。
 
 构建白名单以 `scripts/build-extension.js` 为唯一来源；本地、CI、Release 都复用 `dist`，仅包含运行文件和必要第三方许可声明。禁止整仓复制再维护排除列表；测试 Profile、trace、视频、依赖和 `.git` 不得进入扩展。保持无运行时依赖，新增权限必须有无法用现有能力解决的真实理由。完成修改必须运行全部单元测试、Playwright E2E、审查 diff 和体积，再提交。普通 main 提交只跑 CI；自动发布由 manifest 版本文件变更触发，或显式手动触发。已有 tag 必须匹配打包源码，不得覆盖已发布同版本制品，也不能让 tag 与制品对应不同提交。
 

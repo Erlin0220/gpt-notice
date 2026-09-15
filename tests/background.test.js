@@ -73,6 +73,16 @@ test("completion is queue-aware, persisted, and at-most-once across worker resta
   await restarted.send({op:"settle",userId:"user-b"});
   assert.equal(restarted.created.length,0);
 });
+test("rich completion notice uses prompt title, elapsed time, and reply preview without persisting the preview", async () => {
+  const h = harness();
+  await h.send({op:"start",userId:"user-rich"});
+  await h.send({op:"settle",userId:"user-rich",notice:{title:"  审核 gpt-notice \n 的通知体验  ",preview:"  已修复多标签冲突的通知  ",elapsedMs:125_000}});
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"审核 gpt-notice 的通知体验");
+  assert.equal(h.created[0].message,"思考了 2m 5s，已修复多标签冲突的通知");
+  assert.equal(h.created[0].buttons[0].title,"打开对话");
+  assert.equal(JSON.stringify(h.storage).includes("已修复多标签冲突的通知"),false);
+});
 test("notification click does not focus a tab reused for another conversation", async () => {
   const h=harness(); await h.send({op:"start",userId:"user-a"}); await h.send({op:"settle",userId:"user-a"});
   h.tabs.set(1,{id:1,windowId:1,url:"https://chatgpt.com/c/other"});

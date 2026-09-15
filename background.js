@@ -18,6 +18,20 @@ const REQUEST_FILTER = {
 };
 const nativePost = details => details.method === "POST" && /^https:\/\/(?:chatgpt\.com|chat\.openai\.com)\/backend-api\/(?:f\/)?conversation(?:\?|$)/.test(details.url);
 let lastCleanup = 0;
+const cleanNoticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+function formatElapsed(elapsedMs) {
+  const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `思考了 ${minutes}m ${seconds}s` : `思考了 ${seconds}s`;
+}
+function completionNotice(command) {
+  const meta = command?.notice || {};
+  return {
+    title: cleanNoticeText(meta.title, 80) || "ChatGPT 回复完成",
+    message: `${formatElapsed(meta.elapsedMs)}，${cleanNoticeText(meta.preview, 240) || "回复已完成"}`
+  };
+}
 async function pageContext(tabId, documentId) {
   // Tab IDs survive worker restarts, but are not account/document identities.
   // Ask the exact live document; never reuse an unbounded tab -> account cache.
@@ -158,9 +172,11 @@ async function handle(message, sender) {
   let notificationError = "";
   if (notificationId) {
     try {
+      const notice = completionNotice(command);
       await chrome.notifications.create(notificationId, {
         type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
-        title: "ChatGPT 已完成", message: "当前回复已结束，Queue 已空。点击返回对应对话。", priority: 1
+        title: notice.title, message: notice.message, priority: 1,
+        buttons: [{ title: "打开对话" }]
       });
     } catch (error) { notificationError = error.message; }
     await pruneNotices().catch(() => {});
