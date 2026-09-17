@@ -16,7 +16,7 @@
     if (!value) return "刷新未知";
     const date = new Date(value);
     const pad = number => String(number).padStart(2, "0");
-    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} 刷新`;
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} 刷新`;
   };
   function fresh(now = Date.now()) {
     return { version: 1, revision: 0, limit: 50, recordedSince: now,

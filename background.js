@@ -185,11 +185,13 @@ async function handle(message, sender) {
   }
   if (message?.type === "NOTICE_FEATURE_SETTING") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可修改设置");
-    const key = FEATURE_KEYS[message.feature];
+    const numeric = message.feature === "shortcutCount";
+    const key = FEATURE_KEYS[message.feature] || numeric && "notice:shortcut-project-limit";
     if (!key) throw new Error("未知功能设置");
-    const enabled = message.enabled !== false;
-    await chrome.storage.local.set({ [key]: enabled });
-    if (message.feature === "notifications" && !enabled) {
+    const value = numeric ? Number(message.value) : message.enabled !== false;
+    if (numeric && (!Number.isInteger(value) || value < 1 || value > 50)) throw new Error("数量须为 1-50");
+    await chrome.storage.local.set({ [key]: value });
+    if (message.feature === "notifications" && !value) {
       const stored = await chrome.storage.local.get(null), writes = {};
       for (const [k, n] of Object.entries(stored)) if (k.startsWith("notice:notification:") && n?.pendingKind) { delete n.pendingKind; writes[k] = n; }
       if (Object.keys(writes).length) await chrome.storage.local.set(writes);

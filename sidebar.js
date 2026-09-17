@@ -2,6 +2,7 @@
   "use strict";
   const P = globalThis.ChatGPTProjects;
   const SETTING = "notice:sidebar-collapse-enabled";
+  const LIMIT = "notice:shortcut-project-limit";
   const COOKIE = "oai-sidebar-sections";
   const HOST_ID = "gpt-notice-project-shortcuts";
   const LABELS = new Map([
@@ -20,7 +21,7 @@
     more: "group __menu-item border-b border-transparent bg-clip-padding hoverable transition-colors keyboard-focused:focus-ring keyboard-focused:-outline-offset-2 w-full"
   };
 
-  let enabled = null, pendingCollapse = "", previousNewChatKey = "";
+  let enabled = null, limit = 8, pendingCollapse = "", previousNewChatKey = "";
   let cachedRaw = "", cachedProjects = [], documentScope = "", changedAccount = false;
   let host = null, body = null, signature = "", expanded = true, showAll = false;
   let lastRaw = null, lastUrl = "", lastScope = "";
@@ -284,12 +285,12 @@
     host.hidden = !scope || projects.length === 0;
     if (host.hidden) return;
     const current = P.route(url, location.origin), hasTemplate = Boolean(nativeRowTemplate());
-    const nextSignature = `${scope}:${raw?.revision || 0}:${current?.projectId || ""}:${showAll}:${hasTemplate}:${nativeRows().length}:${spriteBase("core")}:${spriteBase("shell")}`;
+    const nextSignature = `${scope}:${raw?.revision || 0}:${current?.projectId || ""}:${showAll}:${limit}:${hasTemplate}:${nativeRows().length}:${spriteBase("core")}:${spriteBase("shell")}`;
     if (nextSignature === signature) return;
     signature = nextSignature;
-    const visible = showAll ? projects : projects.slice(0, 5);
+    const visible = showAll ? projects : projects.slice(0, limit);
     body.replaceChildren(...visible.map(project => projectRow(project, current)));
-    if (!showAll && projects.length > 5) body.append(moreRow());
+    if (!showAll && projects.length > limit) body.append(moreRow());
     setChevron();
   }
 
@@ -330,13 +331,17 @@
   }, true);
 
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !Object.hasOwn(changes, SETTING)) return;
-    enabled = changes[SETTING].newValue !== false;
-    if (enabled) requestCollapse(location.href); else pendingCollapse = "";
+    if (area !== "local") return;
+    if (Object.hasOwn(changes, SETTING)) {
+      enabled = changes[SETTING].newValue !== false;
+      if (enabled) requestCollapse(location.href); else pendingCollapse = "";
+    }
+    if (changes[LIMIT]) { limit = changes[LIMIT].newValue || 8; signature = ""; }
   });
 
-  void chrome.storage.local.get(SETTING).then(stored => {
+  void chrome.storage.local.get([SETTING, LIMIT]).then(stored => {
     enabled = stored[SETTING] !== false;
+    limit = stored[LIMIT] || 8;
     if (enabled) requestCollapse(location.href);
   }).catch(() => { enabled = false; });
 

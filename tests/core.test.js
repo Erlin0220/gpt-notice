@@ -271,6 +271,8 @@ test("manual correction cannot erase concurrent usage and a confirmed schedule r
   assert.throws(() => U.apply(s, { op: "edit", revision: 0, total: 10, limit: 50 }, at));
   s = U.apply(s, { op: "edit", revision: s.revision, total: 12, limit: 50, cycleDays: 3, resetAt: at + 10000 }, at).state;
   assert.equal(U.count(s), 12);
+  assert.match(U.summary(s, at).label,/· \d{2}-\d{2} 刷新$/);
+  assert.doesNotMatch(U.summary(s, at).label,/\d{2}:\d{2}/);
   const next = U.normalize(s, at + 11000);
   assert.equal(U.count(next), 0); assert.equal(next.correction, 0); assert.equal(next.cycleDays, 3); assert.equal(next.resetAt, at + 10000 + U.DAY * 3);
   const later = U.normalize(s, at + 10000 + U.DAY * 3 * 5);

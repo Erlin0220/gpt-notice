@@ -59,6 +59,7 @@ function harness(storage = {}, session = {}, created = []) {
   const sendUsage = (usage, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,usage}, sender(tabId), resolve));
   const sendProjects = (projects, tabId = 1, requestedScope = scope) => new Promise(resolve => listener({type:"NOTICE",scope:requestedScope,url:tabs.get(tabId).url,projects}, sender(tabId), resolve));
   const setting = (feature, enabled) => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature,enabled}, {url:"popup.html"}, resolve));
+  const shortcutLimit = value => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature:"shortcutCount",value}, {url:"popup.html"}, resolve));
   const drain = () => new Promise(resolve => setTimeout(resolve, 50));
   const emit = async (name, details) => { webEvents[name](details); await drain(); };
   const before = async (body, overrides = {}) => {
@@ -72,7 +73,7 @@ function harness(storage = {}, session = {}, created = []) {
     await emit("onSendHeaders", details);
   };
   const popup = () => new Promise(resolve => listener({ type:"NOTICE_POPUP" }, { url:"popup.html" }, resolve));
-  return { send, sendUsage, sendProjects, setting, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, registrations, created, focused, notificationCalls, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
+  return { send, sendUsage, sendProjects, setting, shortcutLimit, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, registrations, created, focused, notificationCalls, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
 }
 test("startup removes the legacy sidebar blocker and never installs another request rule", async () => {
   const h = harness();
@@ -101,8 +102,17 @@ test("popup feature switches persist independently without changing network beha
   result = await h.setting("sidebarCollapse", true);
   assert.equal(result.settings.sidebarCollapse, true);
   assert.equal(h.rules().length, 0);
+  result = await h.shortcutLimit(12);
+  assert.equal(result.ok, true);
+  assert.equal(h.storage["notice:shortcut-project-limit"], 12);
   popup = await h.popup();
   assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:false, notifications:false });
+});
+test("shortcut project limit defaults safely and rejects out-of-range popup values", async () => {
+  const h = harness({"notice:shortcut-project-limit":0});
+  assert.equal((await h.shortcutLimit(51)).ok, false);
+  assert.equal(h.storage["notice:shortcut-project-limit"], 0);
+  assert.equal((await h.shortcutLimit(1)).ok, true);
 });
 test("sidebar setting storage failure leaves its previous value unchanged", async () => {
   const h = harness(); await h.popup();

@@ -27,6 +27,12 @@
         finally { control.disabled = false; }
       });
     }
+    const count=document.getElementById("shortcutCount"),key="notice:shortcut-project-limit",stored=await chrome.storage.local.get(key);
+    count.value=stored[key]||8;
+    count.onchange = async () => {
+      const result = await chrome.runtime.sendMessage({ type: "NOTICE_FEATURE_SETTING", feature: "shortcutCount", value: +count.value });
+      if (!result.ok) status.textContent = result.error;
+    };
     const list = document.getElementById("queues");
     document.getElementById("scope-state").textContent = reply.scopeKnown ? "当前账号与工作区" : "当前页面未连接";
     if (!reply.scopeKnown || !reply.queues.length) {

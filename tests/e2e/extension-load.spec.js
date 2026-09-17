@@ -263,9 +263,9 @@ test("usage counts only observed shared Pro models, allows correction, and does 
   await page.evaluate(()=>window.finish('manual pro finished'));
   await page.waitForTimeout(4500);await page.reload();await expect(button(page,"usage")).toContainText("GPT-6 · 1 / 50 · 刷新未知");
   await button(page,"usage").click();await button(page,"usage-settings").click();await page.locator(`${host} [name="total"]`).fill("12");await page.locator(`${host} [name="cycleDays"]`).fill("3");
-  const reset=await page.evaluate(()=>{const d=new Date(Date.now()+2*86400000);d.setSeconds(0,0);const local=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);return {local,month:String(d.getMonth()+1).padStart(2,'0'),day:String(d.getDate()).padStart(2,'0'),hour:String(d.getHours()).padStart(2,'0'),minute:String(d.getMinutes()).padStart(2,'0')};});
+  const reset=await page.evaluate(()=>{const d=new Date(Date.now()+2*86400000);d.setSeconds(0,0);const local=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);return {local,month:String(d.getMonth()+1).padStart(2,'0'),day:String(d.getDate()).padStart(2,'0')};});
   await page.locator(`${host} [name="resetAt"]`).fill(reset.local);await button(page,"save-usage").click();
-  await expect(button(page,"usage")).toContainText(`GPT-6 · 12 / 50 · ${reset.month}-${reset.day} ${reset.hour}:${reset.minute} 刷新`);
+  await expect(button(page,"usage")).toContainText(`GPT-6 · 12 / 50 · ${reset.month}-${reset.day} 刷新`);
   await expect(button(page,"usage")).not.toContainText(/校正|记录|计算|推算/);
   const usage=(await snapshot(extensionServiceWorker)).usage[0];expect(usage.cycleDays).toBe(3);expect(usage.resetAt).toBeGreaterThan(Date.now());
 });
@@ -309,18 +309,23 @@ test("usage popover stays anchored inside a narrow viewport",async({page})=>{
   await page.setViewportSize({width:420,height:740});await page.goto('https://chatgpt.com/');
   await page.evaluate(()=>{const form=document.querySelector('form');form.style.left='12px';form.style.width='396px';form.style.top='280px';form.style.bottom='auto';});
   await expect(button(page,'usage')).toBeVisible();await button(page,'usage').click();
+  expect(parseFloat(await page.locator(`${host} .usage-settings-link span`).last().evaluate(node=>getComputedStyle(node).fontSize))).toBeGreaterThanOrEqual(18);
   const box=await page.locator(`${host} .usage-popover`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
   await button(page,'usage-settings').click();const dialog=await page.locator(`${host} .usage-settings`).boundingBox();expect(dialog.x).toBeGreaterThanOrEqual(0);expect(dialog.y).toBeGreaterThanOrEqual(0);expect(dialog.x+dialog.width).toBeLessThanOrEqual(421);expect(dialog.y+dialog.height).toBeLessThanOrEqual(741);
+  const settingsGap=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,h=s.querySelector('.usage-settings header').getBoundingClientRect(),input=s.querySelector('.usage-settings input').getBoundingClientRect();return input.top-h.bottom;});expect(settingsGap).toBeGreaterThan(20);
 });
 test("home usage-only toolbar stays compact and aligns with the composer left edge",async({page})=>{
   await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
-  const home=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,left:b.left-h.left};});
-  expect(home.mode).toBe('usage');expect(home.width).toBeLessThan(home.host*.7);expect(Math.abs(home.left)).toBeLessThan(2);
+  const home=await page.locator(host).evaluate(node=>{const usage=node.shadowRoot.querySelector('.usage').getBoundingClientRect(),h=node.getBoundingClientRect();return{mode:node.dataset.mode,left:usage.left-h.left};});
+  expect(home.mode).toBe('usage');expect(Math.abs(home.left)).toBeLessThan(2);
 });
-test("conversation toolbar stays compact and aligns with the composer right edge",async({page})=>{
+test("project new-chat centers usage while conversations split usage left and queue right",async({page})=>{
+  await page.goto('https://chatgpt.com/g/g-p-regression/project');await expect(button(page,'usage')).toBeVisible();
+  const project=await page.locator(host).evaluate(node=>{const usage=node.shadowRoot.querySelector('.usage').getBoundingClientRect(),h=node.getBoundingClientRect();return{project:node.hasAttribute('data-project'),center:usage.left+usage.width/2-(h.left+h.width/2)};});
+  expect(project.project).toBe(true);expect(Math.abs(project.center)).toBeLessThan(2);
   await page.goto('https://chatgpt.com/c/toolbar-compact');await expect(button(page,'queue')).toBeVisible();
-  const conversation=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,right:h.right-b.right,count:node.shadowRoot.querySelector('.count').textContent};});
-  expect(conversation.mode).toBe('conversation');expect(conversation.width).toBeLessThan(conversation.host*.8);expect(Math.abs(conversation.right)).toBeLessThan(2);expect(conversation.count).toBe('0');
+  const conversation=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,h=node.getBoundingClientRect(),usage=s.querySelector('.usage').getBoundingClientRect(),queue=s.querySelector('.queue-actions').getBoundingClientRect();return{mode:node.dataset.mode,left:usage.left-h.left,right:h.right-queue.right,count:s.querySelector('.count').textContent};});
+  expect(conversation.mode).toBe('conversation');expect(Math.abs(conversation.left)).toBeLessThan(2);expect(Math.abs(conversation.right)).toBeLessThan(2);expect(conversation.count).toBe('0');
 });
 test("status notice follows the compact toolbar instead of the composer left edge",async({page})=>{
   await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
