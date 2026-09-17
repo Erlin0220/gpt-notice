@@ -273,7 +273,7 @@
         }
         // Return notification intent only after the completion state is durable.
         result.outcome = outcome;
-        result.notify = !command.suppressNotify && outcome !== "stopped" && !state.holdUntil && (state.items.length === 0 || ["blocked", "failed"].includes(outcome) || exhausted);
+        result.notify = !command.suppressNotify && outcome !== "stopped" && !state.holdUntil && (command.queueEnabled === false || state.paused || state.items.length === 0 || ["blocked", "failed"].includes(outcome) || exhausted);
         break;
       }
       default: reject("未知队列操作");

@@ -1,6 +1,7 @@
-importScripts("queue-core.js", "usage-core.js");
+importScripts("queue-core.js", "usage-core.js", "projects-core.js");
 const Queue = globalThis.ChatGPTQueueCore;
 const Usage = globalThis.ChatGPTUsage;
+const Projects = globalThis.ChatGPTProjects;
 let mutations = Promise.resolve();
 const serial = fn => {
   const next = mutations.then(fn, fn);
@@ -11,6 +12,12 @@ const PAGE_URLS = [...Queue.HOSTS].map(host => `https://${host}/*`);
 const REQUEST_PREFIX = "notice:request:";
 const CLEANUP_KEY = "notice:last-cleanup";
 const REQUEST_TTL = 10 * 60_000;
+const FEATURE_KEYS = {
+  sidebarCollapse: "notice:sidebar-collapse-enabled",
+  queue: "notice:queue-enabled",
+  notifications: "notice:notifications"
+};
+const HISTORY_GUARD_RULE_ID = 910001;
 const REQUEST_FILTER = {
   urls: [...Queue.HOSTS].flatMap(host => [
     `https://${host}/backend-api/f/conversation*`, `https://${host}/backend-api/conversation*`
@@ -27,6 +34,10 @@ const trustedOrigin = value => {
   try { const url = new URL(value); return url.protocol === "https:" && Queue.HOSTS.has(url.hostname) && url.origin === value; }
   catch { return false; }
 };
+async function featureSettings() {
+  const stored = await chrome.storage.local.get(Object.values(FEATURE_KEYS));
+  return Object.fromEntries(Object.entries(FEATURE_KEYS).map(([name,key]) => [name, stored[key] !== false]));
+}
 let lastCleanup = 0;
 const cleanNoticeText = (value, max) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 function cleanNoticePreview(value, max = 220) {
@@ -46,41 +57,18 @@ function formatElapsed(elapsedMs) {
   const totalSeconds = Math.max(1, Math.round(Number(elapsedMs || 0) / 1000));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
-  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
-}
-function completionNotice(command) {
-  const meta = command?.notice || {};
-  const preview = cleanNoticePreview(meta.response, 160) || "\u56de\u590d\u5df2\u5b8c\u6210";
-  return {
-    title: cleanNoticeText(meta.prompt, 56) || "ChatGPT \u56de\u590d\u5b8c\u6210",
-    message: `${formatElapsed(meta.elapsedMs)} \u00b7 ${preview}`
-  };
-}
-function genericCompletionNotice(meta = {}) {
-  return {
-    title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 有新结果",
-    message: `${formatElapsed(meta.elapsedMs)} · 点击查看对话`
-  };
+  return minutes ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
 }
 function completionPublication(state, hidden, meta = {}) {
   if (!["completed", "attention", "recoverable", "blocked", "failed"].includes(state)) return null;
-  if (hidden === true && state === "completed") return { kind: "generic", payload: genericCompletionNotice(meta) };
-  if (state === "completed") return { kind: "completed", payload: completionNotice({ notice: meta }) };
-  if (state === "attention") return {
-    kind: "attention",
-    payload: {
-      title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 需要你处理",
-      message: `${formatElapsed(meta.elapsedMs)} · 等待确认或继续操作`
-    }
-  };
-  if (["failed", "blocked", "recoverable"].includes(state)) return {
-    kind: "failed",
-    payload: {
-      title: cleanNoticeText(meta.prompt, 56) || "ChatGPT 回复异常",
-      message: `${formatElapsed(meta.elapsedMs)} · ${state === "blocked" ? "限额、策略或账号受限，请处理原生提示" : "回复出现异常，点击查看对话"}`
-    }
-  };
-  return null;
+  const kind = state === "completed" ? hidden ? "generic" : "completed" : state === "attention" ? "attention" : "failed";
+  const label = state === "completed" ? meta.queueFinal ? "队列已完成" : "回复已完成" : state === "attention" ? "需要你确认" : "回复需要处理";
+  const prompt = cleanNoticeText(meta.prompt, 48);
+  return { kind, payload: {
+    title: `${label}${prompt ? ` · ${prompt}` : ""}`,
+    message: state === "completed" ? (!hidden && cleanNoticePreview(meta.response, 150)) || "回复已就绪，点击查看对话。" : state === "attention" ? "等待审批、确认或继续操作；请回到原生页面处理。" : state === "blocked" ? "限额、策略或账号受限；请处理原生提示后继续。" : "回复出现异常；请回到对话检查后继续。",
+    contextMessage: `gpt-notice · 本轮用时 ${formatElapsed(meta.elapsedMs)}`
+  } };
 }
 async function pageContext(tabId, documentId) {
   // Tab IDs survive worker restarts, but are not account/document identities.
@@ -147,6 +135,26 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   serial(() => handle(message, sender)).then(reply, error => reply({ ok: false, error: error.message }));
   return true;
 });
+void serial(async () => {
+  // Dynamic rules survive extension upgrades. Keep this permission for one
+  // migration cycle solely to remove the superseded sidebar blocker; never add
+  // another request rule.
+  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds:[HISTORY_GUARD_RULE_ID] });
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds:[HISTORY_GUARD_RULE_ID] });
+  const session = await chrome.storage.session.get(null);
+  const obsolete = Object.keys(session).filter(k => k.startsWith("notice:history-allow-once:"));
+  if (obsolete.length) await chrome.storage.session.remove(obsolete);
+  // Only unfinished delivery records are revisited on wake. No timer/keepalive.
+  const stored = await chrome.storage.local.get(null);
+  const recovered = new Set();
+  for (const [key, notice] of Object.entries(stored)) {
+    if (!key.startsWith("notice:notification:") || !notice?.pendingKind) continue;
+    const target = `${notice.scope}:${Queue.route(notice.url).id}`;
+    if (recovered.has(target)) continue;
+    const context = await pageContext(notice.tabId);
+    if (context?.scope === notice.scope && Queue.route(context.url).id === Queue.route(notice.url).id) { recovered.add(target); await retryNotices(notice.scope, notice.url); }
+  }
+}).catch(() => {});
 chrome.webRequest.onBeforeRequest.addListener(details => {
   const observation = submittedConversation(details);
   if (observation) void serial(() => captureRequest(observation)).catch(() => {});
@@ -165,7 +173,6 @@ chrome.webRequest.onErrorOccurred.addListener(details => {
 }, REQUEST_FILTER);
 chrome.notifications.onClicked.addListener(id => void serial(() => openNotice(id)).catch(() => {}));
 chrome.notifications.onClosed.addListener((id, byUser) => { if (byUser) void serial(() => markNoticeClosed(id)).catch(() => {}); });
-
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可读取概览");
@@ -173,12 +180,21 @@ async function handle(message, sender) {
     const context = tab && await pageContext(tab.id);
     const stored = await chrome.storage.local.get(null);
     const queues = context ? Object.entries(stored).filter(([k]) => k.startsWith(`${Queue.PREFIX}${context.scope}:`)).map(([k, q]) => ({ key: k, url: q?.url, count: q?.items?.length || 0, paused: q?.paused })).filter(q => q.count && Queue.route(q.url).mode === "conversation") : [];
-    return { ok: true, queues, scopeKnown: Boolean(context), enabled: stored["notice:notifications"] !== false, permission: await chrome.notifications.getPermissionLevel() };
+    const notices = context ? Object.entries(stored).filter(([k, n]) => k.startsWith("notice:notification:") && n?.scope === context.scope).map(([,n]) => n).sort((a,b) => b.at-a.at) : [];
+    return { ok: true, queues, scopeKnown: Boolean(context), settings: await featureSettings(), permission: await chrome.notifications.getPermissionLevel(), notification: { pending: notices.filter(n => n.pendingKind && !n.dismissedAt).length, lastAt: notices.find(n => n.kind)?.at || 0 } };
   }
-  if (message?.type === "NOTICE_SETTING") {
+  if (message?.type === "NOTICE_FEATURE_SETTING") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可修改设置");
-    await chrome.storage.local.set({ "notice:notifications": message.enabled !== false });
-    return { ok: true };
+    const key = FEATURE_KEYS[message.feature];
+    if (!key) throw new Error("未知功能设置");
+    const enabled = message.enabled !== false;
+    await chrome.storage.local.set({ [key]: enabled });
+    if (message.feature === "notifications" && !enabled) {
+      const stored = await chrome.storage.local.get(null), writes = {};
+      for (const [k, n] of Object.entries(stored)) if (k.startsWith("notice:notification:") && n?.pendingKind) { delete n.pendingKind; writes[k] = n; }
+      if (Object.keys(writes).length) await chrome.storage.local.set(writes);
+    }
+    return { ok: true, settings: await featureSettings() };
   }
   if (message?.type !== "NOTICE" || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || !sender.documentId || !/^[a-f0-9]{64}$/.test(message.scope || "")) throw new Error("无效的页面上下文");
   const route = Queue.route(message.url);
@@ -187,6 +203,13 @@ async function handle(message, sender) {
   const context = await pageContext(sender.tab.id, sender.documentId);
   const liveRoute = Queue.route(context?.url);
   if (context?.scope !== message.scope || liveRoute.mode !== route.mode || liveRoute.id !== route.id) throw new Error("账号、Workspace 或页面已切换，操作已取消");
+  if (message.projects) {
+    const key = Projects.PREFIX + message.scope;
+    const stored = await chrome.storage.local.get(key);
+    const result = Projects.merge(stored[key], message.projects);
+    if (result.changed) await chrome.storage.local.set({ [key]: result.state });
+    return { ok: true, projects: result.state };
+  }
   const usageKey = Usage.PREFIX + message.scope;
   const queueKey = Queue.key(message.scope, message.url);
   await pruneStorage(queueKey).catch(() => {});
@@ -204,9 +227,9 @@ async function handle(message, sender) {
     if (usage.changed) await chrome.storage.local.set({ [usageKey]: usage.state });
     return { ok: true, queue: null, usage: usage.state };
   }
-  const stored = await chrome.storage.local.get([queueKey, usageKey, "notice:notifications"]);
+  const stored = await chrome.storage.local.get([queueKey, usageKey, "notice:notifications", FEATURE_KEYS.queue]);
   const raw = stored[queueKey];
-  let command = message.command || { op: "get" };
+  let command = { ...(message.command || { op: "get" }), queueEnabled: stored[FEATURE_KEYS.queue] !== false };
   if (command.op === "start" && raw?.turn && !raw.turn.done && !raw.turn.source) {
     const tabs = await chrome.tabs.query({ url: PAGE_URLS });
     const sameConversation = tabs.filter(tab => Queue.route(tab.url).id === route.id);
@@ -227,51 +250,90 @@ async function handle(message, sender) {
     result.state.url = route.url;
     writes[queueKey] = result.state;
   }
-  const notificationId = result.notify && stored["notice:notifications"] !== false ? noticeId(message.scope, route.id, command.generationId || command.userId) : "";
+  const queueFinal = result.state.items.length === 0 && result.state.receipts.some(r => r.userId === command.userId);
+  const publication = result.notify ? completionPublication(result.outcome || "completed", command.notice?.hidden === true, { ...command.notice, queueFinal }) : null;
+  const notificationId = publication ? noticeId(message.scope, route.id, command.generationId || command.userId, publication.kind) : "";
+  const intent = notificationId && stored["notice:notifications"] !== false ? await noticeIntent(notificationId, { url: route.url, scope: message.scope, tabId: sender.tab.id, queueFinal, elapsedMs: Math.max(0, Date.now() - (result.state.turn?.at || Date.now())) }, publication.kind) : null;
+  // Queue finality and the minimal notification intent commit together. No
+  // prompt or reply text is persisted, including during failure recovery.
+  if (intent) writes[noticeKey(notificationId)] = intent;
+  if (!result.conflict && (command.op === "stop" || command.op === "settle" && result.state.turn?.done)) {
+    const key = noticeKey(noticeId(message.scope, route.id, command.generationId || command.userId, "attention"));
+    const n = (await chrome.storage.local.get(key))[key];
+    if (n?.pendingKind) { delete n.pendingKind; writes[key] = n; }
+  }
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
-  if (notificationId) {
-    const publication = completionPublication(result.outcome || "completed", command.notice?.hidden === true, command.notice);
-    notificationError = await publishNotice(notificationId, {
-      url: route.url, scope: message.scope, tabId: sender.tab.id
-    }, publication.payload, publication.kind);
+  if (intent) {
+    notificationError = await deliverNotice(notificationId, intent, publication.payload);
     await pruneNotices().catch(() => {});
   }
+  notificationError ||= await retryNotices(message.scope, route.url);
   return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
 }
 
 const NOTICE_RANK = { generic: 1, attention: 2, failed: 3, completed: 4 };
 const noticeKey = id => `notice:notification:${id}`;
-const noticeId = (scope, routeId, generationId) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}`;
+// A dismissed approval must not consume the subsequent final result. Keep the
+// legacy completion ID for generic -> rich enrichment, separate other events.
+const noticeId = (scope, routeId, generationId, kind) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}${["attention", "failed"].includes(kind) ? `|${kind}` : ""}`;
 
-async function publishNotice(id, routing, payload, kind) {
+async function noticeIntent(id, routing, kind) {
   const key = noticeKey(id);
   const stored = await chrome.storage.local.get([key, "notice:notifications"]);
-  if (stored["notice:notifications"] === false) return "";
-  const previous = stored[key];
-  if (previous?.dismissedAt || previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return "";
+  if (stored["notice:notifications"] === false) return null;
+  // Older versions used one ID for attention/error/final. A historical closed
+  // attention record is not proof that its later successful result was read.
+  const previous = ["generic", "completed"].includes(kind) && ["attention", "failed"].includes(stored[key]?.kind) ? null : stored[key];
+  if (previous?.dismissedAt || previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return null;
+  return { ...previous, ...routing, at: previous?.at || Date.now(), pendingKind: kind };
+}
+async function publishNotice(id, routing, payload, kind) {
+  const intent = await noticeIntent(id, routing, kind);
+  if (!intent) return "";
+  await chrome.storage.local.set({ [noticeKey(id)]: intent });
+  return deliverNotice(id, intent, payload);
+}
+async function deliverNotice(id, record, payload) {
+  if (record.retryAt > Date.now()) return "系统通知暂未送达，将自动重试";
+  const key = noticeKey(id);
   const options = {
     type: "basic", iconUrl: chrome.runtime.getURL("icons/chatgpt.png"),
-    title: payload.title, message: payload.message, priority: 0
+    title: payload.title, message: payload.message, contextMessage: payload.contextMessage,
+    eventTime: record.at, priority: 0
   };
-  const routingRecord = { ...previous, ...routing, at: previous?.at || Date.now() };
   try {
-    // Persist only routing before the OS call. The delivered rank is written
-    // after create/update succeeds, so a failed notification remains retryable.
-    await chrome.storage.local.set({ [key]: routingRecord });
-    const updated = previous ? await chrome.notifications.update(id, options) : false;
+    if (await chrome.notifications.getPermissionLevel() !== "granted") throw new Error("浏览器通知权限未允许");
+    // Stable ID + update first also repairs a crash after OS success but before
+    // the local acknowledgment. Enrichment is silent, new events are not.
+    const updated = await chrome.notifications.update(id, { ...options, silent: true });
     if (!updated) await chrome.notifications.create(id, options);
-    await chrome.storage.local.set({ [key]: { ...routingRecord, kind } });
+    const delivered = { ...record, kind: record.pendingKind };
+    delete delivered.pendingKind; delete delivered.retryAt;
+    await chrome.storage.local.set({ [key]: delivered });
     return "";
   } catch (error) {
-    return String(error?.message || error || "notification failed");
+    await chrome.storage.local.set({ [key]: { ...record, retryAt: Date.now() + 10000 } }).catch(() => {});
+    return String(error?.message || "系统通知暂未送达");
   }
+}
+async function retryNotices(scope, url) {
+  const stored = await chrome.storage.local.get(null);
+  let error = "";
+  if (stored["notice:notifications"] === false) return error;
+  for (const [key, n] of Object.entries(stored)) {
+    if (!key.startsWith("notice:notification:") || !n?.pendingKind || n.dismissedAt || n.scope !== scope || Queue.route(n.url).id !== Queue.route(url).id) continue;
+    const outcome = n.pendingKind === "generic" ? "completed" : n.pendingKind;
+    const publication = completionPublication(outcome, true, n);
+    if (publication) error = await deliverNotice(key.slice("notice:notification:".length), n, publication.payload) || error;
+  }
+  return error;
 }
 
 async function markNoticeClosed(id) {
   const key = noticeKey(id);
   const notice = (await chrome.storage.local.get(key))[key];
-  if (notice && !notice.dismissedAt) await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } });
+  if (notice && !notice.dismissedAt) { delete notice.pendingKind; await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } }); }
 }
 
 async function completionProbe(observation, route) {
@@ -300,14 +362,14 @@ async function completionProbe(observation, route) {
 async function networkNoticeEligible(observation, route, probe) {
   const queueKey = Queue.key(observation.scope, route.url);
   if (!queueKey) return false;
-  const queue = (await chrome.storage.local.get(queueKey))[queueKey];
+  const stored = await chrome.storage.local.get([queueKey, FEATURE_KEYS.queue]), queue = stored[queueKey];
   const generationId = probe?.generationId || observation.turnId;
   if (generationId !== observation.turnId) return false;
   if (queue?.holdUntil || queue?.turn && (queue.turn.id !== generationId || queue.turn.stopped || queue.turn.outcome === "stopped")) return false;
   // Unknown/sending outbox entries have no receipt yet. Network activity must
   // neither retire them nor borrow the identity of a later final Queue item.
   if (queue?.items?.some(item => item.state !== "pending")) return false;
-  return !queue?.items?.length || ["attention", "blocked", "failed"].includes(probe?.state);
+  return stored[FEATURE_KEYS.queue] === false || queue?.paused || !queue?.items?.length || ["attention", "blocked", "failed"].includes(probe?.state);
 }
 
 async function completeConversationRequest(details) {
@@ -326,13 +388,14 @@ async function completeConversationRequest(details) {
   if (!await networkNoticeEligible(observation, route, probe)) return;
   const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
   const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
-  const id = noticeId(observation.scope, route.id, generationId);
+  const queue = (await chrome.storage.local.get(Queue.key(observation.scope, route.url)))[Queue.key(observation.scope, route.url)];
+  const queueFinal = !queue?.items?.length && (queue?.receipts?.some(r => r.userId === observation.turnId) || false);
   const publication = completionPublication(probe?.state, probe?.hidden === true, {
-    prompt: probe?.prompt, response: probe?.response, elapsedMs
+    prompt: probe?.prompt, response: probe?.response, elapsedMs, queueFinal
   });
   if (!publication) return;
-
-  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId }, publication.payload, publication.kind);
+  const id = noticeId(observation.scope, route.id, generationId, publication.kind);
+  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind);
   await pruneNotices().catch(() => {});
 }
 
@@ -356,6 +419,7 @@ async function openNotice(id) {
     if (!active || (await pageContext(active.id))?.scope !== notice.scope) return;
     await chrome.tabs.create({ url: notice.url, active: true });
   }
+  delete notice.pendingKind;
   await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } });
   await chrome.notifications.clear(id);
 }
@@ -364,7 +428,7 @@ async function pruneNotices(stored) {
   stored ||= await chrome.storage.local.get(null);
   const notices = Object.entries(stored).filter(([key]) => key.startsWith("notice:notification:"))
     .sort((a, b) => (b[1]?.at || 0) - (a[1]?.at || 0));
-  const expired = notices.filter(([, value], index) => index >= 100 || !Number.isFinite(value?.at) || Date.now() - value.at > 7 * 86400000).map(([key]) => key);
+  const expired = notices.filter(([, value], index) => !value?.pendingKind && (index >= 100 || !Number.isFinite(value?.at) || Date.now() - value.at > 7 * 86400000)).map(([key]) => key);
   if (expired.length) {
     await Promise.all(expired.map(key => chrome.notifications.clear(key.slice("notice:notification:".length))));
     await chrome.storage.local.remove(expired);

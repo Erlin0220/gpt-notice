@@ -64,7 +64,9 @@ try {
     const host = probe.locator("#chatgpt-message-queue-root");
     assert.equal(await host.count(), 1);
     await host.locator('[data-action="usage"]').click({ timeout: 15000 });
-    await host.locator(".usage-panel").waitFor({ timeout: 10000 });
+    // Installed UI may predate this checkout. This smoke verifies adapter
+    // compatibility, not that the new runtime has already been deployed.
+    await host.locator(".usage-popover, .usage-panel").waitFor({ timeout: 10000 });
     assert.equal(await host.locator('[data-action="queue"]').isVisible(), false);
     assert.equal((await inspect(probe)).empty, facts.empty, "The native draft must be unchanged.");
     report.checks.push({ surface, ...facts, usagePanel: true, queueHidden: true, draftUnchanged: true });

@@ -1,18 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "ChatGPT Queue 与完成提醒",
-  "version": "0.8.0",
-  "description": "保留原生 ChatGPT 输入体验，提供本地 Queue、完成通知与来源明确的 GPT-6 用量记录。",
+  "name": "gpt-notice · 消息队列与完成提醒",
+  "version": "0.8.1",
+  "description": "减少 ChatGPT Web 侧栏频繁请求，缓解接口 429；提供项目快捷访问、消息队列、完成提醒和本地用量记录，保留原生输入体验。",
   "minimum_chrome_version": "120",
-  "permissions": ["notifications", "storage", "webRequest"],
+  "permissions": ["notifications", "storage", "webRequest", "declarativeNetRequest"],
   "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js" },
   "action": {
-    "default_title": "ChatGPT Queue 与完成提醒",
+    "default_title": "gpt-notice · 队列与提醒设置",
     "default_popup": "popup.html",
     "default_icon": { "16": "icons/chatgpt.png", "32": "icons/chatgpt.png", "48": "icons/chatgpt.png", "128": "icons/chatgpt.png" }
   },
   "content_scripts": [{
+    "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+    "js": ["projects-core.js", "sidebar.js"],
+    "run_at": "document_start"
+  }, {
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
     "js": ["queue-core.js", "usage-core.js", "chatgpt-dom.js", "queue-ui.js", "content.js"],
     "run_at": "document_idle"

@@ -1,8 +1,8 @@
 {
   "name": "gpt-notice",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
-  "description": "Thin ChatGPT Web queue, completion notification, and local Pro usage extension.",
+  "description": "减少 ChatGPT Web 频繁请求与接口 429，优化消息队列、通知和扩展交互体验。",
   "scripts": {
     "build": "node scripts/build-extension.js",
     "test": "npm run test:unit",

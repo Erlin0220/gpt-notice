@@ -1,7 +1,7 @@
 const {test,expect}=require("./fixtures");
 const {serve}=require("./chatgpt-fixture");
 const host="#chatgpt-message-queue-root";
-const button=(page,action)=>page.locator(`${host} [data-action="${action}"]`);
+const button=(page,action)=>page.locator(`${host} [data-action="${action}"]${action === "close" ? ":visible" : ""}`);
 async function enqueue(page,text){await page.locator("#prompt-textarea").fill(text);await button(page,"add").click();try{await expect(page.locator("#prompt-textarea")).toBeEmpty();}catch(error){console.log('enqueue failure',await page.evaluate(()=>{const s=document.getElementById('chatgpt-message-queue-root')?.shadowRoot;return {usage:s?.querySelector('.usage')?.textContent,status:s?.querySelector('.status')?.textContent,notice:s?.querySelector('.notice')?.textContent};}));throw error;}}
 async function snapshot(worker){return worker.evaluate(async()=>{const data=await chrome.storage.local.get(null);return {queues:Object.entries(data).filter(([k])=>k.startsWith('notice:conversation:')).map(([key,value])=>({key,...value})),usage:Object.entries(data).filter(([k])=>k.startsWith('notice:usage:')).map(([,v])=>v),notifications:globalThis.testNotifications||[]};});}
 test.beforeEach(async({persistentContext,extensionServiceWorker})=>{
@@ -9,12 +9,36 @@ test.beforeEach(async({persistentContext,extensionServiceWorker})=>{
   await extensionServiceWorker.evaluate(async()=>{await chrome.storage.local.clear();globalThis.testNotifications=[];const original=chrome.notifications.create.bind(chrome.notifications);chrome.notifications.create=async(id,options)=>{globalThis.testNotifications.push(id);return original(id,options);};});
 });
 test("MV3 loads and popup lists only pending conversation queues",async({page,extensionServiceWorker,persistentContext,extensionId})=>{
-  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.0");
-  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().permissions)).toEqual(["notifications","storage","webRequest"]);
+  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.1");
+  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().permissions)).toEqual(["notifications","storage","webRequest","declarativeNetRequest"]);
   await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await page.bringToFront();await popup.reload();
-  await expect(popup.locator("h1")).toHaveText("ChatGPT Queue");await expect(popup.locator("#permission")).toContainText("系统通知权限：允许");await expect(popup.locator("#queues a")).toHaveCount(1);
+  await expect(popup.locator("h1")).toHaveText("gpt-notice");await expect(popup.locator("#permission")).toContainText("浏览器已允许");await expect(popup.locator("#queues a")).toHaveCount(1);
+});
+test("popup exposes independent sidebar-collapse, Queue, and notification switches",async({page,persistentContext,extensionServiceWorker,extensionId})=>{
+  await page.goto("https://chatgpt.com/c/settings");await expect(button(page,"add")).toBeVisible();
+  await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved while Queue is later disabled");
+  const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+  for(const id of ["sidebarCollapse","queue","notifications"])await expect(popup.locator(`#${id}`)).toBeChecked();
+
+  await popup.locator('label.setting:has(#queue)').click();
+  await expect(button(page,"queue")).toBeHidden();await expect(button(page,"add")).toBeHidden();
+  expect((await snapshot(extensionServiceWorker)).queues[0].items[0].text).toBe("saved while Queue is later disabled");
+  await page.evaluate(()=>window.routeTo('/c/notify-with-queue-off'));
+  await page.waitForTimeout(1500);
+  await page.locator('#prompt-textarea').fill('notification remains independent');await page.locator('#composer-submit-button').click();
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
+  await popup.locator('label.setting:has(#queue)').click();await expect(button(page,"queue")).toBeVisible();
+
+  await popup.locator('label.setting:has(#sidebarCollapse)').click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:sidebar-collapse-enabled"))["notice:sidebar-collapse-enabled"])).toBe(false);
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>await chrome.declarativeNetRequest.getDynamicRules())).toEqual([]);
+  await popup.locator('label.setting:has(#sidebarCollapse)').click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:sidebar-collapse-enabled"))["notice:sidebar-collapse-enabled"])).toBe(true);
+
+  await popup.locator('label.setting:has(#notifications)').click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:notifications"))["notice:notifications"])).toBe(false);
 });
 test("home and project first sends change modes without replacing the UI root",async({page,extensionServiceWorker})=>{
   await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await expect(button(page,"queue")).toBeHidden();
@@ -27,6 +51,18 @@ test("home and project first sends change modes without replacing the UI root",a
   expect(await page.evaluate(()=>window.originalRoot===document.getElementById('chatgpt-message-queue-root'))).toBe(true);
   const data=await snapshot(extensionServiceWorker);expect(data.queues.every(q=>!q.key.includes('WEB:'))).toBe(true);
 });
+test("new-chat sections start collapsed without hiding the sidebar or blocking native lists",async({page})=>{
+  test.setTimeout(25000);
+  await page.goto("https://chatgpt.com/?history-poc=1");
+  await expect(page.locator('#native-sidebar-toggle')).toHaveAttribute('aria-expanded','true');
+  for(const section of ['favorites','projects','chats']) await expect(page.locator(`[data-section="${section}"]`)).toHaveAttribute('aria-expanded','false');
+  await expect.poll(()=>page.evaluate(()=>window.historyListResults?.[0]||""),{timeout:5000}).toBe("initial:allowed");
+
+  await page.locator('[data-section="projects"]').click();
+  await expect(page.locator('[data-section="projects"]')).toHaveAttribute('aria-expanded','true');
+  await expect.poll(()=>page.evaluate(()=>window.historyListResults?.includes("late:allowed")||false),{timeout:12000}).toBe(true);
+  await expect(page.locator('[data-section="projects"]')).toHaveAttribute('aria-expanded','true');
+});
 test("queues restore on SPA navigation and reload; edit and reorder preserve native drafts",async({page})=>{
   await page.goto("https://chatgpt.com/c/a");await expect(button(page,"add")).toBeVisible();
   await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();
@@ -37,7 +73,7 @@ test("queues restore on SPA navigation and reload; edit and reorder preserve nat
   await enqueue(page,"other conversation");await page.evaluate(()=>window.routeTo('/c/a'));await expect(page.locator(`${host} .count`)).toHaveText("2");
   await page.reload();await expect(page.locator(`${host} .count`)).toHaveText("2");await button(page,"queue").click();
   await expect(page.locator(`${host} .preview`).first()).toHaveText("edited second");
-  await page.locator("#prompt-textarea").fill("private draft");await button(page,"send").first().click();
+  await page.locator("#prompt-textarea").fill("private draft");await expect(button(page,"send").first()).toBeDisabled();
   await expect(page.locator("#prompt-textarea")).toHaveText("private draft");expect(await page.evaluate(()=>window.sent.length)).toBe(0);
 });
 test("native manual completion continues queue and only its final completion notifies",async({page,extensionServiceWorker})=>{
@@ -226,7 +262,7 @@ test("usage counts only observed shared Pro models, allows correction, and does 
   expect(await page.locator('button[data-testid="copy-turn-action-button"]').count()).toBe(0);
   await page.evaluate(()=>window.finish('manual pro finished'));
   await page.waitForTimeout(4500);await page.reload();await expect(button(page,"usage")).toContainText("GPT-6 · 1 / 50 · 刷新未知");
-  await button(page,"usage").click();await page.locator(`${host} [name="total"]`).fill("12");await page.locator(`${host} [name="cycleDays"]`).fill("3");
+  await button(page,"usage").click();await button(page,"usage-settings").click();await page.locator(`${host} [name="total"]`).fill("12");await page.locator(`${host} [name="cycleDays"]`).fill("3");
   const reset=await page.evaluate(()=>{const d=new Date(Date.now()+2*86400000);d.setSeconds(0,0);const local=new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16);return {local,month:String(d.getMonth()+1).padStart(2,'0'),day:String(d.getDate()).padStart(2,'0'),hour:String(d.getHours()).padStart(2,'0'),minute:String(d.getMinutes()).padStart(2,'0')};});
   await page.locator(`${host} [name="resetAt"]`).fill(reset.local);await button(page,"save-usage").click();
   await expect(button(page,"usage")).toContainText(`GPT-6 · 12 / 50 · ${reset.month}-${reset.day} ${reset.hour}:${reset.minute} 刷新`);
@@ -269,11 +305,28 @@ test("attachments and unavailable Send fail closed without a click",async({page}
   await expect(page.locator(`${host} .status`)).toContainText(/草稿|停止|暂停/,{timeout:6000});
   expect(await page.evaluate(()=>window.clickCount)).toBe(0);
 });
-test("usage panel stays inside a narrow viewport",async({page})=>{
+test("usage popover stays anchored inside a narrow viewport",async({page})=>{
   await page.setViewportSize({width:420,height:740});await page.goto('https://chatgpt.com/');
   await page.evaluate(()=>{const form=document.querySelector('form');form.style.left='12px';form.style.width='396px';form.style.top='280px';form.style.bottom='auto';});
   await expect(button(page,'usage')).toBeVisible();await button(page,'usage').click();
-  const box=await page.locator(`${host} .usage-panel`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
+  const box=await page.locator(`${host} .usage-popover`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
+  await button(page,'usage-settings').click();const dialog=await page.locator(`${host} .usage-settings`).boundingBox();expect(dialog.x).toBeGreaterThanOrEqual(0);expect(dialog.y).toBeGreaterThanOrEqual(0);expect(dialog.x+dialog.width).toBeLessThanOrEqual(421);expect(dialog.y+dialog.height).toBeLessThanOrEqual(741);
+});
+test("composer toolbar stays compact: usage-only is centered and conversation actions align right",async({page})=>{
+  await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
+  const home=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,center:b.left+b.width/2-(h.left+h.width/2)};});
+  expect(home.mode).toBe('usage');expect(home.width).toBeLessThan(home.host*.7);expect(Math.abs(home.center)).toBeLessThan(2);
+  await page.evaluate(()=>window.routeTo('/c/toolbar-compact'));await expect(button(page,'queue')).toBeVisible();
+  const conversation=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,right:h.right-b.right,count:node.shadowRoot.querySelector('.count').textContent};});
+  expect(conversation.mode).toBe('conversation');expect(conversation.width).toBeLessThan(conversation.host*.8);expect(Math.abs(conversation.right)).toBeLessThan(2);expect(conversation.count).toBe('0');
+});
+test("status notice follows the compact toolbar instead of the composer left edge",async({page})=>{
+  await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
+  const usage=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,notice=s.querySelector('.notice'),bar=s.querySelector('.bar');notice.textContent='扩展已更新，请刷新当前页面后再操作';notice.hidden=false;const n=notice.getBoundingClientRect(),b=bar.getBoundingClientRect();return{center:n.left+n.width/2-(b.left+b.width/2),left:n.left-node.getBoundingClientRect().left};});
+  expect(Math.abs(usage.center)).toBeLessThan(2);expect(usage.left).toBeGreaterThan(20);
+  await page.evaluate(()=>window.routeTo('/c/notice-position'));await expect(button(page,'queue')).toBeVisible();
+  const conversation=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,notice=s.querySelector('.notice'),bar=s.querySelector('.bar');notice.textContent='扩展已更新，请刷新当前页面后再操作';notice.hidden=false;const n=notice.getBoundingClientRect(),b=bar.getBoundingClientRect();return{right:b.right-n.right};});
+  expect(Math.abs(conversation.right)).toBeLessThan(2);
 });
 test("native composer popovers hide overlapping extension chrome and restore it on close",async({page})=>{
   await page.goto('https://chatgpt.com/c/native-popover');await expect(button(page,'queue')).toBeVisible();

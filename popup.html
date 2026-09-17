@@ -1,3 +1,18 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ChatGPT Queue</title><link rel="stylesheet" href="popup.css"></head>
-<body><h1>ChatGPT Queue</h1><label><input id="enabled" type="checkbox"> Queue 已空时发送系统完成通知</label><p id="permission"></p><p>在 ChatGPT 原生输入框上方查看当前对话 Queue 和 GPT-6 用量。所有数据保存在本机。</p><h2>有待发消息的对话</h2><div id="queues"></div><p id="status" role="status"></p><script src="queue-core.js"></script><script src="popup.js"></script></body></html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>gpt-notice · 扩展设置</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><img src="icons/chatgpt.png" alt="" width="28" height="28"><div><h1>gpt-notice</h1><p>减少侧栏请求，让对话有序完成</p></div><span id="version"></span></header>
+  <main>
+    <section class="settings" aria-label="功能设置">
+      <label class="setting"><span><strong>新聊天默认收起侧栏分区</strong><small>收起置顶、原生项目和聊天，减少项目加载；不拦截请求。</small></span><input id="sidebarCollapse" type="checkbox" role="switch" disabled><i aria-hidden="true"></i></label>
+      <label class="setting"><span><strong>消息队列</strong><small>按顺序发送已保存消息。关闭后保留消息，不再自动发送。</small></span><input id="queue" type="checkbox" role="switch" disabled><i aria-hidden="true"></i></label>
+      <label class="setting"><span><strong>完成消息提醒</strong><small>手动回复或整队完成时提醒；需要确认、遇到异常时单独提醒。</small></span><input id="notifications" type="checkbox" role="switch" disabled><i aria-hidden="true"></i></label>
+    </section>
+    <section class="notification-info" aria-label="通知状态"><div><strong>系统通知</strong><span id="permission">检查中</span></div><p id="delivery">与消息队列开关独立。</p></section>
+    <section class="queue-overview" aria-labelledby="queue-title"><div class="section-heading"><h2 id="queue-title">待发消息</h2><span id="scope-state"></span></div><div id="queues"></div></section>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <footer>仅本机保存 · 账号与工作区隔离</footer>
+  <script src="queue-core.js"></script><script src="popup.js"></script>
+</body></html>

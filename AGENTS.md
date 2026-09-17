@@ -2,7 +2,7 @@
 
 ## 长期产品与安全边界
 
-产品只包含 ChatGPT 原生体验、纯文本 Queue、最终完成提醒、GPT-6 Pro / GPT-5.6 Pro 本地用量与刷新配置。不创建第二套聊天输入框，不接管原生 Send、Stop、模型选择和附件，不主动调用或重放 ChatGPT 私有接口。首页、项目首页和 `WEB:` 临时路由仅展示用量；只有稳定 conversation 才有 Queue。
+产品包含 ChatGPT 原生体验、纯文本 Queue、最终完成提醒、GPT-6 Pro / GPT-5.6 Pro 本地用量与刷新配置，以及新聊天默认折叠和侧栏快捷项目。不创建第二套聊天输入框，不接管原生 Send、Stop、模型选择和附件，不主动调用或重放 ChatGPT 私有接口。首页、项目首页和 `WEB:` 临时路由展示用量与侧栏能力；只有稳定 conversation 才有 Queue。
 
 **禁止发送真实 GPT-6 Pro / GPT-5.6 Pro 消息做测试，禁止消耗用户额度。** 发送、重生成、故障注入只用受控 fixture 和独立临时浏览器 Profile；不得清空用户真实扩展存储。真实登录页仅做只读验证，不改草稿、附件或刷新正在生成的对话。测试通过不等于真实服务发送已验证。
 
@@ -14,6 +14,7 @@
 - 终态与送达分开：正常完成可消费下一条；当前轮已确认的原生“无法思考”等可恢复异常也可消费已有下一条，但不是重试上一条或自动补发“继续”。连续两轮可恢复异常暂停，成功或人工继续重置计数。Stop、限额/策略/账号阻塞、未分类错误、unknown 不能自动越过；审批/继续生成只提醒一次并保持本轮未结束。只分类原生 UI，不从助手正文推断失败或策略状态。页面 sampler 与 network probe 复用同一个稳定终态判定；不得再引入 transportDone 等旁路。依据及限制见 ADR-0005。
 - 一个低频页面采样器和一个独立 Shadow DOM UI。页面状态只由低频 snapshot 与 Service Worker 的精确 document 完成探针驱动；不使用 MutationObserver、React 内部依赖、第二输入框或 fetch/XHR/History monkey patch。附件保护覆盖全部 file input、图片预览和中英文移除按钮。原生浮层与 Bar、Panel、编辑器任一区域相交都要让位，隐藏不能丢失未保存编辑内容；不通过极大 z-index 或扩展 top layer 压住原生菜单。
 - Worker 随时可能被终止：关键队列状态用 `storage.local`，短期请求关联用 `storage.session`；不使用心跳、offscreen 或常驻服务保活。扩展 context 失效后停止旧页面实例的定时器和操作，提示人工刷新，保留原生草稿及附件。不自动刷新或为热注入新增 scripting 权限。
+- 侧栏优化不阻止、重定向或伪造任何 ChatGPT 请求。只在进入 `/` 或项目主页时一次性收起原生置顶/项目/聊天；之后尊重用户手动展开。快捷项目必须作为原生 Sidebar 正常布局流中的 sibling，随上方分区自然位移；不得用 fixed/absolute 模拟目录位置。视觉结构要复用当前原生 Projects section/menu-item class 与 sprite，默认 5 条 +“查看更多”，hover 的 compose 新建入口用新标签打开项目主页；禁止再维护独立的 emoji/theme→sprite/颜色映射。项目的名称、shortUrl、emoji/theme 来自 ChatGPT 自己写入的项目列表缓存；原生项目行真实渲染时只被动学习当前 sprite symbol/颜色作为最小视觉提示。改名/改图标不主动触发列表请求，等 ChatGPT 下一次自然刷新/展开列表后渐进更新；语义图标已变化时不得继续沿用旧视觉提示。项目元数据按现有 scope 隔离、按 ID 合并，缺席不删；快捷项不批量预取。修改该适配时先读 README 对应章节；真实 `_account` 是 JSON 字符串，原生缓存路径使用解码 ID，但不得因此变更已有 Queue/用量的 scope 摘要。原生折叠 cookie 仅是 UI 偏好，不读取认证凭据。旧 DNR 规则只允许迁移性删除，禁止新增规则。
 
 ## 用量、存储与发布
 
@@ -33,6 +34,10 @@
 - 上游 outbox：https://github.com/kartikkabadi/chatgpt-yolo （许可见 THIRD_PARTY_NOTICES.md）
 - 重放方案边界：https://developer.chrome.com/docs/workbox/modules/workbox-background-sync
 - Worker 终止验证：https://developer.chrome.com/docs/extensions/how-to/test/test-serviceworker-termination-with-puppeteer
+
+## 通知投递补充（ADR-0006）
+
+Queue 完成状态与通知 pendingKind 意图必须通过同一次 storage.local.set 批量提交；不得把 Chrome Storage 描述成具有未文档化的事务保证。通知失败不得因为 turn.done 而遗失，也不能阻塞后续发送。重试复用原有 sampler（失败时至少间隔 10 秒）与 Worker 启动，不加第二轮询/保活。同一结果的 generic → rich 静默 update，attention / failed 与最终结果分离 ID；用户关闭审批通知不能消费最终结果。关闭提醒开关丢弃待补发意图；Stop 或本轮终态取消已失效的未投递审批提醒。待投递记录不能被普通已完成通知清理误删。浏览器权限与 OS 实际横幅可见性必须区分，不承诺冻结/丢弃期间及时执行或 OS 绝对 exactly-once。Chrome 通知没有 CSS 外观接口，只用标题/正文/图标/contextMessage 等真正支持的字段。队列 UI 的发送可用性直接投影现有 safeToSend，不复制一套状态机。
 
 ## Agent skills
 

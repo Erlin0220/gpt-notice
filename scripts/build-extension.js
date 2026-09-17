@@ -6,6 +6,8 @@ const RUNTIME_FILES = [
   "background.js",
   "queue-core.js",
   "usage-core.js",
+  "projects-core.js",
+  "sidebar.js",
   "chatgpt-dom.js",
   "queue-ui.js",
   "content.js",

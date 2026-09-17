@@ -3,10 +3,43 @@ const assert = require("node:assert/strict");
 const Q = require("../queue-core");
 const U = require("../usage-core");
 const D = require("../chatgpt-dom");
+const P = require("../projects-core");
 const at = Date.parse("2026-09-14T12:00:00Z");
 const scope = "a".repeat(64);
 function added(text = "next prompt") { return Q.apply(undefined, { op: "add", id: "item-12345", text }, "tab-A", at).state; }
 function claim(state = added()) { return Q.apply(state, { op: "claim", baseline: "user-before" }, "tab-A", at + 1); }
+
+test("project metadata accepts only native project routes and extracts a minimal cache allowlist", () => {
+  const id = `g-p-${"1".repeat(32)}`, shortUrl = `${id}-alpha`;
+  assert.deepEqual(P.route(`/g/${shortUrl}/c/conversation`), {projectId:id,shortUrl});
+  for (const value of ["https://evil.test/g/"+shortUrl+"/project", `/g/${shortUrl}/project?redirect=evil`, `/g/${shortUrl}/project#hash`, "/g/g-ordinary-gpt/project", "/g/g-p-invented/project"]) assert.equal(P.route(value), null);
+  const projects = P.fromCache(JSON.stringify({timestamp:at,value:{pages:[{items:[{gizmo:{gizmo:{id,short_url:shortUrl,display:{name:"Alpha",emoji:"terminal",theme:"#3A83F7"},instructions:"NEVER STORE",files:["SECRET"]}}}]}]}}));
+  assert.equal(projects.length,1); assert.equal(projects[0].name,"Alpha"); assert.equal(projects[0].emoji,"terminal");
+  assert.equal(JSON.stringify(projects).includes("SECRET"), false); assert.equal(JSON.stringify(projects).includes("NEVER STORE"), false);
+  assert.deepEqual(P.fromCache("{broken"),[]); assert.deepEqual(P.fromCache("x".repeat(2_000_001)),[]);
+  const cleared=P.fromCache(JSON.stringify({timestamp:at,value:{pages:[{items:[{gizmo:{gizmo:{id,short_url:shortUrl,display:{name:"Alpha",emoji:null,theme:null}}}}]}]}}))[0];assert.equal(cleared.emoji,"");assert.equal(cleared.theme,"");
+  assert.equal(P.normalize({projectId:id,shortUrl,name:"Name",theme:"url(javascript:evil)"}).theme, undefined);
+  assert.deepEqual(P.normalize({projectId:id,shortUrl,name:"Name",visual:{sprite:"core",symbol:"1af12c",color:"rgb(83, 154, 248)",ignored:"no"}}).visual,{sprite:"core",symbol:"1af12c",color:"rgb(83, 154, 248)"});
+  assert.equal(P.normalize({projectId:id,shortUrl,name:"Name",visual:{sprite:"other",symbol:"x"}}).visual,undefined);
+  assert.equal(P.normalize({projectId:`g-p-${"2".repeat(32)}`,shortUrl,name:"Mismatch"}),null);
+});
+test("project merge is idempotent, updates names and short URLs, retains absent projects and ignores stale cache", () => {
+  const id = `g-p-${"2".repeat(32)}`, original = {projectId:id,shortUrl:`${id}-old`,name:"Old",emoji:"book",observedAt:at};
+  let state = P.merge(undefined,[original],at).state;
+  assert.equal(P.merge(state,[original],at+1).changed,false);
+  state = P.merge(state,[{projectId:id,shortUrl:`${id}-new`,name:"New"}],at+10).state;
+  assert.equal(state.items.length,1); assert.equal(state.items[0].name,"New"); assert.equal(state.items[0].emoji,"book");
+  assert.equal(P.merge(state,[original],at+20).changed,false);
+  assert.equal(P.merge(state,[],at+30).state.items.length,1);
+  state=P.merge(state,[{projectId:id,shortUrl:`${id}-new`,name:"New",emoji:"terminal",theme:"#3A83F7",visual:{sprite:"core",symbol:"1af12c",color:"rgb(83, 154, 248)"}}],at+40).state;
+  assert.equal(state.items[0].visual.symbol,"1af12c");
+  state=P.merge(state,[{projectId:id,shortUrl:`${id}-new`,name:"Renamed",emoji:"heart",theme:"#FA423E",observedAt:at+50}],at+50).state;
+  assert.equal(state.items[0].visual,undefined);assert.equal(state.items[0].name,"Renamed");
+  state=P.merge(state,[{projectId:id,shortUrl:`${id}-new`,name:"Renamed",emoji:"heart",theme:"#FA423E",visual:{sprite:"core",symbol:"a1bba7",color:"rgb(255, 103, 100)"}}],at+60).state;
+  assert.equal(state.items[0].visual.symbol,"a1bba7");
+  assert.throws(()=>P.merge({version:2,items:[]},[]),/不兼容/);
+  assert.throws(()=>P.merge(state,new Array(501)),/数量/);
+});
 
 test("route keys only exist for stable formal conversations, independent of tab and project label", () => {
   for (const path of ["/", "/g/g-p-one/project", "/g/project-two/project", "/c/WEB:temporary", "/share/abc", "/plugins"]) assert.equal(Q.key(scope, "https://chatgpt.com" + path), "");

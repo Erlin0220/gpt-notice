@@ -5,12 +5,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const Q = require("../queue-core");
 const U = require("../usage-core");
+const P = require("../projects-core");
 const scope = "a".repeat(64);
-function harness(storage = {}, session = {}) {
-  const created = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
+function harness(storage = {}, session = {}, created = []) {
+  const notificationCalls = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
   const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]), probes = new Map(), probeCalls = [];
+  let sessionRules = [{id:910001}], dynamicRules = [{id:910001,action:{type:"block"},condition:{}}];
   const webEvents = {}, registrations = {};
   let listener, clicked, closed, removed, failWrite = false, failNotify = false, permission = "granted", sequence = 0, tabQueries = 0;
+  let offset = 0, writeFilter = () => false;
+  class Clock extends Date { static now() { return Date.now() + offset; } }
   const event = name => ({ addListener(fn, filter, options) { webEvents[name] = fn; registrations[name] = { filter, options }; } });
   const clone = value => structuredClone(value);
   const store = target => ({
@@ -20,13 +24,24 @@ function harness(storage = {}, session = {}) {
   });
   const chrome = {
     runtime: { onMessage: { addListener(fn) { listener = fn; } }, getURL: p => p },
-    storage: { local: { ...store(storage), async set(values) { if (failWrite) throw new Error("disk full"); Object.assign(storage,clone(values)); } }, session: store(session) },
+    storage: { local: { ...store(storage), async set(values) { if (failWrite || writeFilter(values)) throw new Error("disk full"); Object.assign(storage,clone(values)); } }, session: store(session) },
+    declarativeNetRequest: {
+      async getDynamicRules() { return clone(dynamicRules); },
+      async updateDynamicRules({ removeRuleIds = [], addRules = [] }) {
+        dynamicRules = dynamicRules.filter(rule => !removeRuleIds.includes(rule.id)); dynamicRules.push(...clone(addRules));
+      },
+      async getSessionRules() { return clone(sessionRules); },
+      async updateSessionRules({ removeRuleIds = [], addRules = [] }) {
+        sessionRules = sessionRules.filter(rule => !removeRuleIds.includes(rule.id));
+        sessionRules.push(...clone(addRules));
+      }
+    },
     webRequest: Object.fromEntries(["onBeforeRequest", "onSendHeaders", "onCompleted", "onErrorOccurred"].map(name => [name, event(name)])),
     notifications: {
       onClicked: { addListener(fn) { clicked = fn; } }, onButtonClicked: { addListener() {} }, onClosed: { addListener(fn) { closed = fn; } },
       async getPermissionLevel() { return permission; },
-      async create(id, value) { if (failNotify) throw new Error("OS denied"); const index = created.findIndex(item => item.id === id); if (index < 0) created.push({id,...value}); else created[index] = {id,...value}; return id; },
-      async update(id, value) { if (failNotify) throw new Error("OS denied"); const index = created.findIndex(item => item.id === id); if (index < 0) return false; created[index] = { id, ...value }; return true; },
+      async create(id, value) { notificationCalls.push({op:"create",id,...value}); if (failNotify) throw new Error("OS denied"); const index = created.findIndex(item => item.id === id); if (index < 0) created.push({id,...value}); else created[index] = {id,...value}; return id; },
+      async update(id, value) { notificationCalls.push({op:"update",id,...value}); if (failNotify) throw new Error("OS denied"); const index = created.findIndex(item => item.id === id); if (index < 0) return false; created[index] = { id, ...value }; return true; },
       async clear(id) { closed?.(id, false); return true; }
     },
     tabs: { onRemoved: { addListener(fn) { removed = fn; } }, async get(id) { return tabs.get(id); }, async query(query = {}) { tabQueries += 1; return [...tabs.values()].filter(tab => !query.active || tab.id === 1); },
@@ -38,9 +53,12 @@ function harness(storage = {}, session = {}) {
       async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
     windows: { async update() {} }
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../background.js"),"utf8"), { chrome, importScripts() {}, ChatGPTQueueCore: Q, ChatGPTUsage: U, URL, Date, TextDecoder, console, setTimeout, clearTimeout });
-  const send = (command, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,command}, {tab:tabs.get(tabId),documentId:`doc-${tabId}`,frameId:0}, resolve));
-  const sendUsage = (usage, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,usage}, {tab:tabs.get(tabId),documentId:`doc-${tabId}`,frameId:0}, resolve));
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../background.js"),"utf8"), { chrome, importScripts() {}, ChatGPTQueueCore: Q, ChatGPTUsage: U, ChatGPTProjects: P, URL, Date:Clock, TextDecoder, console, setTimeout, clearTimeout });
+  const sender = tabId => ({tab:tabs.get(tabId),url:tabs.get(tabId)?.url,documentId:`doc-${tabId}`,frameId:0});
+  const send = (command, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,command}, sender(tabId), resolve));
+  const sendUsage = (usage, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,usage}, sender(tabId), resolve));
+  const sendProjects = (projects, tabId = 1, requestedScope = scope) => new Promise(resolve => listener({type:"NOTICE",scope:requestedScope,url:tabs.get(tabId).url,projects}, sender(tabId), resolve));
+  const setting = (feature, enabled) => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature,enabled}, {url:"popup.html"}, resolve));
   const drain = () => new Promise(resolve => setTimeout(resolve, 50));
   const emit = async (name, details) => { webEvents[name](details); await drain(); };
   const before = async (body, overrides = {}) => {
@@ -54,8 +72,58 @@ function harness(storage = {}, session = {}) {
     await emit("onSendHeaders", details);
   };
   const popup = () => new Promise(resolve => listener({ type:"NOTICE_POPUP" }, { url:"popup.html" }, resolve));
-  return { send, sendUsage, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, registrations, created, focused, click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
+  return { send, sendUsage, sendProjects, setting, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, registrations, created, focused, notificationCalls, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
 }
+test("startup removes the legacy sidebar blocker and never installs another request rule", async () => {
+  const h = harness();
+  await h.popup();
+  assert.deepEqual(h.rules(), []);
+});
+test("popup feature switches persist independently without changing network behavior", async () => {
+  const h = harness();
+  let popup = await h.popup();
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:true, notifications:true });
+  assert.equal(h.rules().length, 0);
+
+  let result = await h.setting("sidebarCollapse", false);
+  assert.equal(result.ok, true);
+  assert.equal(result.settings.sidebarCollapse, false);
+  assert.equal(h.storage["notice:sidebar-collapse-enabled"], false);
+  assert.equal(h.rules().length, 0);
+
+  result = await h.setting("queue", false);
+  assert.equal(result.settings.queue, false);
+  assert.equal(h.storage["notice:queue-enabled"], false);
+  result = await h.setting("notifications", false);
+  assert.equal(result.settings.notifications, false);
+  assert.equal(h.storage["notice:notifications"], false);
+
+  result = await h.setting("sidebarCollapse", true);
+  assert.equal(result.settings.sidebarCollapse, true);
+  assert.equal(h.rules().length, 0);
+  popup = await h.popup();
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:false, notifications:false });
+});
+test("sidebar setting storage failure leaves its previous value unchanged", async () => {
+  const h = harness(); await h.popup();
+  h.writeFailure(true);
+  assert.equal((await h.setting("sidebarCollapse", false)).ok, false);
+  assert.equal((await h.popup()).settings.sidebarCollapse, true);
+  assert.equal(h.rules().length, 0);
+});
+test("projects persist with account isolation, no deletion on partial observations and no raw payload storage", async () => {
+  const h = harness(), id = `g-p-${"a".repeat(32)}`;
+  let reply = await h.sendProjects([{projectId:id,shortUrl:`${id}-alpha`,name:"Alpha",instructions:"SECRET",files:["SECRET"]}]);
+  assert.equal(reply.ok, true); assert.equal(reply.projects.items.length, 1);
+  assert.equal(JSON.stringify(h.storage).includes("SECRET"), false);
+  const restart = harness(h.storage);
+  assert.equal((await restart.sendProjects([])).projects.items[0].name, "Alpha");
+  reply = await restart.sendProjects([{projectId:id,shortUrl:`${id}-renamed`,name:"Renamed"}]);
+  assert.equal(reply.projects.items.length, 1); assert.equal(reply.projects.items[0].shortUrl, `${id}-renamed`);
+  restart.scopes.set(1, "b".repeat(64));
+  assert.equal((await restart.sendProjects([])).ok, false);
+  assert.deepEqual((await restart.sendProjects([], 1, "b".repeat(64))).projects.items, []);
+});
 test("service worker serializes concurrent claims and persists intent", async () => {
   const h = harness();
   await h.send({op:"add",id:"queue-item",text:"queue"});
@@ -92,9 +160,9 @@ test("rich completion notice uses prompt title, elapsed time, and reply preview 
     elapsedMs:125_000
   }});
   assert.equal(h.created.length,1);
-  assert.equal(h.created[0].title,"审核 gpt-notice 的通知体验");
-  assert.equal(h.created[0].message,"2m 5s \u00b7 \u5df2\u4fee\u590d\u901a\u77e5\u5c42\u7ea7 \u652f\u6301 \u6458\u8981 \u548c \u6253\u5f00\u5bf9\u8bdd");
-  assert.equal(h.created[0].contextMessage,undefined);
+  assert.equal(h.created[0].title,"回复已完成 · 审核 gpt-notice 的通知体验");
+  assert.equal(h.created[0].message,"已修复通知层级 支持 摘要 和 打开对话");
+  assert.equal(h.created[0].contextMessage,"gpt-notice · 本轮用时 2 分 5 秒");
   assert.equal(h.created[0].buttons,undefined);
   assert.equal(JSON.stringify(h.storage).includes("已修复通知层级"),false);
 });
@@ -117,7 +185,7 @@ test("hidden semantic completion publishes only a generic notice without reply p
   await h.send({op:"start",userId:"hidden-semantic"});
   await h.send({op:"settle",userId:"hidden-semantic",notice:{prompt:"后台问题",response:"private final reply",elapsedMs:3200,hidden:true}});
   assert.equal(h.created.length,1);
-  assert.equal(h.created[0].title,"后台问题");
+  assert.equal(h.created[0].title,"回复已完成 · 后台问题");
   assert.match(h.created[0].message,/点击查看对话/);
   assert.equal(h.created[0].message.includes("private final reply"),false);
   assert.equal(Object.values(h.storage).find(value=>value?.kind)?.kind,"generic");
@@ -208,8 +276,116 @@ test("notification failures never mark delivery and a later semantic completion 
   const request=await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"user-a",author:{role:"user"}}]});
   await h.emit("onSendHeaders",request);await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(Object.values(h.storage).some(value=>value?.kind),false);
+  h.advance(11000);
   h.notifyFailure(false);await h.send({op:"start",userId:"user-a"});const r=await h.send({op:"settle",userId:"user-a",notice:{prompt:"retry notice",response:"done",elapsedMs:1000}});
   assert.equal(r.notificationError,"");assert.equal(h.created.length,1);assert.equal(Object.values(h.storage).some(value=>value?.kind==="completed"),true);
+});
+test("three manual results have distinct notices; three queued results publish only the final notice", async () => {
+  const manual=harness();
+  for (const id of ["manual-1","manual-2","manual-3"]) {
+    await manual.send({op:"start",userId:id}); await manual.send({op:"settle",userId:id});
+    await manual.send({op:"settle",userId:id},2);
+  }
+  assert.equal(new Set(manual.created.map(n=>n.id)).size,3);
+  const queued=harness();
+  for (const id of ["queued-1","queued-2","queued-3"]) await queued.send({op:"add",id,text:id});
+  let baseline="before";
+  for (let i=1;i<=3;i++) {
+    const item=(await queued.send({op:"claim",baseline})).item;
+    await queued.send({op:"intent",id:item.id,claim:item.claim});
+    const userId=`queue-user-${i}`;
+    await queued.send({op:"receipt",id:item.id,claim:item.claim,userId,text:item.text});
+    await queued.send({op:"settle",userId}); baseline=userId;
+    assert.equal(queued.created.length,i===3?1:0);
+  }
+  assert.match(queued.created[0].title,/队列已完成/);
+});
+test("dismissing an approval never suppresses the later hidden completion or blocking error", async () => {
+  for (const outcome of ["completed","blocked"]) for (const dismiss of ["close","click"]) {
+    const h=harness();await h.send({op:"start",userId:"approval"});await h.send({op:"attention",userId:"approval"});
+    const approvalId=h.created[0].id;
+    if(dismiss==="close")h.closeNotice(approvalId,true);else h.click(approvalId);
+    await new Promise(r=>setTimeout(r,20));
+    await h.send({op:"attention",userId:"approval"});assert.equal(h.created.length,1);
+    await h.send({op:"settle",userId:"approval",outcome,notice:{hidden:true}});
+    assert.equal(h.created.length,2);assert.notEqual(h.created[1].id,approvalId);
+    assert.match(h.created[1].title,outcome==="completed"?/回复已完成/:/需要处理/);
+    await h.send({op:"settle",userId:"approval",outcome});assert.equal(h.created.length,2);
+  }
+});
+test("settle notification failure survives the completed turn and retries without a second settle", async () => {
+  const h=harness();await h.send({op:"start",userId:"failure"});h.notifyFailure(true);
+  const reply=await h.send({op:"settle",userId:"failure",notice:{prompt:"private prompt",response:"private response"}});
+  assert.equal(reply.queue.turn.done,true);assert.ok(reply.notificationError);
+  const pending=Object.values(h.storage).find(n=>n?.pendingKind);assert.equal(pending.pendingKind,"completed");
+  assert.equal(JSON.stringify(h.storage).includes("private"),false);
+  const calls=h.notificationCalls.length;
+  await h.send({op:"get"});assert.equal(h.notificationCalls.length,calls);
+  h.notifyFailure(false);h.advance(11000);
+  assert.equal((await h.send({op:"get"})).notificationError,"");assert.equal(h.created.length,1);
+  assert.equal(Object.values(h.storage).some(n=>n?.pendingKind),false);
+  await h.send({op:"get"});assert.equal(h.created.length,1);
+});
+test("completion and notification intent share one storage write", async () => {
+  const h=harness();await h.send({op:"start",userId:"atomic"});
+  h.failWrites(values=>Object.values(values).some(n=>n?.pendingKind));
+  assert.equal((await h.send({op:"settle",userId:"atomic"})).ok,false);
+  assert.equal(h.storage[Q.key(scope,"https://chatgpt.com/c/a")].turn.done,false);
+  assert.equal(h.created.length,0);
+  h.failWrites(()=>false);await h.send({op:"settle",userId:"atomic"});assert.equal(h.created.length,1);
+});
+test("worker wake recovers an unacknowledged OS success by silent update, not a second create", async () => {
+  const h=harness();await h.send({op:"start",userId:"crash-gap"});
+  h.failWrites(values=>Object.values(values).some(n=>n?.kind&&!n.pendingKind));
+  const reply=await h.send({op:"settle",userId:"crash-gap"});assert.ok(reply.notificationError);
+  assert.equal(h.created.length,1);
+  const record=Object.values(h.storage).find(n=>n?.pendingKind);record.retryAt=0;
+  const restarted=harness(h.storage,h.session,h.created);await restarted.popup();
+  assert.equal(restarted.notificationCalls.filter(c=>c.op==="create").length,0);
+  assert.equal(restarted.notificationCalls.filter(c=>c.op==="update").length,1);
+  assert.equal(restarted.notificationCalls[0].silent,true);
+  assert.equal(Object.values(restarted.storage).some(n=>n?.pendingKind),false);
+});
+test("pending approval survives worker restart and does not auto-approve or finish the turn", async () => {
+  const h=harness();await h.send({op:"start",userId:"pending-approval"});h.notifyFailure(true);
+  await h.send({op:"attention",userId:"pending-approval"});
+  Object.values(h.storage).find(n=>n?.pendingKind).retryAt=0;
+  const restarted=harness(h.storage,h.session);await restarted.popup();
+  assert.equal(restarted.created.length,1);assert.match(restarted.created[0].title,/需要你确认/);
+  assert.equal(restarted.storage[Q.key(scope,"https://chatgpt.com/c/a")].turn.done,false);
+  await restarted.send({op:"attention",userId:"pending-approval"});assert.equal(restarted.created.length,1);
+});
+test("an explicit Stop cancels an undelivered approval instead of retrying a stale request for approval", async () => {
+  const h=harness();await h.send({op:"start",userId:"stop-pending"});h.notifyFailure(true);
+  await h.send({op:"attention",userId:"stop-pending"});await h.send({op:"stop",userId:"stop-pending"});
+  h.notifyFailure(false);h.advance(11000);await h.send({op:"get"});await h.send({op:"settle",userId:"stop-pending"});
+  assert.equal(h.created.length,0);assert.equal(Object.values(h.storage).some(n=>n?.pendingKind),false);
+});
+test("Queue disabled preserves queued text but no longer suppresses independent manual completion", async () => {
+  const h=harness();await h.send({op:"add",id:"pending-work",text:"saved"});await h.setting("queue",false);
+  await h.send({op:"start",userId:"manual-with-disabled-queue"});await h.send({op:"settle",userId:"manual-with-disabled-queue"});
+  assert.equal(h.created.length,1);assert.equal(h.storage[Q.key(scope,"https://chatgpt.com/c/a")].items.length,1);
+});
+test("paused queue does not mute an independent manual reply or falsely claim the whole queue completed", async () => {
+  const h=harness();await h.send({op:"add",id:"paused-item",text:"saved"});await h.send({op:"pause",paused:true});
+  await h.send({op:"start",userId:"independent"});await h.send({op:"settle",userId:"independent"});
+  assert.equal(h.created.length,1);assert.match(h.created[0].title,/回复已完成/);assert.doesNotMatch(h.created[0].title,/队列已完成/);
+  assert.equal(h.storage[Q.key(scope,"https://chatgpt.com/c/a")].paused,true);
+});
+test("resolved attention pending delivery is cancelled when the terminal result commits", async () => {
+  const h=harness();await h.send({op:"start",userId:"attention-resolved"});h.notifyFailure(true);
+  await h.send({op:"attention",userId:"attention-resolved"});h.notifyFailure(false);
+  await h.send({op:"settle",userId:"attention-resolved"});h.advance(11000);await h.send({op:"get"});
+  assert.equal(h.created.length,1);assert.match(h.created[0].title,/回复已完成/);
+  assert.equal(Object.values(h.storage).some(n=>n?.pendingKind),false);
+});
+test("disabled notifications discard pending delivery; denied permission is visible and retryable", async () => {
+  const h=harness();h.permission("denied");await h.send({op:"start",userId:"denied"});await h.send({op:"settle",userId:"denied"});
+  assert.equal(h.created.length,0);assert.equal((await h.popup()).notification.pending,1);
+  h.permission("granted");h.advance(11000);await h.send({op:"get"});assert.equal(h.created.length,1);
+  h.notifyFailure(true);await h.send({op:"start",userId:"disabled"});await h.send({op:"settle",userId:"disabled"});
+  await h.setting("notifications",false);assert.equal(Object.values(h.storage).some(n=>n?.pendingKind),false);
+  h.notifyFailure(false);h.advance(11000);await h.setting("notifications",true);await h.send({op:"get"});assert.equal(h.created.length,1);
 });
 test("stale page mutations are rejected after SPA navigation", async () => {
   const h=harness(); h.tabs.set(1,{id:1,windowId:1,url:"https://chatgpt.com/c/other"});

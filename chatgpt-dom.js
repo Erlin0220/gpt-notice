@@ -147,6 +147,19 @@
     }
     return scopeValue;
   }
+  function projectCache(scope) {
+    // Read only the selected account's native metadata cache; never enumerate
+    // other accounts' caches or persist their raw contents in the extension.
+    try {
+      const account = localStorage.getItem("_account") || initialAccount || "personal";
+      if (!scope || scope !== scopeValue || `${userId}:${account}` !== scopeIdentity || document.getElementById("client-bootstrap")?.textContent !== bootstrapText) return "";
+      // Live Web serializes _account as a JSON string; the cache path uses its
+      // decoded ID. Keep the existing Queue/usage scope digest unchanged.
+      let cacheAccount = account;
+      if (account.startsWith('"')) { cacheAccount = JSON.parse(account); if (typeof cacheAccount !== "string") return ""; }
+      return localStorage.getItem(`cache/${userId}/${cacheAccount}/snorlax-history`) || "";
+    } catch { return ""; }
+  }
   function write(input, value) {
     if (!input || !enabled(input) || !visible(input)) return false;
     input.focus({ preventScroll: true });
@@ -165,5 +178,5 @@
     }
     return globalThis.ChatGPTQueueCore.comparable(readText(input)) === globalThis.ChatGPTQueueCore.comparable(value);
   }
-  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, failureKind, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, write };
+  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, failureKind, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, projectCache, write };
 });

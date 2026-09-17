@@ -2,10 +2,12 @@
   "use strict";
   if (globalThis.ChatGPTNotice) return;
   const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage;
+  const QUEUE_SETTING = "notice:queue-enabled";
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
     tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
-    pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false };
+    pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false,
+    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, notificationRetryAt: 0, notificationError: "" };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
@@ -32,29 +34,49 @@
     if (!current(context)) return;
     if (reply.queue && (!rt.queue || reply.queue.revision >= rt.queue.revision)) rt.queue = reply.queue;
     if (reply.usage && (!rt.usage || reply.usage.revision >= rt.usage.revision)) rt.usage = reply.usage;
-    if (reply.notificationError) ui.showNotice(`系统通知未能创建：${reply.notificationError}`);
+    if (reply.projects && (!rt.projects || reply.projects.revision >= rt.projects.revision)) rt.projects = reply.projects;
+    if (Object.hasOwn(reply, "notificationError")) {
+      rt.notificationRetryAt = reply.notificationError ? Date.now() + 10000 : 0;
+      if (reply.notificationError && reply.notificationError !== rt.notificationError) ui.showNotice(`系统通知暂未送达，将重试：${reply.notificationError}`);
+      rt.notificationError = reply.notificationError;
+    }
+  }
+  async function sendRuntime(message, fallback) {
+    try {
+      const reply = await runtime().sendMessage(message);
+      if (!reply?.ok) throw new Error(reply?.error || fallback);
+      return reply;
+    } catch (error) {
+      if (!globalThis.chrome?.runtime?.id || /extension context invalidated/i.test(String(error?.message || error || ""))) { invalidate(); throw new Error(RELOAD_REQUIRED); }
+      throw error;
+    }
   }
   async function request(command, context = rt.context, usage) {
     if (!context?.scope) throw new Error("账号尚未识别，未改动草稿或 Queue");
-    const api = runtime();
     if (!current(context)) throw new Error("页面已切换，操作已取消");
-    let reply;
-    try {
-      reply = await api.sendMessage({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage });
-    } catch (error) {
-      const detail = String(error?.message || error || "");
-      if (!globalThis.chrome?.runtime?.id || /extension context invalidated/i.test(detail)) { invalidate(); throw new Error(RELOAD_REQUIRED); }
-      throw error;
-    }
-    if (!reply?.ok) throw new Error(reply?.error || "扩展连接不可用，请重新加载页面");
+    const reply = await sendRuntime({ type: "NOTICE", scope: context.scope, url: context.url, instance, command, usage }, "扩展连接不可用");
     accept(reply, context);
     return reply;
+  }
+  async function refreshProjects(context) {
+    if (rt.projectBusy || !context?.scope || !current(context)) return;
+    rt.projectBusy = true;
+    try {
+      const projects = globalThis.ChatGPTSidebar.collect(context.scope, context.url);
+      const signature = JSON.stringify(projects);
+      if (rt.projects && signature === rt.projectSignature) return;
+      const reply = await sendRuntime({ type: "NOTICE", scope: context.scope, url: context.url, projects }, "项目快捷访问暂不可用");
+      accept(reply, context);
+      if (current(context)) { rt.projectSignature = signature; render(); }
+    } catch { /* Auxiliary metadata failure must never strand Queue or completion. */ }
+    finally { rt.projectBusy = false; }
   }
   function render(status = "") {
     const context = rt.context || { mode: "off", key: "", scope: "" };
     const p = rt.page;
-    ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy, attachments: Boolean(p?.attachments),
+    ui.render({ ...context, queue: rt.queue, usage: rt.usage, actionBusy: rt.actionBusy, attachments: Boolean(p?.attachments), queueEnabled: rt.queueEnabled, canSend: Boolean(p && safeToSend(p) && !rt.queue?.items.some(i => i.state !== "pending")),
       status: status || (rt.previousTail ? "等待目标对话加载" : p?.attachments ? "检测到图片或附件；Queue 暂仅支持纯文本，附件保持在原生输入框" : (rt.queue?.paused || rt.queue?.holdUntil) && rt.queue.reason ? rt.queue.reason : p?.waiting ? "等待你处理原生确认或继续操作；Queue 不会自动批准" : p?.running || rt.turn || rt.queue?.turn && !rt.queue.turn.done ? "正在等待当前回复真正结束；请保持最新消息可见" : p?.error && !errorAllowsNext(p) ? "原生页面仍有阻塞或异常提示；请先处理后继续" : !p?.empty ? "草稿已保留，Queue 等待输入框为空" : !rt.queue?.items.length ? "Queue 为空" : rt.queue?.reason || "队列就绪") });
+    try { globalThis.ChatGPTSidebar.render(rt.projects, context.url, context.scope); } catch {}
     ui.anchor(p?.anchor || null);
   }
   function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
@@ -64,14 +86,14 @@
     if (event.type === "click" && button?.matches(D.STOP)) {
       rt.stopped = D.snapshot().userId;
       const generationId = rt.turn?.id === rt.stopped ? rt.turn.generationId : rt.stopped;
-      if (current(rt.context) && rt.context?.mode === "conversation") void request({ op: "stop", userId: rt.stopped, generationId }).catch(() => {});
+      if (rt.queueEnabled && current(rt.context) && rt.context?.mode === "conversation") void request({ op: "stop", userId: rt.stopped, generationId }).catch(() => {});
       return;
     }
     const retry = event.target?.closest?.('button, [role="menuitem"]');
     if (event.type === "click" && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
       const page = D.snapshot();
       rt.retryBaseline = { userId: page.userId, assistantId: page.assistantId };
-      if (rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
+      if (rt.queueEnabled && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
     const nativeSend = event.type === "click" && button?.matches(D.SEND) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
     if (nativeSend) {
@@ -80,7 +102,7 @@
       if (rt.attempt) rt.attempt.submitted = true;
       rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
-      if (!rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
+      if (rt.queueEnabled && !rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
     // Observation only: never preventDefault, replace handlers, patch history or fetch.
   }
@@ -93,12 +115,21 @@
     if (type === "compositionend") rt.composing = false;
   }, { capture: true, passive: true, signal: events.signal });
   const storageListener = (changes, area) => {
-    if (area !== "local" || !rt.context) return;
+    if (area !== "local") return;
+    if (Object.hasOwn(changes, QUEUE_SETTING)) rt.queueEnabled = changes[QUEUE_SETTING].newValue !== false;
+    if (!rt.context) return;
+    for (const [key, change] of Object.entries(changes)) {
+      const n = change.newValue;
+      if (key.startsWith("notice:notification:") && n?.pendingKind && n.scope === rt.context.scope && Q.route(n.url).id === rt.context.id) rt.notificationRetryAt = n.retryAt || Date.now() + 10000;
+    }
     const queue = changes[rt.context.key]?.newValue;
     const usage = changes[U.PREFIX + rt.context.scope]?.newValue;
+    const projectChange = changes[globalThis.ChatGPTProjects.PREFIX + rt.context.scope];
+    if (projectChange) { rt.projects = projectChange.newValue || null; render(); }
     if (Object.hasOwn(changes, rt.context.key) && !queue) rt.queue = null;
     if (Object.hasOwn(changes, U.PREFIX + rt.context.scope) && !usage) rt.usage = null;
     accept({ queue, usage }, rt.context);
+    if (Object.hasOwn(changes, QUEUE_SETTING)) { render(); void tick(); }
   };
   chrome.storage.onChanged.addListener(storageListener);
   function observedOutcome(p, active, now = Date.now()) {
@@ -162,6 +193,8 @@
         if (promoting && !rt.pending.promotedId) rt.pending.promotedId = route.id;
         rt.previousTail = old?.mode === "conversation" && old.id !== route.id ? rt.lastUserId : "";
         rt.context = { ...route, url, scope, key: key || `usage:${scope}` };
+        rt.projects = null; rt.projectSignature = "";
+        rt.notificationRetryAt = 0; rt.notificationError = "";
         rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
         rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
         if (!carryingFirstSend) rt.pending = null;
@@ -169,8 +202,11 @@
         if (!current(rt.context)) return;
       }
       rt.page = p;
+      try { globalThis.ChatGPTSidebar.sample(url); } catch {}
+      void refreshProjects(rt.context);
       if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
       const now = Date.now();
+      if (scope && route.mode === "conversation" && rt.notificationRetryAt && now >= rt.notificationRetryAt) await request({ op: "get" });
       if (scope && rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
       if (!scope || route.mode !== "conversation") { render(); return; }
       if (rt.previousTail && p.userId && p.userId !== rt.previousTail) rt.previousTail = "";
@@ -252,7 +288,7 @@
     return !p.error || p.failure === "recoverable" && turn?.done && turn.outcome === "recoverable" && (turn.userId || turn.id) === p.userId && D.generationMatches(turn.id, p);
   }
   function safeToSend(p) {
-    return Boolean(rt.context?.mode === "conversation" && rt.context.scope && current(rt.context) && !rt.previousTail &&
+    return Boolean(rt.queueEnabled && rt.context?.mode === "conversation" && rt.context.scope && current(rt.context) && !rt.previousTail &&
       p.userId && p.ready && p.empty && !p.running && errorAllowsNext(p) && !rt.turn && !rt.composing &&
       !rt.queue?.holdUntil && (!rt.queue?.turn || rt.queue.turn.done && (rt.queue.turn.userId || rt.queue.turn.id) === p.userId) && Date.now() - rt.quietAt >= 4000);
   }
@@ -268,7 +304,7 @@
     const guard = expected => {
       runtime();
       const p = D.snapshot();
-      if (!current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || !errorAllowsNext(p) || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
+      if (!rt.queueEnabled || !current(context) || rt.inputEpoch !== epoch || rt.composing || p.composer !== input || !p.ready || p.running || !errorAllowsNext(p) || p.attachments || rt.queue?.holdUntil || rt.queue?.turn && !rt.queue.turn.done || D.readText(input).trim() !== expected.trim() || item && (Date.now() >= item.expiresAt || p.userId !== item.baseline)) throw new Error("页面或草稿已变化，发送已停止");
       return p;
     };
     try {
@@ -313,6 +349,7 @@
       runtime();
       if (await D.scope() !== context.scope || !current(context)) throw new Error("账号、Workspace 或页面已切换，草稿未改动");
       if (name === "save-usage") { await request(null, context, { op: "edit", ...payload }); return; }
+      if (!rt.queueEnabled) throw new Error("Queue 功能已关闭");
       if (context.mode !== "conversation") throw new Error("仅正式对话提供 Queue");
       if (name === "add") {
         const page = D.snapshot(), text = D.readText(page.composer), epoch = rt.inputEpoch;
@@ -337,9 +374,17 @@
       else if (name === "resolve-retry" || name === "resolve-remove") await request({ op: "resolve", id: payload.id, confirmed: true, retry: name === "resolve-retry" }, context);
     } finally { rt.actionBusy = false; render(); }
   }
-  interval = setInterval(() => void tick(), 1000);
   addEventListener("popstate", () => void tick(), { signal: events.signal });
   addEventListener("pageshow", () => void tick(), { signal: events.signal });
   globalThis.ChatGPTNotice = { dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; } };
-  void tick();
+  void (async () => {
+    try {
+      const settings = await chrome.storage.local.get([QUEUE_SETTING]);
+      rt.queueEnabled = settings[QUEUE_SETTING] !== false;
+    }
+    catch (error) { render(error.message); }
+    if (rt.disposed) return;
+    interval = setInterval(() => void tick(), 1000);
+    void tick();
+  })();
 })();

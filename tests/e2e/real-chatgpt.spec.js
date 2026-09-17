@@ -11,8 +11,8 @@ test.describe("live ChatGPT read-only smoke", () => {
     await expect(host.locator('[data-action="usage"]')).toBeVisible();
     await expect(host.locator('[data-action="queue"]')).toBeHidden();
     await host.locator('[data-action="usage"]').click();
-    await expect(host.locator('.source')).toContainText(/本机|手动/);
-    const box = await host.locator('.usage-panel').boundingBox();
+    await expect(host.locator('.usage-source-short')).toContainText(/本机|手动/);
+    const box = await host.locator('.usage-popover').boundingBox();
     expect(box.y).toBeGreaterThanOrEqual(0);
     await page.screenshot({ path: testInfo.outputPath("live-home-usage.png") });
     const diagnostic = await extensionServiceWorker.evaluate(async () => {
