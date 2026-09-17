@@ -1,48 +1,255 @@
 # gpt-notice
 
-**解决 ChatGPT Web 频繁请求及接口 429 问题，并优化 Queue、通知和扩展交互体验。**
+[![CI](https://github.com/Erlin0220/gpt-notice/actions/workflows/ci.yml/badge.svg)](https://github.com/Erlin0220/gpt-notice/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Erlin0220/gpt-notice)](https://github.com/Erlin0220/gpt-notice/releases/latest)
+![Chrome MV3](https://img.shields.io/badge/Chrome-Manifest%20V3-4285F4?logo=googlechrome&logoColor=white)
+![Local first](https://img.shields.io/badge/data-local--first-2ea44f)
 
-轻量 Manifest V3 扩展：通过新聊天默认折叠侧栏、项目快捷缓存减少无意义的项目请求扇出，缓解由频繁请求造成的 429 风险；不拦截、重放或伪造 ChatGPT 接口，不能消除服务端额度限制或其他客户端触发的 429。保留原生输入、发送、Stop、模型与附件体验，提供中文消息队列、系统完成提醒和来源明确的本地 GPT 用量。
+> **让 ChatGPT Web 少发无意义请求，并补上真正好用的消息队列、完成提醒和项目快捷访问。**
 
-## 使用
+如果你长期把 ChatGPT Web 当工作台、项目越来越多，很可能见过这些现象：侧栏一展开，多个项目同时加载详情和最近会话；Network 里同类请求成片出现；页面用久后更容易遇到 `429`、侧栏卡顿或请求风暴。
 
-先运行 `npm run build` 生成只包含运行文件与必要第三方声明的 `dist/`，再在 `chrome://extensions` 中开启开发者模式并加载 `dist/`。不要直接加载仓库根目录；仓库包含依赖和测试产物。CI 与 Release 也直接打包同一份白名单构建产物。更新代码后重新构建、重新加载扩展，并刷新需要使用它的 ChatGPT 标签页；不要打断仍在生成的对话。新版页面脚本检测到扩展失效后会停用计时器和操作、保留草稿与附件并提示刷新，不自动刷新或重新注入。扩展运行本身不需要 Node、后端、API Key 或额外服务。
+**gpt-notice 的重点不是“拦截 ChatGPT API”，而是尽量不去触发那些本来就没必要发生的请求。**
 
-首页和项目首页显示用量；项目快捷入口直接位于 ChatGPT 左侧栏，不占用 Composer。进入正式对话后，在原生输入框输入纯文本，点击外围的“加入队列”。消息队列面板按“全局状态 → 有序消息 → 单项操作”展示，提供暂停/继续队列、立即发送、编辑、删除和上移/下移；不可用的操作按现有发送条件禁用。空闲时加入队列会自动开始；生成期间添加的消息在当前回复正常完成后继续。原生 UI 明确报告“无法思考”等可恢复异常、且本轮已结束时，也允许发送已有下一条，不重试失败原文、不自动生成“继续”消息。连续两轮异常会暂停，避免持续消耗整队列；成功或人工继续重置计数。用户 Stop、限额/策略阻塞、未分类错误、并发冲突和未知送达保持暂停。需要审批或继续生成时只提醒，不代替用户操作。任何发送都先检查原生草稿、附件、输入法组合输入及生成状态。
+- 新聊天默认收起原生 **置顶 / 项目 / 聊天** 分区，减少项目侧栏展开带来的 request fan-out。
+- 正常使用时被动记住项目，直接在侧栏提供 **快捷项目**，不用为了找项目反复展开完整项目列表。
+- 不后台遍历项目，不主动预取项目详情，不批量拉取其他项目的 conversations。
+- 保留 ChatGPT 原生 Conversation、发送、Streaming、Stop、附件、模型选择和当前项目最近会话。
+- 在此基础上增加 **消息队列、完成系统通知、本地 GPT 用量记录**。
 
-Queue 按账号/工作区及正式 conversation 保存；重开同一对话可恢复，不跟随标签页身份。ChatGPT 首条发送期间自己的 `WEB:` 临时 URL 只保留用量和侧栏能力，不建立临时队列。旧版本本地数据作为不执行的备份保留，不自动迁移或发送。
+它解决的是 **ChatGPT Web 中不必要的请求扇出与交互浪费**，从而降低相关 `429` 风险；它不会绕过服务端限流，也不会伪造接口返回。
 
-Popup 只显示当前活动 ChatGPT 页已识别账号 / Workspace 的 Queue；无法确认身份时不列出其他账户的数据。维护仅机会性清理超过 30 天、已完成且空闲的空 Queue 记录，不删除待发正文、未知发送结果、暂停意图或活动回复。
+## 为什么会有这个扩展
 
-发送结果无法确认时，Queue 暂停并标识“未知”，不会自动重发。请先检查原生对话，再明确选择重新入队或移除。关闭浏览器、电脑休眠或关闭相关对话后，不承诺后台继续聊天。找不到可靠 DOM/消息回执时宁可暂停。
+ChatGPT 的左侧栏并不只是静态目录。项目和置顶内容展开后，页面可能针对多个项目请求类似：
 
-## 左侧栏默认折叠与快捷项目
+```text
+GET /backend-api/gizmos/{projectId}
+GET /backend-api/gizmos/{projectId}/conversations?...
+```
 
-Popup 的“新聊天默认收起侧栏分区”默认开启。进入 `/` 或 `/g/{shortUrl}/project` 这类新聊天环境时，只把原生“置顶 / 项目 / 聊天”三个分区初始化为折叠；不关闭整个侧栏，也不持续接管用户状态。用户在当前页面手动展开后保持展开，直到下一次进入新的聊天环境。完整导航尽早合并原生 `oai-sidebar-sections` UI 偏好；SPA 导航由现有页面 sampler 一次性完成，不新增 MutationObserver 或额外轮询。
+项目一多，这些请求很容易形成 fan-out：
 
-扩展**不拦截 ChatGPT 的任何列表、Conversation 或项目请求**。普通 `/backend-api/conversations?...` 继续由 ChatGPT 原生加载。降请求主要来自默认不展开高 fan-out 的原生项目/置顶/聊天区域：用户主动展开后，ChatGPT 爱加载什么由原生页面自行决定。旧实验版本曾使用动态 DNR 规则；当前 Worker 只在启动时删除旧规则，不再创建任何拦截规则。
+```text
+原生侧栏展开
+   ├─ Project A ── detail + conversations
+   ├─ Project B ── detail + conversations
+   ├─ Project C ── detail + conversations
+   └─ ...
+             ↓
+      请求变多 / 429 风险上升
+```
 
-“快捷项目”作为普通 DOM 流节点插在原生“项目”和“聊天”之间，会随着上方原生分区展开自然下移、折叠自然上移，并随侧栏滚动。结构直接对齐当前原生 Projects section：相同的 section/header/menu-item class、32px 标题行、36px 项目行、原生 hover 背景与同一组 chevron/compose sprite。项目图标不维护另一套 emoji/theme → 图标/颜色映射：ChatGPT 原生项目列表实际渲染某项目时，扩展只记录其当前 sprite family、symbol 和已解析颜色这一小段视觉提示；后续快捷项仍使用页面当前加载的原生 sprite 资源。默认只展示前 5 个项目并显示原生样式的“查看更多”，点击后在当前分区展开全部本地项目；不复制 React 实例、不依赖 React fiber，也不使用固定定位。ChatGPT 重绘侧栏时，现有低频 sampler 负责重新挂载，不增加独立观察器。
+gpt-notice 选择从交互源头减量：
 
-快捷项目读取当前账号 / Workspace 已有的原生 `snorlax-history` 缓存（即 ChatGPT 自己的项目列表请求结果缓存），以及正常使用中出现的原生项目链接和项目页标题，逐步记录 `projectId`、`shortUrl`、名称和 API/cache 给出的 emoji/theme。只存最小元数据与上述原生视觉提示，不复制项目指令、文件或会话正文。同 ID 后续在新的列表缓存中观察到改名、shortUrl、emoji/theme 变化会更新；若图标语义已变化但新的原生行尚未渲染，会先丢弃旧视觉提示，避免继续显示旧图标，等下次用户正常展开/刷新原生项目列表时再学习新的原生图标。未出现在某次列表中不代表删除，也不会为了追求即时同步主动请求项目列表、项目详情或 conversations。点击项目名称在当前标签进入 `/g/{shortUrl}/project`；hover 后出现的原生 compose 图标表示“新建会话”，固定以新标签打开同一个项目主页，让 ChatGPT 自己创建首条消息后的 Conversation。
+```text
+进入新聊天
+   ↓
+默认折叠高请求分区
+   ↓
+本地快捷项目直接进入目标项目
+   ↓
+只让 ChatGPT 加载你真正打开的页面
+```
 
-## 完成提醒
+这比“硬拦截接口”更稳：原生页面仍然拥有完整控制权，ChatGPT 改接口或返回结构时，扩展不需要伪造一套后端行为。
 
-系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的成功完成事件，并向精确 document 请求当前页面事实。sampler 和探针共用同一稳定终态判断，核对账号、对话及 generation。仍在生成、页面无法响应、探针超时或身份不符时不发提醒，不能把切换标签页或 HTTP 完成当成回复完成。已确认正常完成但页面隐藏时只发无正文提醒；错误和等待人工处理使用明确的非成功提示。正常或可恢复的中间轮次有后续 Queue 时不逐条通知；需要人工处理或连续异常暂停时仍会提醒。点击时重新核对账号 / Workspace / conversation，不凭旧 tabId 跳转。被冻结、丢弃或关闭的页面不能保证及时通知或继续 Queue。
+## Highlights
 
-正常连续队列只在最终完成时提醒一次，不是漏通知；独立手动回复分别提醒。审批/确认、限额/策略/账号阻塞、未分类错误或连续异常暂停会单独提醒，不受队列是否还有待发消息影响。队列暂停或功能关闭后，独立手动回复仍提醒；尚有待发消息时不会宣称“队列已完成”。关闭提醒开关不补发停用期间的提醒。用户主动 Stop 不发成功通知；Stop 或本轮终态会取消已经失效、尚未送达的审批提醒。
+| 能力 | gpt-notice 的做法 |
+| --- | --- |
+| **减少侧栏请求** | 新聊天默认折叠置顶 / 项目 / 聊天，降低多项目同时展开产生的请求扇出 |
+| **项目快捷访问** | 从 ChatGPT 已经加载的数据中逐步学习项目，不额外批量请求项目详情 |
+| **原生体验优先** | 不创建第二个输入框，不接管 Send / Stop / 模型 / 附件 |
+| **消息队列** | 在正式 Conversation 中给原生 Composer 增加轻量 FIFO Queue |
+| **完成提醒** | 网络完成只作为候选，必须再经过页面语义确认，避免切 Tab / HTTP 完成误报 |
+| **人工处理提醒** | approval、quota、policy、error 等状态单独提醒，不自动替用户确认 |
+| **本地 GPT 用量** | 只记录本机实际观察到的 Pro 模型发送，不伪造官方余额 |
+| **Local-first** | 设置、Queue、项目缓存和用量记录都保存在浏览器本地，无后端、无 API Key |
 
-网络完成只代表 transport 完成，不等于队列可以继续发送。完成状态与无正文通知意图通过同一次 `storage.local.set` 批量提交；Chrome create/update 成功后再确认送达。失败保留意图，复用现有页面 sampler 以至少 10 秒间隔重试；Worker 再次启动或匹配账号/对话的后续操作也可恢复，不另加定时器、心跳或常驻服务。恢复时不保存/重建原问题或回答摘要，只发通用状态。generic → rich 使用同一 ID 静默更新；审批、异常与最终完成使用不同事件 ID，关闭审批提醒不会吞掉最终结果。系统自动收起不当作用户已读；明确关闭/点击不会重复打扰。
+## 安装
 
-系统通知使用 Chrome 的 basic 模板：标题先说明“回复已完成 / 队列已完成 / 需要确认 / 需要处理”，再附问题短标题；正文给回复摘要或明确处理提示，contextMessage 给本轮耗时。字体、字号、圆角、背景由 Chrome / 操作系统决定，扩展不提供无效样式设置。Popup 区分功能开关、浏览器通知权限、待补送状态和当前账号的待发对话。Chrome API 成功只表示提交系统，不保证横幅出现：Windows 勿扰、系统合并、冻结/丢弃页面等仍是外部边界，不能承诺 OS 层绝对 exactly-once。实现与证据边界见 [通知投递决策](docs/adr/0006-notification-delivery.md)。
+### 推荐：安装最新 Release
 
-## GPT-6 用量
+1. 打开 [Releases](https://github.com/Erlin0220/gpt-notice/releases/latest)，下载最新的 `chatgpt-task-notifier-v*.zip`。
+2. 解压 zip。
+3. 打开 `chrome://extensions`。
+4. 开启右上角 **开发者模式**。
+5. 点击 **加载已解压的扩展程序**，选择解压后包含 `manifest.json` 的目录。
+6. 刷新已经打开的 ChatGPT 页面。
 
-本地额度默认配置为 50 次，GPT-6 Pro 与 GPT-5.6 Pro 计入同一组本地记录；这不是对所有订阅的官方额度声明。扩展只读解析原生发送请求中的 `model` 与本次用户消息 ID，在 Chrome `onSendHeaders` 发送边界立即计数：只接受 `gpt-6-pro` / `gpt-5-6-pro`，Thinking、Work 和 Codex 不计。`onBeforeRequest` 仅捕获必要元数据，发送前取消不计；这一浏览器边界不等于服务端接收或官方扣费成功。
+更新扩展时，不要在 ChatGPT 正在生成回复的过程中强制刷新页面。
 
-后续 DOM 模型观察只为已确认正常完成的新用户回复兜底，并使用相同原生用户 ID 去重；不凭发送前的乐观模型标记计数。重生成的 assistant ID 仅用于完成状态，不制造新的用量 ID。缺少可靠模型标识时不猜测，其他设备和扩展未观察到的调用无法补齐。左侧徽标显示已用次数、配置额度和下一次刷新时间；点击后先打开锚定在徽标上的紧凑用量 Popover，只展示计数、刷新与来源，再从“用量设置”进入独立小型设置 Dialog。查看信息不再和编辑表单挤在同一个大面板里。
+### 从源码构建
 
-已知首次使用日期为 2026-09-09，但历史使用次数和官方精确刷新时间未知。点击用量可设置当前周期已用次数、周期额度、刷新周期和下一次刷新时间。默认刷新周期为 7 天；未填写时间就显示未知，填写后按所设周期维护本地刷新计划。其他设备、未打开扩展时的调用和无法观察的模型调用不会自动补齐。官方网页核实记录见 [范围与来源](docs/scope-v080.md)。
+```sh
+npm ci
+npm run build
+```
+
+然后在 `chrome://extensions` 中加载生成的 `dist/`。不要直接加载仓库根目录；仓库还包含测试、开发脚本和依赖。
+
+扩展运行本身不需要 Node、后端服务或 OpenAI API Key。
+
+## 30 秒上手
+
+### 1. 先让侧栏安静下来
+
+安装后，“**新聊天默认收起侧栏分区**”默认开启。进入 `/` 或项目主页时，原生 **置顶 / 项目 / 聊天** 会以折叠状态开始。
+
+这不是永久锁死：你手动展开后，当前页面继续尊重你的选择；下一次进入新的聊天环境时才重新默认折叠。
+
+### 2. 用快捷项目代替反复展开完整项目列表
+
+你正常展开项目、进入项目主页或项目 Conversation 时，gpt-notice 会逐步记住：
+
+- `projectId`
+- `shortUrl`
+- 项目名称
+- ChatGPT 已提供的 emoji / theme / 当前原生图标提示
+
+以后直接点击侧栏里的 **快捷项目** 即可进入 `/g/{shortUrl}/project`。
+
+快捷项目不会为了“保持最新”去后台扫所有项目。改名、shortUrl 或图标变化会在 ChatGPT 下次自然加载项目列表时逐步同步。
+
+### 3. 长任务放进消息队列
+
+正式 Conversation 页面继续使用 ChatGPT **原生输入框**。写好纯文本后点击 **加入队列**：
+
+- 空闲时自动开始；
+- 当前回复结束后继续下一条；
+- 支持暂停 / 继续、立即发送、编辑、删除、上移 / 下移；
+- 草稿、附件、IME、Stop、未知送达等情况优先 fail closed，不猜、不强发。
+
+图片和附件仍使用 ChatGPT 原生发送。
+
+### 4. 离开标签页也能收到结果提醒
+
+- 单条手动消息完成：提醒。
+- 连续 Queue：正常中间项不轰炸通知，**整队最终完成提醒一次**。
+- approval / quota / policy / error / 连续异常暂停：单独提醒你回来处理。
+- 用户主动 Stop：不伪装成成功完成。
+
+## 解决请求问题，但不做接口劫持
+
+这是这个项目最重要的边界。
+
+**gpt-notice 不拦截 ChatGPT 的列表、Conversation 或项目请求，也不伪造响应。**
+
+普通的：
+
+```text
+/backend-api/conversations?...
+```
+
+仍由 ChatGPT 原生加载。具体 Conversation：
+
+```text
+/backend-api/conversations/{conversationId}
+```
+
+也完全不受影响。
+
+进入项目主页时，ChatGPT 自己需要的当前项目最近会话：
+
+```text
+/backend-api/gizmos/{currentProjectId}/conversations?cursor=0
+```
+
+继续正常工作。
+
+扩展减少的是 **“因为侧栏展开而同时触发很多并不急需的项目请求”**，而不是把 ChatGPT 网络层改造成另一套代理。
+
+当前版本：
+
+- 不 patch `fetch` / XHR / History；
+- 不使用 `webRequestBlocking`；
+- 不主动调用私有项目 API；
+- 不循环预加载缓存中的所有项目；
+- 不新增 MutationObserver；
+- 不新增第二套高频轮询；
+- 旧实验版本留下的 DNR 拦截规则只会被清理，不会重新创建。
+
+## 为什么尽量保持“薄”
+
+ChatGPT Web 本身已经有完整的 Composer、Streaming、Stop、附件、项目和路由系统。gpt-notice 只补原生产品缺失的几个点，而不是再造一个 ChatGPT 客户端。
+
+因此项目长期坚持：
+
+1. **原生能力能用就直接复用。**
+2. **状态只保留一个事实源。** Queue 状态由 Service Worker 串行持久化，UI 只做投影。
+3. **宁可暂停，也不猜测。** 无法确认是否发送成功时进入 unknown，不自动重发。
+4. **不靠高频观察器追着 React DOM 跑。** 页面只有一个低频 sampler，UI 使用稳定 Shadow DOM。
+5. **不为了快捷入口制造更多请求。** 项目数据只从正常使用中渐进积累。
+
+## 隐私与权限
+
+gpt-notice 是 local-first 扩展。
+
+- 不需要 OpenAI API Key。
+- 不运行远程后端。
+- Queue 文本、项目缓存、设置和用量记录保存在扩展本地存储。
+- 不持久化 ChatGPT 回复正文用于通知恢复。
+- 不保存 Cookie、Token 或完整请求正文。
+- 系统通知中的短标题 / 回复摘要只在当次页面可用时交给 Chrome / 操作系统显示。
+
+具体权限和数据边界见 [PRIVACY.md](PRIVACY.md)。
+
+## 详细行为
+
+<details>
+<summary><strong>左侧栏默认折叠与快捷项目</strong></summary>
+
+Popup 的“新聊天默认收起侧栏分区”默认开启。进入 `/` 或 `/g/{shortUrl}/project` 这类新聊天环境时，只把原生“置顶 / 项目 / 聊天”三个分区初始化为折叠；不关闭整个侧栏，也不持续接管用户状态。用户在当前页面手动展开后保持展开，直到下一次进入新的聊天环境。
+
+“快捷项目”作为普通 DOM 流节点插在原生“项目”和“聊天”之间，会随着上方原生分区展开自然下移、折叠自然上移，并随侧栏滚动。结构对齐当前原生 Projects section：复用原生 section/header/menu-item class、chevron / compose sprite 和已渲染项目的图标提示，不复制 React 实例，也不依赖 React fiber。
+
+快捷项目读取当前账号 / Workspace 已有的原生项目缓存，以及正常使用中出现的项目链接和项目页标题，逐步记录最小项目元数据。未出现在某次列表中不代表删除，也不会为了即时同步主动请求项目列表、项目详情或 conversations。
+
+默认展示前 5 个项目并提供“查看更多”。点击项目名称在当前标签进入项目主页；hover 后的 compose 图标以新标签打开同一项目主页，让 ChatGPT 自己在首条消息后创建 Conversation。
+
+</details>
+
+<details>
+<summary><strong>Queue 的可靠性边界</strong></summary>
+
+Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话可恢复，不跟随 tab 身份。ChatGPT 首条发送期间的 `WEB:` 临时 URL 不建立临时队列。
+
+发送结果无法确认时，Queue 暂停并标记“送达未知”，不会自动重发。请先检查原生对话，再明确选择重新入队或移除。
+
+原生 UI 明确报告“无法思考”等可恢复异常、且本轮已经结束时，可以继续发送已有下一条，但不会重试失败原文，也不会自动生成“继续”。连续两轮可恢复异常会暂停，避免把整个 Queue 持续消耗掉。
+
+用户 Stop、限额 / 策略阻塞、未分类错误、并发冲突和未知送达均保持暂停。需要审批或继续生成时只提醒，不代替用户操作。
+
+关闭浏览器、电脑休眠或关闭相关对话后，不承诺后台继续聊天。
+
+</details>
+
+<details>
+<summary><strong>完成提醒如何避免误报和漏报</strong></summary>
+
+系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的生命周期；网络完成不等于回复完成，仍需要精确 document 的页面状态确认。
+
+仍在生成、页面无法响应、探针超时、账号 / Workspace / conversation 不匹配时都不会发成功提醒。被冻结、丢弃或关闭的页面无法保证及时语义确认。
+
+完成状态与待投递通知意图通过同一次 `storage.local.set` 批量提交。Chrome 通知创建失败时保留最小恢复记录，复用现有 sampler 以至少 10 秒间隔重试；Worker 再次启动时也可以恢复。不会为通知再增加独立常驻轮询。
+
+approval、异常和最终完成使用不同事件 ID；同一完成结果的 generic → rich 使用同一 ID 静默更新。用户明确关闭 / 点击与系统自动收起分开处理，避免重复轰炸或吞掉后续最终结果。
+
+Chrome Notifications API 能控制标题、正文、icon、`contextMessage`、时间等，但字体、圆角、背景由 Chrome / 操作系统决定。实现细节见 [ADR-0006](docs/adr/0006-notification-delivery.md)。
+
+</details>
+
+<details>
+<summary><strong>GPT 用量记录</strong></summary>
+
+本地额度默认配置为 50 次，GPT-6 Pro 与 GPT-5.6 Pro 计入同一组本地记录；这不是官方额度声明。
+
+扩展只读解析原生发送请求中的 `model` 与本次用户消息 ID，在 Chrome `onSendHeaders` 发送边界计数：只接受 `gpt-6-pro` / `gpt-5-6-pro`，Thinking、Work 和 Codex 不计。发送前取消不计；缺少可靠模型标识时不猜。
+
+其他设备、未打开扩展时的调用和无法观察到的模型调用不会自动补齐。用量 Popover 明确显示来源和刷新信息，设置页允许手动校正当前周期基数、额度与下一次刷新时间。
+
+</details>
 
 ## 开发与验收
 
@@ -53,8 +260,36 @@ npm test
 npm run e2e:smoke
 ```
 
-构建与测试需要 Node，E2E 另外需要 Playwright。Chromium MV3 回归始终加载 `dist/`，并使用系统临时目录里的独立 Profile；测试结束会自动清理。fixture 之外的出站请求与 WebSocket 全部阻断，只放行扩展自身本地资源。真实 ChatGPT 只读核查使用 `node scripts/e2e-live-readonly.mjs "<已明确选定的 Profile 目录>" "<项目首页 URL>" "<已打开的对话 URL>"`：现有对话只读取本轮适配器事实，独立首页/项目页阻断所有写请求；不刷新真实扩展或已有对话、不发送消息、不复制登录数据。已安装 UI 的只读核查不冒充本轮完整 runtime 已上线；完整 runtime 的发送链路由隔离 fixture 验证。详细步骤见 `docs/PLAYWRIGHT-E2E.md`。
+完整 E2E：
 
-运行代码不 patch `fetch` / XHR / History。Service Worker 只读观察 ChatGPT 原生 conversation POST 的请求生命周期，不修改或重放请求，也不读取响应正文、Cookie 或 Token。临时 requestId / turnId / document / scope 关联使用 `storage.session`；每次核对真实 document 与当前账号，不长期缓存 tabId → 账号。页面侧只有一个低频采样器；Service Worker 在原生请求完成后只向精确 document 发一次语义探针，不使用 MutationObserver。独立 Shadow DOM 保留稳定 UI，原生浮层覆盖 Bar 或打开的 Panel 时主动让位。所有本地变更经 Service Worker 串行持久化；outbox 的 lease/intent/receipt 思路及部分操作适配自 MIT `chatgpt-yolo`，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+```sh
+npm run e2e
+```
 
-v0.8 的当前边界以 [scope-v080.md](docs/scope-v080.md) 为准，早期 ADR 中的 Task/临时 Queue 设计仅是历史记录，不是兼容要求。
+Chromium MV3 回归始终加载 `dist/`，使用独立临时 Profile，fixture 之外的网络与 WebSocket 默认隔离，避免自动测试消耗真实 GPT-6 / Pro 额度。
+
+真实 ChatGPT 只读核查：
+
+```sh
+node scripts/e2e-live-readonly.mjs "<Profile 目录>" "<项目首页 URL>" "<已打开的对话 URL>"
+```
+
+该流程只读取页面适配事实和已安装 UI，不发送消息。详细步骤见 [PLAYWRIGHT-E2E.md](docs/PLAYWRIGHT-E2E.md)。
+
+## 设计与文档
+
+- [范围与来源](docs/scope-v080.md)
+- [通知投递决策 ADR-0006](docs/adr/0006-notification-delivery.md)
+- [隐私说明](PRIVACY.md)
+- [第三方声明](THIRD_PARTY_NOTICES.md)
+- [Changelog](CHANGELOG.md)
+
+## 反馈
+
+遇到 ChatGPT 页面适配、Queue、通知或侧栏行为问题，可以直接提交 [Issue](https://github.com/Erlin0220/gpt-notice/issues)。
+
+报告问题时，优先描述：ChatGPT 页面类型、是否为项目会话、扩展版本、是否多标签页，以及你观察到的原生 UI 状态。请不要公开 Cookie、Token、完整私密对话或账号标识。
+
+---
+
+**gpt-notice 的目标很简单：让 ChatGPT Web 保持原生体验，同时少做无意义的事。**
