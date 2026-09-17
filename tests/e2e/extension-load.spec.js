@@ -312,18 +312,20 @@ test("usage popover stays anchored inside a narrow viewport",async({page})=>{
   const box=await page.locator(`${host} .usage-popover`).boundingBox();expect(box.y).toBeGreaterThanOrEqual(0);expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(421);
   await button(page,'usage-settings').click();const dialog=await page.locator(`${host} .usage-settings`).boundingBox();expect(dialog.x).toBeGreaterThanOrEqual(0);expect(dialog.y).toBeGreaterThanOrEqual(0);expect(dialog.x+dialog.width).toBeLessThanOrEqual(421);expect(dialog.y+dialog.height).toBeLessThanOrEqual(741);
 });
-test("composer toolbar stays compact: usage-only is centered and conversation actions align right",async({page})=>{
+test("home usage-only toolbar stays compact and aligns with the composer left edge",async({page})=>{
   await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
-  const home=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,center:b.left+b.width/2-(h.left+h.width/2)};});
-  expect(home.mode).toBe('usage');expect(home.width).toBeLessThan(home.host*.7);expect(Math.abs(home.center)).toBeLessThan(2);
-  await page.evaluate(()=>window.routeTo('/c/toolbar-compact'));await expect(button(page,'queue')).toBeVisible();
+  const home=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,left:b.left-h.left};});
+  expect(home.mode).toBe('usage');expect(home.width).toBeLessThan(home.host*.7);expect(Math.abs(home.left)).toBeLessThan(2);
+});
+test("conversation toolbar stays compact and aligns with the composer right edge",async({page})=>{
+  await page.goto('https://chatgpt.com/c/toolbar-compact');await expect(button(page,'queue')).toBeVisible();
   const conversation=await page.locator(host).evaluate(node=>{const bar=node.shadowRoot.querySelector('.bar'),h=node.getBoundingClientRect(),b=bar.getBoundingClientRect();return{mode:node.dataset.mode,host:h.width,width:b.width,right:h.right-b.right,count:node.shadowRoot.querySelector('.count').textContent};});
   expect(conversation.mode).toBe('conversation');expect(conversation.width).toBeLessThan(conversation.host*.8);expect(Math.abs(conversation.right)).toBeLessThan(2);expect(conversation.count).toBe('0');
 });
 test("status notice follows the compact toolbar instead of the composer left edge",async({page})=>{
   await page.goto('https://chatgpt.com/');await expect(button(page,'usage')).toBeVisible();
-  const usage=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,notice=s.querySelector('.notice'),bar=s.querySelector('.bar');notice.textContent='扩展已更新，请刷新当前页面后再操作';notice.hidden=false;const n=notice.getBoundingClientRect(),b=bar.getBoundingClientRect();return{center:n.left+n.width/2-(b.left+b.width/2),left:n.left-node.getBoundingClientRect().left};});
-  expect(Math.abs(usage.center)).toBeLessThan(2);expect(usage.left).toBeGreaterThan(20);
+  const usage=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,notice=s.querySelector('.notice'),bar=s.querySelector('.bar');notice.textContent='扩展已更新，请刷新当前页面后再操作';notice.hidden=false;const n=notice.getBoundingClientRect(),b=bar.getBoundingClientRect();return{left:n.left-b.left};});
+  expect(Math.abs(usage.left)).toBeLessThan(2);
   await page.evaluate(()=>window.routeTo('/c/notice-position'));await expect(button(page,'queue')).toBeVisible();
   const conversation=await page.locator(host).evaluate(node=>{const s=node.shadowRoot,notice=s.querySelector('.notice'),bar=s.querySelector('.bar');notice.textContent='扩展已更新，请刷新当前页面后再操作';notice.hidden=false;const n=notice.getBoundingClientRect(),b=bar.getBoundingClientRect();return{right:b.right-n.right};});
   expect(Math.abs(conversation.right)).toBeLessThan(2);

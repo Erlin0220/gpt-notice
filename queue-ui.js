@@ -5,7 +5,7 @@
     *{box-sizing:border-box}[hidden],:host([hidden]){display:none!important}
     :host([data-native-overlay]) :is(.bar,.panel,.usage-popover,.usage-backdrop,.notice){visibility:hidden!important;pointer-events:none!important}
     .bar{display:flex;align-items:center;gap:2px;width:max-content;max-width:100%;margin-left:auto;padding:3px;border:1px solid var(--n-line,#ddd);border-radius:12px;background:var(--n-bg,#fff)}
-    :host([data-mode=usage]) .bar{margin-inline:auto}.queue-actions{display:flex;align-items:center;gap:2px;padding-left:3px;border-left:1px solid var(--n-line,#ddd)}
+    :host([data-mode=usage]) .bar{margin-inline:0 auto}.queue-actions{display:flex;align-items:center;gap:2px;padding-left:3px;border-left:1px solid var(--n-line,#ddd)}
     button,input,textarea{font:inherit;color:inherit}button{cursor:pointer;border:1px solid var(--n-line,#ddd);border-radius:9px;padding:6px 10px;background:var(--n-bg,#fff);min-height:30px;pointer-events:auto}
     button:hover{background:var(--n-hover,#f0f0f0)}:is(button,input,textarea):focus-visible{outline:2px solid #538ae8;outline-offset:2px}button:disabled{opacity:.45;cursor:default}
     .bar button{min-height:28px;padding:5px 9px;border:0;background:transparent}
@@ -21,7 +21,7 @@
     .item{border:1px solid var(--n-line,#ddd);border-radius:10px;padding:10px}.preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:110px;overflow:auto;margin:0 0 8px}.actions{display:flex;gap:5px;flex-wrap:wrap}.state{color:var(--n-muted,#666);margin-bottom:6px}
     label{display:block;margin:10px 0 4px}input,textarea{width:100%;border:1px solid var(--n-line,#ddd);border-radius:8px;padding:8px;background:var(--n-bg,#fff)}textarea{min-height:110px;resize:vertical}footer{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
     .notice{position:absolute;bottom:calc(100% + 8px);right:0;max-width:100%;background:var(--n-bg,#fff);border:1px solid var(--n-line,#ddd);border-radius:10px;padding:8px 12px;box-shadow:0 6px 18px #0002;pointer-events:auto;white-space:pre-wrap}
-    :host([data-mode=usage]) .notice{right:50%;transform:translateX(50%)}
+    :host([data-mode=usage]) .notice{left:0;right:auto;transform:none}
     :host([data-dark=true]){--n-bg:#242424;--n-fg:#eee;--n-muted:#b2b2b2;--n-line:#484848;--n-hover:#363636}
     @media(max-width:550px){button{padding:5px 7px}.usage{max-width:52vw;font-size:11px}.bar button{padding:5px 7px}.panel{width:100%}.usage-popover{width:min(340px,calc(100vw - 20px))}.usage-backdrop{padding:12px}}
   `;
