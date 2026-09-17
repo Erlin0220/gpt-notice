@@ -8,7 +8,7 @@ const U = require("../usage-core");
 const P = require("../projects-core");
 const scope = "a".repeat(64);
 function harness(storage = {}, session = {}, created = []) {
-  const notificationCalls = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
+  const notificationCalls = [], focused = [], reloads = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
   const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]), probes = new Map(), probeCalls = [], hints = [];
   let sessionRules = [{id:910001}], dynamicRules = [{id:910001,action:{type:"block"},condition:{}}];
   const webEvents = {}, registrations = {};
@@ -52,7 +52,7 @@ function harness(storage = {}, session = {}, created = []) {
         if (message?.type === "NOTICE_COMPLETION_HINT") { hints.push({ id, message, options }); return { ok:true }; }
         return { scope: scopes.get(id), url: tabs.get(id).url };
       },
-      async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
+      async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); }, async reload(id) { reloads.push(id); } },
     windows: { async update() {} }
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,"../background.js"),"utf8"), { chrome, importScripts() {}, ChatGPTQueueCore: Q, ChatGPTUsage: U, ChatGPTProjects: P, URL, Date:Clock, TextDecoder, console, setTimeout, clearTimeout });
@@ -62,6 +62,7 @@ function harness(storage = {}, session = {}, created = []) {
   const sendProjects = (projects, tabId = 1, requestedScope = scope) => new Promise(resolve => listener({type:"NOTICE",scope:requestedScope,url:tabs.get(tabId).url,projects}, sender(tabId), resolve));
   const setting = (feature, enabled) => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature,enabled}, {url:"popup.html"}, resolve));
   const shortcutLimit = value => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature:"shortcutCount",value}, {url:"popup.html"}, resolve));
+  const reloadActive = () => new Promise(resolve => listener({type:"NOTICE_RELOAD_ACTIVE"}, {url:"popup.html"}, resolve));
   const drain = () => new Promise(resolve => setTimeout(resolve, 50));
   const emit = async (name, details) => { webEvents[name](details); await drain(); };
   const before = async (body, overrides = {}) => {
@@ -75,7 +76,7 @@ function harness(storage = {}, session = {}, created = []) {
     await emit("onSendHeaders", details);
   };
   const popup = () => new Promise(resolve => listener({ type:"NOTICE_POPUP" }, { url:"popup.html" }, resolve));
-  return { send, sendUsage, sendProjects, setting, shortcutLimit, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, hints, registrations, created, focused, notificationCalls, alarm:()=>alarm, fireAlarm:async()=>{ if(alarmListener&&alarm){ alarmListener(clone(alarm)); await drain(); } }, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
+  return { send, sendUsage, sendProjects, setting, shortcutLimit, reloadActive, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, hints, registrations, created, focused, reloads, notificationCalls, alarm:()=>alarm, fireAlarm:async()=>{ if(alarmListener&&alarm){ alarmListener(clone(alarm)); await drain(); } }, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
 }
 test("startup removes the legacy sidebar blocker and never installs another request rule", async () => {
   const h = harness();
@@ -109,6 +110,11 @@ test("popup feature switches persist independently without changing network beha
   assert.equal(h.storage["notice:shortcut-project-limit"], 12);
   popup = await h.popup();
   assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:false, notifications:false });
+});
+test("popup can explicitly refresh the active ChatGPT page when its content script is stale", async () => {
+  const h = harness();
+  assert.equal((await h.reloadActive()).ok, true);
+  assert.deepEqual(h.reloads, [1]);
 });
 test("shortcut project limit defaults safely and rejects out-of-range popup values", async () => {
   const h = harness({"notice:shortcut-project-limit":0});

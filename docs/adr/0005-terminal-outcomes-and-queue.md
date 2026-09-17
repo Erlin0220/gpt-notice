@@ -6,6 +6,8 @@
 
 保留原有单 writer、lease/intent/receipt、单 sampler、独立 UI。原生 UI 派生 outcome 仍是业务终态；网络结束不是业务结束，也不是发送回执。但真实后台页验证表明“一次 network probe 失败后立即丢弃 request correlation”会把通知和 Queue 同时重新绑回页面 sampler，所以 network completion 现在保留为**带 TTL 的 wake candidate**：立即提示精确 document、继续复用同一语义判定；仍未终态时只用 30 秒 Chrome Alarm 做低频复核，不能直接 settle。
 
+另一个恢复缺口来自原生 Send：仅存在页面内存的 pending baseline 时，扩展重载、页面刷新或 content controller 重建会留下 durable hold，却无法证明后来出现的新 user turn 属于这次发送。现在 hold 同步持久化发送前最后一个原生 user message ID (`holdBaseline`)；恢复时必须观察到一个位于该 baseline 之后的新原生 user turn，才允许重新建立 turn。baseline 本身是原生消息 ID，不保存 prompt 正文，也不把经过的时间当送达证据。
+
 | 页面事实 | Queue / 提醒 |
 | --- | --- |
 | 当前轮原生完成控件、正确消息身份、非 running、稳定 3 秒 | 正常结束；可发送已有下一条，队列空才发成功提醒 |

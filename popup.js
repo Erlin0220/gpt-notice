@@ -35,6 +35,18 @@
     };
     const list = document.getElementById("queues");
     document.getElementById("scope-state").textContent = reply.scopeKnown ? "当前账号与工作区" : "当前页面未连接";
+    const reloadPage = document.getElementById("reload-page");
+    if (!reply.scopeKnown && reply.reloadable) {
+      reloadPage.hidden = false;
+      reloadPage.onclick = async () => {
+        reloadPage.disabled = true; status.textContent = "正在刷新当前 ChatGPT 页面…";
+        try {
+          const result = await chrome.runtime.sendMessage({ type: "NOTICE_RELOAD_ACTIVE" });
+          if (!result?.ok) throw new Error(result?.error || "刷新失败");
+          status.textContent = "已刷新当前 ChatGPT 页面；页面加载完成后重新打开面板。";
+        } catch (error) { status.textContent = error.message; reloadPage.disabled = false; }
+      };
+    }
     if (!reply.scopeKnown || !reply.queues.length) {
       const empty = document.createElement("p"); empty.className = "queue-empty";
       empty.textContent = reply.scopeKnown ? "暂无待发消息。" : "请在已登录的 ChatGPT 页面打开面板；或刷新已失效的页面。";

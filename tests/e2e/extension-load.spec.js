@@ -15,6 +15,8 @@ test("MV3 loads and popup lists only pending conversation queues",async({page,ex
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await page.bringToFront();await popup.reload();
   await expect(popup.locator("h1")).toHaveText("gpt-notice");await expect(popup.locator("#permission")).toContainText("浏览器已允许");await expect(popup.locator("#queues a")).toHaveCount(1);
+  const shortcutBox=await popup.locator("#shortcutCount").evaluate(el=>{const s=getComputedStyle(el);return {value:el.value,width:parseFloat(s.width),height:parseFloat(s.height)}});
+  expect(shortcutBox.value).toBe("8");expect(shortcutBox.width).toBeGreaterThanOrEqual(50);expect(shortcutBox.height).toBeGreaterThanOrEqual(28);
 });
 test("popup exposes independent sidebar-collapse, Queue, and notification switches",async({page,persistentContext,extensionServiceWorker,extensionId})=>{
   await page.goto("https://chatgpt.com/c/settings");await expect(button(page,"add")).toBeVisible();
@@ -86,6 +88,19 @@ test("native manual completion continues queue and only its final completion not
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
   expect((await snapshot(extensionServiceWorker)).queues[0].items).toHaveLength(0);
   await page.reload();await page.waitForTimeout(4500);expect((await snapshot(extensionServiceWorker)).notifications.length).toBe(1);
+});
+test("durable native hold recovers a completed manual turn after the page controller reloads",async({page,extensionServiceWorker})=>{
+  test.setTimeout(35000);
+  await page.goto("https://chatgpt.com/c/durable-native-hold");await expect(button(page,"add")).toBeVisible();
+  const baseline=await page.evaluate(()=>[...document.querySelectorAll('[data-message-author-role="user"]')].at(-1)?.dataset.messageId||"");
+  expect(baseline).toBeTruthy();
+  await enqueue(page,"bootstrap durable queue state");await button(page,"queue").click();await button(page,"remove").click();await button(page,"close").first().click();
+  await extensionServiceWorker.evaluate(async baseline=>{const all=await chrome.storage.local.get(null);const [key,q]=Object.entries(all).find(([k])=>k.startsWith('notice:conversation:')&&k.endsWith(':durable-native-hold'));q.turn={id:baseline,userId:baseline,assistantId:'old-answer',at:Date.now()-20000,done:true,outcome:'completed'};q.paused=false;q.pauseCause='';q.reason='等待原生提交确认；未送达请检查后暂停/继续';q.holdUntil=Date.now()-5000;q.holdBaseline=baseline;q.items=[{id:'durable-recover-item',text:'queued after controller reload',state:'pending',createdAt:Date.now()-4000}];q.revision++;q.updatedAt=Date.now();await chrome.storage.local.set({[key]:q});},baseline);
+  await page.evaluate(()=>{window.autoReply=true;window.addMessage('user','recovered-native-user','manual after controller reload');window.addMessage('assistant','recovered-native-answer','done',window.model);window.finish('completed before controller recovered');});
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:15000}).toBe(1);
+  expect(await page.evaluate(()=>window.sent[0].text)).toBe('queued after controller reload');
+  await expect.poll(async()=>{const q=(await snapshot(extensionServiceWorker)).queues.find(q=>q.key.endsWith(':durable-native-hold'));return q?.items.length||0;},{timeout:15000}).toBe(0);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
 });
 test("manual native sends still complete when the rendered user turn contains attachment metadata",async({page,extensionServiceWorker})=>{
   await page.goto("https://chatgpt.com/c/manual-attachment");await expect(button(page,"add")).toBeVisible();

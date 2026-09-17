@@ -38,7 +38,7 @@
     return /^[a-f0-9]{32,64}$/.test(scope || "") && r.id ? `${PREFIX}${scope}:${r.id}` : "";
   }
   function fresh() {
-    return { version: 8, revision: 0, paused: false, pauseCause: "", reason: "", items: [], receipts: [], turn: null, settled: [], failureStreak: 0, holdUntil: 0, updatedAt: 0 };
+    return { version: 8, revision: 0, paused: false, pauseCause: "", reason: "", items: [], receipts: [], turn: null, settled: [], failureStreak: 0, holdUntil: 0, holdBaseline: "", updatedAt: 0 };
   }
   function normalize(raw, now = Date.now()) {
     if (raw && (raw.version !== 8 || !Array.isArray(raw.items) || !Array.isArray(raw.receipts) || !Array.isArray(raw.settled))) throw new Error("本地 Queue 数据格式异常；未覆盖原始数据，请先备份检查");
@@ -46,6 +46,7 @@
     if (typeof state.pauseCause !== "string") {
       state.pauseCause = !state.paused ? "" : state.reason === "已暂停" ? "user" : state.reason === CONFLICT_REASON ? "conflict" : state.reason === "已保存，点击继续或立即发送" ? "legacy-idle" : "safety";
     }
+    if (typeof state.holdBaseline !== "string") state.holdBaseline = "";
     for (const item of state.items) {
       if (item.state === "sending" && item.expiresAt <= now) {
         // A lost sender before intent is safe to reclaim; after intent it is not.
@@ -84,7 +85,8 @@
         // A native submission has no lease-owned retry. Keep it blocked until
         // a message receipt or an explicit user resume resolves the uncertainty.
         state.holdUntil = now;
-        state.reason = "等待原生提交确认；未送达请检查后暂停/继续";
+        state.holdBaseline = String(command.baseline || "");
+        if (!state.paused) state.reason = "等待原生提交确认；未送达请检查后暂停/继续";
         break;
       case "add": {
         if (state.items.some(item => item.id === command.id) || state.receipts.some(r => r.itemId === command.id)) break;
@@ -116,7 +118,7 @@
         state.paused = Boolean(command.paused);
         state.pauseCause = state.paused ? "user" : "";
         state.reason = state.paused ? "已暂停" : "";
-        if (!state.paused) { state.holdUntil = 0; state.failureStreak = 0; }
+        if (!state.paused) { state.holdUntil = 0; state.holdBaseline = ""; state.failureStreak = 0; }
         break;
       case "claim": {
         if (state.holdUntil) reject("正在等待原生提交确认");
@@ -175,7 +177,7 @@
             result.conflict = true;
           } else state.turn = { id: command.userId, userId: command.userId, source: source(item.owner), at: now, done: false };
         } else if (state.turn?.id === command.userId) state.turn.source = source(item.owner);
-        if (!result.conflict) state.holdUntil = 0;
+        if (!result.conflict) { state.holdUntil = 0; state.holdBaseline = ""; }
         if (state.reason === "发送结果未知，请核对对话后处理" && !state.items.some(i => i.state === "unknown")) state.reason = "已确认送达，请检查后继续";
         break;
       }
@@ -218,6 +220,7 @@
           }
           state.turn = { id: generationId, userId: command.userId, source: currentSource, at: now, done: false };
           state.holdUntil = 0;
+          state.holdBaseline = "";
           if (!state.paused) state.reason = "";
         } else if (state.turn?.id === generationId && !state.turn.source && currentSource) {
           state.turn.source = currentSource;
@@ -236,6 +239,8 @@
             break;
           }
           if (state.turn?.id !== generationId) state.turn = { id: generationId, userId: command.userId, source: source(owner), at: now, done: false };
+          state.holdUntil = 0;
+          state.holdBaseline = "";
           state.turn.stopped = true;
           // Persist the user's intent now, not on a later sampler tick: a
           // fast manual follow-up may supersede this turn before it settles.
@@ -260,6 +265,7 @@
         state.turn.done = true;
         state.turn.outcome = outcome;
         state.turn.assistantId = String(command.assistantId || "");
+        if (state.pauseCause !== "conflict") { state.holdUntil = 0; state.holdBaseline = ""; }
         state.settled = [...state.settled, state.turn.id].slice(-200);
         state.failureStreak = outcome === "recoverable" ? Math.min(2, (state.failureStreak || 0) + 1) : 0;
         const exhausted = state.failureStreak >= 2;

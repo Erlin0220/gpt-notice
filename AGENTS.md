@@ -4,16 +4,16 @@
 
 产品包含 ChatGPT 原生体验、纯文本 Queue、最终完成提醒、GPT-6 Pro / GPT-5.6 Pro 本地用量与刷新配置，以及新聊天默认折叠和侧栏快捷项目。不创建第二套聊天输入框，不接管原生 Send、Stop、模型选择和附件，不主动调用或重放 ChatGPT 私有接口。首页、项目首页和 `WEB:` 临时路由展示用量与侧栏能力；只有稳定 conversation 才有 Queue。
 
-**禁止发送真实 GPT-6 Pro / GPT-5.6 Pro 消息做测试，禁止消耗用户额度。** 发送、重生成、故障注入只用受控 fixture 和独立临时浏览器 Profile；不得清空用户真实扩展存储。真实登录页仅做只读验证，不改草稿、附件或刷新正在生成的对话。测试通过不等于真实服务发送已验证。
+**禁止发送真实 GPT-6 Pro / GPT-5.6 Pro 消息做测试，禁止消耗用户 Pro 额度。** 发送、重生成、故障注入默认只用受控 fixture 和独立临时浏览器 Profile；不得清空用户真实扩展存储。只有用户明确要求真实发送验证时，才允许先确认实际 model slug 不属于 Pro allowlist，再用最少消息、明显间隔做一次专用测试；不得改动其他真实草稿/附件，也不得刷新正在生成的对话。
 
 ## 已确认的实现原则
 
-- Service Worker 是本地状态唯一写入者，操作串行持久化。继续复用现有轻量 lease → intent → receipt outbox，不引入第二套队列框架。intent 后失去结果必须进入 unknown；时间流逝、出现动画或点击成功都不是送达证据。存储失败不得清空草稿；不做自动重发。
+- Service Worker 是本地状态唯一写入者，操作串行持久化。继续复用现有轻量 lease → intent → receipt outbox，不引入第二套队列框架。intent 后失去结果必须进入 unknown；时间流逝、出现动画或点击成功都不是送达证据。原生 Send 的 hold 必须同时持久化发送前最后一个 user message ID (`holdBaseline`)，让 content controller/Worker 重启后能用“出现了 baseline 之后的新原生 user turn”恢复提交身份；仍不得仅凭时间或网络完成猜送达。存储失败不得清空草稿；不做自动重发。
 - 队列按账号/Workspace 摘要与 conversation 隔离。tabId 不是账号或文档身份；后台针对当前 document 查询页面身份。Popup 无法确认当前账号时不展示其他账号队列；通知不能仅凭相同 URL 跨账号跳转。
 - 同一 tab 也可能切换分支。替换未完成 turn 要有前驱消息或明确原生 Retry 证据；不同分支的 Stop、晚到回执和旧完成按钮不得覆盖新生成。真实冲突暂停不能自动解除；仅保留已确认的旧版无来源 false-conflict 的窄范围恢复。
 - 终态与送达分开：正常完成可消费下一条；当前轮已确认的原生“无法思考”等可恢复异常也可消费已有下一条，但不是重试上一条或自动补发“继续”。连续两轮可恢复异常暂停，成功或人工继续重置计数。Stop、限额/策略/账号阻塞、未分类错误、unknown 不能自动越过；审批/继续生成只提醒一次并保持本轮未结束。只分类原生 UI，不从助手正文推断失败或策略状态。页面 sampler 与 network probe 复用同一个终态判定；network completion 只能成为带 TTL 的 wake candidate，不能直接 settle。若同一 generation 已有 network-completion candidate 且原生 Copy 等最终动作存在，陈旧 Stop/busy 不得永久压住完成；显式 Stop/错误/审批仍优先。依据及限制见 ADR-0005。
 - 一个低频页面采样器和一个独立 Shadow DOM UI。页面状态由低频 snapshot、精确 document probe、network completion hint 与 visibility/pageshow/resume 唤醒驱动；不使用 MutationObserver、React 内部依赖、第二输入框或 fetch/XHR/History monkey patch。只有存在未确认 completion candidate 时允许一个 30 秒 Chrome Alarm safety net，禁止把它扩成常驻 keepalive 或第二套高频轮询。附件保护覆盖全部 file input、图片预览和中英文移除按钮。原生浮层与 Bar、Panel、编辑器任一区域相交都要让位，隐藏不能丢失未保存编辑内容；不通过极大 z-index 或扩展 top layer 压住原生菜单。
-- Worker 随时可能被终止：关键队列状态用 `storage.local`，短期请求关联用 `storage.session`；不使用心跳、offscreen 或常驻服务保活。扩展 context 失效后停止旧页面实例的定时器和操作，提示人工刷新，保留原生草稿及附件。不自动刷新或为热注入新增 scripting 权限。
+- Worker 随时可能被终止：关键队列状态用 `storage.local`，短期请求关联用 `storage.session`；不使用心跳、offscreen 或常驻服务保活。扩展 context 失效后停止旧页面实例的定时器和操作，提示人工刷新，保留原生草稿及附件。Chrome 扩展重新加载后旧 ChatGPT 页不会自动获得新 content script；Popup 在确认当前 ChatGPT tab 失联时可提供一次显式“刷新当前页面”，但不得后台静默刷新，也不为热注入新增 scripting 权限。
 - 侧栏优化不阻止、重定向或伪造任何 ChatGPT 请求。只在进入 `/` 或项目主页时一次性收起原生置顶/项目/聊天；之后尊重用户手动展开。快捷项目必须作为原生 Sidebar 正常布局流中的 sibling，随上方分区自然位移；不得用 fixed/absolute 模拟目录位置。视觉结构要复用当前原生 Projects section/menu-item class 与 sprite，默认 8 条 +“查看更多”，并允许用户在扩展面板配置默认展示数量；hover 的 compose 新建入口用新标签打开项目主页；禁止再维护独立的 emoji/theme→sprite/颜色映射。项目的名称、shortUrl、emoji/theme 来自 ChatGPT 自己写入的项目列表缓存；原生项目行真实渲染时只被动学习当前 sprite symbol/颜色作为最小视觉提示。改名/改图标不主动触发列表请求，等 ChatGPT 下一次自然刷新/展开列表后渐进更新；语义图标已变化时不得继续沿用旧视觉提示。项目元数据按现有 scope 隔离、按 ID 合并，缺席不删；快捷项不批量预取。修改该适配时先读 README 对应章节；真实 `_account` 是 JSON 字符串，原生缓存路径使用解码 ID，但不得因此变更已有 Queue/用量的 scope 摘要。原生折叠 cookie 仅是 UI 偏好，不读取认证凭据。旧 DNR 规则只允许迁移性删除，禁止新增规则。
 
 ## 用量、存储与发布

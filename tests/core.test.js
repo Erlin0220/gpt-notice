@@ -101,11 +101,21 @@ test("unknown delivery requires explicit resolution and stays paused", () => {
   assert.equal(resolved.items[0].state, "pending"); assert.equal(resolved.paused, true);
 });
 test("native submission hold never guesses delivery from elapsed time", () => {
-  const state = Q.apply(added(), { op: "hold" }, "tab-A", at).state;
+  const state = Q.apply(added(), { op: "hold", baseline: "before" }, "tab-A", at).state;
+  assert.equal(state.holdBaseline, "before");
   assert.throws(() => claim(state));
   assert.throws(() => Q.apply(state, { op: "claim", baseline: "before" }, "tab-B", at + 11000));
   const resumed = Q.apply(state, { op: "pause", paused: false }, "tab-B", at + 11001).state;
+  assert.equal(resumed.holdBaseline, "");
   assert.equal(Q.apply(resumed, { op: "claim", baseline: "before" }, "tab-B", at + 11002).item.state, "sending");
+});
+test("native hold preserves an existing explicit pause reason", () => {
+  let state = Q.apply(added(), { op: "pause", paused: true }, "tab-A", at).state;
+  state = Q.apply(state, { op: "hold", baseline: "before" }, "tab-A", at + 1).state;
+  assert.equal(state.paused, true);
+  assert.equal(state.pauseCause, "user");
+  assert.equal(state.reason, "已暂停");
+  assert.equal(state.holdBaseline, "before");
 });
 test("native hold and a newer completed turn invalidate an earlier claim", () => {
   const a = claim();

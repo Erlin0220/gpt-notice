@@ -183,7 +183,14 @@ async function handle(message, sender) {
     const stored = await chrome.storage.local.get(null);
     const queues = context ? Object.entries(stored).filter(([k]) => k.startsWith(`${Queue.PREFIX}${context.scope}:`)).map(([k, q]) => ({ key: k, url: q?.url, count: q?.items?.length || 0, paused: q?.paused })).filter(q => q.count && Queue.route(q.url).mode === "conversation") : [];
     const notices = context ? Object.entries(stored).filter(([k, n]) => k.startsWith("notice:notification:") && n?.scope === context.scope).map(([,n]) => n).sort((a,b) => b.at-a.at) : [];
-    return { ok: true, queues, scopeKnown: Boolean(context), settings: await featureSettings(), permission: await chrome.notifications.getPermissionLevel(), notification: { pending: notices.filter(n => n.pendingKind && !n.dismissedAt).length, lastAt: notices.find(n => n.kind)?.at || 0 } };
+    return { ok: true, queues, scopeKnown: Boolean(context), reloadable: Boolean(tab), settings: await featureSettings(), permission: await chrome.notifications.getPermissionLevel(), notification: { pending: notices.filter(n => n.pendingKind && !n.dismissedAt).length, lastAt: notices.find(n => n.kind)?.at || 0 } };
+  }
+  if (message?.type === "NOTICE_RELOAD_ACTIVE") {
+    if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可刷新页面");
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: PAGE_URLS });
+    if (!tab?.id) throw new Error("当前没有可刷新的 ChatGPT 页面");
+    await chrome.tabs.reload(tab.id);
+    return { ok: true };
   }
   if (message?.type === "NOTICE_FEATURE_SETTING") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可修改设置");

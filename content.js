@@ -103,7 +103,7 @@
       if (rt.attempt) rt.attempt.submitted = true;
       rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
-      if (rt.queueEnabled && !rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
+      if (rt.queueEnabled && !rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold", baseline: page.userId }).catch(() => {});
     }
     // Observation only: never preventDefault, replace handlers, patch history or fetch.
   }
@@ -231,7 +231,8 @@
       // event plus a new user message in the same live conversation is enough
       // to begin completion tracking; Queue delivery still requires its stricter
       // text-matching receipt below and therefore cannot be acknowledged here.
-      const confirmedSubmission = rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline;
+      const durableSubmission = Boolean(rt.queue?.holdUntil && (!rt.queue?.turn || rt.queue.turn.done) && rt.queue.holdBaseline && p.userId && p.userId !== rt.queue.holdBaseline);
+      const confirmedSubmission = Boolean(rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline || durableSubmission);
       const storedTurn = rt.queue?.turn;
       const storedUser = storedTurn?.userId || storedTurn?.id;
       const resume = storedTurn && !storedTurn.done && storedUser === p.userId;
@@ -243,10 +244,10 @@
       const generationId = regenerated ? `${p.userId}:${p.assistantId}` : resume ? storedTurn.id : p.userId;
       const live = p.running && !p.copy && p.userId && !rt.queue?.settled?.includes(generationId);
       if (p.userId && (confirmedSubmission || resume || live || regenerated || recoveredCompleted) && rt.turn?.generationId !== generationId) {
-        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: Boolean(regenerated || recoveredCompleted || generationId !== p.userId), recovered: Boolean(recoveredCompleted && !confirmedSubmission), networkAt: rt.completionHint?.scope === scope && rt.completionHint.id === p.userId ? rt.completionHint.at : 0 };
+        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : durableSubmission ? rt.queue.holdUntil : now, fingerprint: "", stableAt: now, counted: Boolean(regenerated || recoveredCompleted || generationId !== p.userId), recovered: Boolean(recoveredCompleted && !confirmedSubmission), networkAt: rt.completionHint?.scope === scope && rt.completionHint.id === p.userId ? rt.completionHint.at : 0 };
         if (regenerated) rt.stopped = "";
         const started = await request({ op: "start", userId: p.userId, generationId,
-          previousUserId: D.precedes(storedUser, p.user) ? storedUser : "", retryOf: retry ? storedTurn?.id : "" });
+          previousUserId: durableSubmission ? rt.queue.holdBaseline : D.precedes(storedUser, p.user) ? storedUser : "", retryOf: retry ? storedTurn?.id : "" });
         if (started.conflict || rt.queue?.turn?.id !== generationId) {
           rt.turn = null;
           rt.pending = null;

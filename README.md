@@ -219,6 +219,8 @@ Popup 的“新聊天默认收起侧栏分区”默认开启。进入 `/` 或 `/
 
 Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话可恢复，不跟随 tab 身份。ChatGPT 首条发送期间的 `WEB:` 临时 URL 不建立临时队列。
 
+原生 Send 开始时会把“发送前最后一个原生 user message ID”作为最小 `holdBaseline` 一起持久化；不保存问题正文。即使扩展更新、页面刷新或 content controller 重建后丢失了内存里的提交上下文，只要页面已经出现一个位于该 baseline 之后的新原生 user turn，就可以重新建立这轮 turn，再按正常语义终态继续 Queue，而不是永久卡在“等待原生提交确认”。
+
 发送结果无法确认时，Queue 暂停并标记“送达未知”，不会自动重发。请先检查原生对话，再明确选择重新入队或移除。
 
 原生 UI 明确报告“无法思考”等可恢复异常、且本轮已经结束时，可以继续发送已有下一条，但不会重试失败原文，也不会自动生成“继续”。连续两轮可恢复异常会暂停，避免把整个 Queue 持续消耗掉。
@@ -241,6 +243,8 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 approval、异常和最终完成使用不同事件 ID；同一完成结果的 generic → rich 使用同一 ID 静默更新。用户明确关闭 / 点击与系统自动收起分开处理，避免重复轰炸或吞掉后续最终结果。
 
 Chrome Notifications API 能控制标题、正文、icon、`contextMessage`、时间等，但字体、圆角、背景由 Chrome / 操作系统决定。实现细节见 [ADR-0006](docs/adr/0006-notification-delivery.md)。
+
+扩展重新加载后，Chrome 不会把新 content script 热替换进已经打开的 ChatGPT 页面；这类页面在 Popup 会显示“当前页面未连接”。此时可直接点击“刷新当前 ChatGPT 页面”恢复连接，扩展不会在后台擅自刷新页面。
 
 </details>
 
