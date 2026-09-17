@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, "..");
 test("production manifest is local and contains one page controller", () => {
   const m = require("../manifest.json");
   assert.equal(m.version, require("../package.json").version);
-  assert.deepEqual(m.permissions, ["notifications", "storage", "webRequest", "declarativeNetRequest"]);
+  assert.deepEqual(m.permissions, ["notifications", "storage", "webRequest", "declarativeNetRequest", "alarms"]);
   const hosts = values => [...new Set(values.map(value => new URL(value.replace(/\*$/, "")).hostname))].sort();
   assert.deepEqual(hosts(m.host_permissions), [...Queue.HOSTS].sort());
   assert.deepEqual(hosts(m.content_scripts[0].matches), [...Queue.HOSTS].sort());
@@ -29,7 +29,7 @@ test("production manifest is local and contains one page controller", () => {
   assert.match(content, /observedOutcome\(p, rt\.turn\)/);
   // Includes durable notification retry and the localized queue/popup surfaces.
   // Keep a readable dependency-free runtime, not whitespace-minified source.
-  assert.ok(bytes < 145000, `runtime should remain thin: ${bytes}`);
+  assert.ok(bytes < 148000, `runtime should remain thin: ${bytes}`);
   assert.equal(scripts.filter(f => f === "content.js").length, 1);
   assert.equal(m.content_scripts[0].run_at, "document_start");
   const sidebar = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
@@ -52,7 +52,7 @@ test("dist contains only the thin extension runtime", () => {
   };
   walk(outputDir);
   assert.deepEqual(actual.sort(), [...RUNTIME_FILES].sort());
-  assert.ok(bytes < 180 * 1024, `dist should stay tiny: ${bytes}`);
+  assert.ok(bytes < 184 * 1024, `dist should stay tiny: ${bytes}`);
   for (const forbidden of ["node_modules", ".test-profile", "test-results", ".git", ".codegraph", ".scratch"]) {
     assert.equal(fs.existsSync(path.join(outputDir, forbidden)), false, `${forbidden} must not be packaged`);
   }

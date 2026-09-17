@@ -10,7 +10,7 @@ test.beforeEach(async({persistentContext,extensionServiceWorker})=>{
 });
 test("MV3 loads and popup lists only pending conversation queues",async({page,extensionServiceWorker,persistentContext,extensionId})=>{
   expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().version)).toBe("0.8.1");
-  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().permissions)).toEqual(["notifications","storage","webRequest","declarativeNetRequest"]);
+  expect(await extensionServiceWorker.evaluate(()=>chrome.runtime.getManifest().permissions)).toEqual(["notifications","storage","webRequest","declarativeNetRequest","alarms"]);
   await page.goto("https://chatgpt.com/c/popup");await expect(button(page,"add")).toBeVisible();await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await page.bringToFront();await popup.reload();
@@ -127,6 +127,29 @@ test("switching tabs never turns a still-running reply into a completion notice"
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:10000}).toBe(1);
   await foreground.close();
 });
+test("hidden network-complete reply ignores a stale Stop only when the final native action is already present",async({page,persistentContext,extensionServiceWorker})=>{
+  test.setTimeout(30000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/stale-stop-notify");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("stale stop background notification");await page.locator("#composer-submit-button").click();
+  const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
+  await page.evaluate(()=>{const node=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);node.textContent='final reply';const b=document.createElement('button');b.dataset.testid='copy-turn-action-button';b.textContent='复制回复';node.parentElement.append(b);});
+  await expect(page.locator('[data-testid="stop-button"]')).toHaveCount(1);
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:10000}).toBe(1);
+  await expect(page.locator('[data-testid="stop-button"]')).toHaveCount(1);await foreground.close();
+});
+test("queued follow-up wakes promptly after stale Stop is reconciled in a hidden tab",async({page,persistentContext,extensionServiceWorker})=>{
+  test.setTimeout(35000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/stale-stop-queue");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("stale stop queue turn");await page.locator("#composer-submit-button").click();await enqueue(page,"queued after stale stop");
+  const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
+  await page.evaluate(()=>{const node=[...document.querySelectorAll('[data-message-author-role="assistant"]')].at(-1);node.textContent='final queued reply';const b=document.createElement('button');b.dataset.testid='copy-turn-action-button';b.textContent='复制回复';node.parentElement.append(b);});
+  await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues.find(q=>q.key.endsWith(':stale-stop-queue')).turn.done,{timeout:10000}).toBe(true);
+  await page.waitForTimeout(4200);await page.evaluate(()=>document.querySelector('[data-testid="stop-button"]')?.remove());
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:2500}).toBe(2);
+  expect(await page.evaluate(()=>window.sent[1].text)).toBe("queued after stale stop");await foreground.close();
+});
 test("transport completion without native final controls never releases Queue",async({page,persistentContext,extensionServiceWorker})=>{
   test.setTimeout(40000);
   await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(r=>setTimeout(r,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
@@ -182,7 +205,7 @@ test("Stop immediately followed by a manual message preserves Queue pause intent
   await page.locator("#prompt-textarea").fill("manual follow-up");await page.locator("#composer-submit-button").click();await page.evaluate(()=>window.finish("manual completion"));
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).queues[0]?.turn?.outcome,{timeout:12000}).toBe("completed");
   await page.waitForTimeout(4500);expect(await page.evaluate(()=>window.sent.length)).toBe(2);
-  const q=(await snapshot(extensionServiceWorker)).queues[0];expect(q.paused).toBe(true);expect(q.pauseCause).toBe("user");expect(q.items[0].text).toBe("remain queued");
+  const q=(await snapshot(extensionServiceWorker)).queues[0];expect(q.paused).toBe(true);expect(q.pauseCause).toBe("stop");expect(q.items[0].text).toBe("remain queued");
 });
 
 test("native approval stays nonterminal and notifies once without auto-approving",async({page,extensionServiceWorker})=>{
@@ -402,7 +425,7 @@ test("historical errors do not poison a successful manual follow-up, while Stop 
   await page.locator('#prompt-textarea').fill('successful follow up');await page.locator('#composer-submit-button').click();
   await expect.poll(async()=>(await snapshot(extensionServiceWorker)).notifications.length,{timeout:15000}).toBe(1);
   const q=(await snapshot(extensionServiceWorker)).queues[0];
-  expect(q.turn.outcome).toBe("completed");expect(q.paused).toBe(true);expect(q.pauseCause).toBe("user");
+  expect(q.turn.outcome).toBe("completed");expect(q.paused).toBe(true);expect(q.pauseCause).toBe("stop");
 });
 test("a large historical transcript keeps tail detection and button identity stable",async({page})=>{
   await page.goto('https://chatgpt.com/c/large');await expect(button(page,'add')).toBeVisible();

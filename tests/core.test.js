@@ -232,11 +232,13 @@ test("attention is nonterminal, idempotent and can be followed by final completi
 test("native Stop survives reload and does not poison the next user turn", () => {
   let state = Q.apply(undefined, { op: "start", userId: "stopped" }, "tab-A", at).state;
   state = Q.apply(state, { op: "stop", userId: "stopped" }, "tab-A", at + 1).state;
-  assert.equal(state.paused,true);assert.equal(state.pauseCause,"user");
+  assert.equal(state.paused,true);assert.equal(state.pauseCause,"stop");
   const reloaded = Q.apply(state, { op: "settle", userId: "stopped" }, "tab-B", at + 1000);
   assert.equal(reloaded.notify, false);
   state = Q.apply(state, { op: "start", userId: "follow-up", previousUserId: "stopped" }, "tab-A", at + 2).state;
   assert.equal(state.paused,true);
+  assert.equal(state.pauseCause,"stop");
+  assert.match(state.reason,/上一轮手动停止/);
   assert.equal(Q.apply(state, { op: "settle", userId: "follow-up" }, "tab-A", at + 1000).notify, true);
 });
 test("editing is revision checked and sending items cannot be deleted or reordered", () => {

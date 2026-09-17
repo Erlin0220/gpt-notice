@@ -7,7 +7,7 @@
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
     tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
     pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false,
-    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, notificationRetryAt: 0, notificationError: "" };
+    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, notificationRetryAt: 0, notificationError: "", completionHint: null };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
@@ -99,6 +99,7 @@
     if (nativeSend) {
       const page = D.snapshot();
       if (page.empty) return;
+      rt.completionHint = null;
       if (rt.attempt) rt.attempt.submitted = true;
       rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
       rt.quietAt = Date.now();
@@ -135,16 +136,22 @@
   function observedOutcome(p, active, now = Date.now()) {
     if (!active || p.userId !== active.id || !D.generationMatches(active.generationId, p)) return "running";
     const stopped = rt.stopped === active.id || rt.queue?.turn?.id === active.generationId && rt.queue.turn.stopped;
-    const outcome = stopped && !p.running ? "stopped" : p.outcome;
+    const hinted = !stopped && active.networkAt && p.copy && p.assistantId && !p.waiting && !p.error;
+    const outcome = stopped && !p.running ? "stopped" : hinted ? "completed" : p.outcome;
     // Both the sampler and a network-woken probe use this same semantic gate.
     // Transport completion, disappearing Stop, and an idle composer are not finality.
-    const terminal = outcome === "attention" || ["completed", "recoverable", "blocked", "failed", "stopped"].includes(outcome) && !p.running;
+    const terminal = outcome === "attention" || ["completed", "recoverable", "blocked", "failed", "stopped"].includes(outcome) && (!p.running || hinted);
     const fingerprint = terminal && (outcome !== "completed" || p.ready) ? `${outcome}:${p.assistantId}:${outcome === "completed" ? p.settledText : ""}` : "";
     if (active.fingerprint !== fingerprint) { active.fingerprint = fingerprint; active.stableAt = now; }
-    const delay = outcome === "completed" ? 3000 : 2000;
+    const delay = hinted ? 0 : outcome === "completed" ? 3000 : 2000;
     return fingerprint && now - active.stableAt >= delay && now - active.at >= delay ? outcome : "running";
   }
   const runtimeListener = (message, sender, reply) => {
+    if (message?.type === "NOTICE_COMPLETION_HINT") {
+      rt.completionHint = { scope: message.scope, id: message.turnId, at: message.at };
+      if (rt.turn?.id === message.turnId && rt.context?.scope === message.scope) rt.turn.networkAt = message.at;
+      reply({ ok: true }); void tick(); return;
+    }
     if (message?.type === "NOTICE_SCOPE") {
       const url = location.href;
       if (rt.disposed) { reply(null); return; }
@@ -196,6 +203,7 @@
         rt.projects = null; rt.projectSignature = "";
         rt.notificationRetryAt = 0; rt.notificationError = "";
         rt.queue = null; rt.usage = null; rt.turn = null; rt.lastUserId = promoting ? "" : p.userId;
+        if (old?.scope && old.scope !== scope) rt.completionHint = null;
         rt.quietAt = Date.now(); rt.stopped = ""; rt.retryBaseline = null; rt.addAttempt = null;
         if (!carryingFirstSend) rt.pending = null;
         if (scope) await request({ op: "get" });
@@ -235,7 +243,7 @@
       const generationId = regenerated ? `${p.userId}:${p.assistantId}` : resume ? storedTurn.id : p.userId;
       const live = p.running && !p.copy && p.userId && !rt.queue?.settled?.includes(generationId);
       if (p.userId && (confirmedSubmission || resume || live || regenerated || recoveredCompleted) && rt.turn?.generationId !== generationId) {
-        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: Boolean(regenerated || recoveredCompleted || generationId !== p.userId), recovered: Boolean(recoveredCompleted && !confirmedSubmission) };
+        const candidate = { id: p.userId, generationId, at: resume && !regenerated ? storedTurn.at : now, fingerprint: "", stableAt: now, counted: Boolean(regenerated || recoveredCompleted || generationId !== p.userId), recovered: Boolean(recoveredCompleted && !confirmedSubmission), networkAt: rt.completionHint?.scope === scope && rt.completionHint.id === p.userId ? rt.completionHint.at : 0 };
         if (regenerated) rt.stopped = "";
         const started = await request({ op: "start", userId: p.userId, generationId,
           previousUserId: D.precedes(storedUser, p.user) ? storedUser : "", retryOf: retry ? storedTurn?.id : "" });
@@ -251,8 +259,9 @@
         rt.retryBaseline = null;
       }
       rt.lastUserId = p.userId || rt.lastUserId;
-      if (p.running) rt.quietAt = now;
       const active = rt.turn;
+      const networkSettled = (active?.networkAt || rt.completionHint?.id === p.userId && rt.completionHint.at) && p.copy && !p.waiting && !p.error;
+      if (p.running && !networkSettled) rt.quietAt = now;
       if (active && p.userId === active.id && D.generationMatches(active.generationId, p)) {
         const outcome = observedOutcome(p, active, now);
         if (!active.counted && outcome === "completed" && U.MODELS.has(p.model)) {
@@ -271,7 +280,7 @@
           await request({ op: outcome === "attention" ? "attention" : "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, outcome, suppressNotify: Boolean(active.recovered),
             notice: { prompt: D.readText(p.user).slice(0, 1000), response: hidden || outcome !== "completed" ? "" : D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at), hidden } });
           if (outcome !== "attention") {
-            rt.turn = null; rt.stopped = ""; if (outcome !== "completed") rt.quietAt = now;
+            rt.turn = null; rt.stopped = ""; if (rt.completionHint?.id === active.id && (rt.queue?.paused || !rt.queue?.items.length)) rt.completionHint = null; if (outcome !== "completed") rt.quietAt = now;
           }
         }
       }
@@ -326,6 +335,7 @@
         const button = D.sendButton();
         if (button && D.enabled(button)) {
           clicked = true; // Before click: any exception after this point is ambiguous.
+          rt.completionHint = null;
           button.click();
           rt.quietAt = Date.now();
           return;
@@ -374,8 +384,8 @@
       else if (name === "resolve-retry" || name === "resolve-remove") await request({ op: "resolve", id: payload.id, confirmed: true, retry: name === "resolve-retry" }, context);
     } finally { rt.actionBusy = false; render(); }
   }
-  addEventListener("popstate", () => void tick(), { signal: events.signal });
-  addEventListener("pageshow", () => void tick(), { signal: events.signal });
+  for (const type of ["popstate", "pageshow"]) addEventListener(type, () => void tick(), { signal: events.signal });
+  for (const type of ["visibilitychange", "resume"]) document.addEventListener(type, () => void tick(), { signal: events.signal });
   globalThis.ChatGPTNotice = { dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; } };
   void (async () => {
     try {

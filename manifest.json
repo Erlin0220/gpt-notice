@@ -4,7 +4,7 @@
   "version": "0.8.1",
   "description": "减少 ChatGPT Web 侧栏频繁请求，缓解接口 429；提供项目快捷访问、消息队列、完成提醒和本地用量记录，保留原生输入体验。",
   "minimum_chrome_version": "120",
-  "permissions": ["notifications", "storage", "webRequest", "declarativeNetRequest"],
+  "permissions": ["notifications", "storage", "webRequest", "declarativeNetRequest", "alarms"],
   "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
   "background": { "service_worker": "background.js" },
   "action": {

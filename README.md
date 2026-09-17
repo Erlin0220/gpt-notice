@@ -171,7 +171,7 @@ npm run build
 - 不主动调用私有项目 API；
 - 不循环预加载缓存中的所有项目；
 - 不新增 MutationObserver；
-- 不新增第二套高频轮询；
+- 不新增第二套高频轮询；只有存在未确认的 network-completion candidate 时，才用 Chrome Alarm 每 30 秒做一次低频语义复核；
 - 旧实验版本留下的 DNR 拦截规则只会被清理，不会重新创建。
 
 ## 为什么尽量保持“薄”
@@ -183,7 +183,7 @@ ChatGPT Web 本身已经有完整的 Composer、Streaming、Stop、附件、项�
 1. **原生能力能用就直接复用。**
 2. **状态只保留一个事实源。** Queue 状态由 Service Worker 串行持久化，UI 只做投影。
 3. **宁可暂停，也不猜测。** 无法确认是否发送成功时进入 unknown，不自动重发。
-4. **不靠高频观察器追着 React DOM 跑。** 页面只有一个低频 sampler，UI 使用稳定 Shadow DOM。
+4. **不靠高频观察器追着 React DOM 跑。** 页面只有一个低频 sampler；网络完成会主动唤醒对应 document，遗漏时再由 30 秒 Alarm 做有限恢复。
 5. **不为了快捷入口制造更多请求。** 项目数据只从正常使用中渐进积累。
 
 ## 隐私与权限
@@ -223,7 +223,7 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 
 原生 UI 明确报告“无法思考”等可恢复异常、且本轮已经结束时，可以继续发送已有下一条，但不会重试失败原文，也不会自动生成“继续”。连续两轮可恢复异常会暂停，避免把整个 Queue 持续消耗掉。
 
-用户 Stop、限额 / 策略阻塞、未分类错误、并发冲突和未知送达均保持暂停。需要审批或继续生成时只提醒，不代替用户操作。
+用户 Stop、限额 / 策略阻塞、未分类错误、并发冲突和未知送达均保持暂停。Stop 与手动“暂停队列”现在使用不同 pause cause，界面会保留“上一轮手动停止”的原因，避免后续误以为 Queue 无故卡住。需要审批或继续生成时只提醒，不代替用户操作。
 
 关闭浏览器、电脑休眠或关闭相关对话后，不承诺后台继续聊天。
 
@@ -232,11 +232,11 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 <details>
 <summary><strong>完成提醒如何避免误报和漏报</strong></summary>
 
-系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的生命周期；网络完成不等于回复完成，仍需要精确 document 的页面状态确认。
+系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的生命周期；网络完成不等于回复完成，仍需要精确 document 的页面状态确认。网络结束后如果第一次 probe 仍是 running / unavailable，不再立即丢弃关联，而是保留最小 candidate、主动唤醒对应 document，并用 30 秒 Chrome Alarm 继续有限复核，直到语义终态、路由失效或 10 分钟 TTL 到期。
 
-仍在生成、页面无法响应、探针超时、账号 / Workspace / conversation 不匹配时都不会发成功提醒。被冻结、丢弃或关闭的页面无法保证及时语义确认。
+仍在生成、页面无法响应、探针超时、账号 / Workspace / conversation 不匹配时都不会直接发成功提醒。若网络已完成且同一轮已经出现原生 Copy 等最终动作，允许把仍残留的 Stop / busy 视为后台 UI 陈旧状态；显式 Stop、错误、审批仍优先。frozen 页面只保留 candidate 等待恢复，discarded / 换 document 则停止这次精确恢复。
 
-完成状态与待投递通知意图通过同一次 `storage.local.set` 批量提交。Chrome 通知创建失败时保留最小恢复记录，复用现有 sampler 以至少 10 秒间隔重试；Worker 再次启动时也可以恢复。不会为通知再增加独立常驻轮询。
+完成状态与待投递通知意图通过同一次 `storage.local.set` 批量提交。Chrome 通知创建失败时保留最小恢复记录，复用现有 sampler 以至少 10 秒间隔重试；Worker 再次启动时也可以恢复。30 秒 Alarm 只在存在未确认 completion candidate 时存在，不做常驻 keepalive。
 
 approval、异常和最终完成使用不同事件 ID；同一完成结果的 generic → rich 使用同一 ID 静默更新。用户明确关闭 / 点击与系统自动收起分开处理，避免重复轰炸或吞掉后续最终结果。
 

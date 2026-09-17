@@ -218,7 +218,7 @@
           }
           state.turn = { id: generationId, userId: command.userId, source: currentSource, at: now, done: false };
           state.holdUntil = 0;
-          state.reason = state.paused ? "已暂停" : "";
+          if (!state.paused) state.reason = "";
         } else if (state.turn?.id === generationId && !state.turn.source && currentSource) {
           state.turn.source = currentSource;
         }
@@ -240,8 +240,8 @@
           // Persist the user's intent now, not on a later sampler tick: a
           // fast manual follow-up may supersede this turn before it settles.
           if (!state.paused) {
-            state.pauseCause = "user";
-            state.reason = "当前回复已手动停止，Queue 已暂停";
+            state.pauseCause = "stop";
+            state.reason = "上一轮手动停止后，Queue 已暂停；点击继续恢复";
           }
           state.paused = true;
         }
@@ -266,9 +266,9 @@
         if (["blocked", "failed", "stopped"].includes(outcome) || exhausted) {
           state.paused = true;
           // Never downgrade an existing explicit pause or branch-conflict guard.
-          if (!["user", "conflict"].includes(state.pauseCause)) {
+          if (!["user", "stop", "conflict"].includes(state.pauseCause)) {
             state.pauseCause = "safety";
-            state.reason = exhausted ? "连续两轮异常，Queue 已暂停；请检查后继续" : outcome === "stopped" ? "当前回复已手动停止，Queue 已暂停" : outcome === "blocked" ? "限额、策略或账号受限，Queue 已暂停；请先处理原生提示" : "当前回复异常，Queue 已暂停；请检查后继续";
+            state.reason = exhausted ? "连续两轮异常，Queue 已暂停；请检查后继续" : outcome === "stopped" ? "上一轮手动停止后，Queue 已暂停；点击继续恢复" : outcome === "blocked" ? "限额、策略或账号受限，Queue 已暂停；请先处理原生提示" : "当前回复异常，Queue 已暂停；请检查后继续";
           }
         }
         // Return notification intent only after the completion state is durable.

@@ -18,4 +18,4 @@ Queue 文本属于浏览器本地明文数据，能访问本机浏览器配置�
 
 Popup 与通知跳转均核对当前账号 / Workspace，不按相同对话 URL 跨账号跳转。过期清理只针对无正文、无活动或暂停意图的空闲 Queue bookkeeping；待发和未知结果不会自动清除。
 
-权限用途：`storage` 用于本地持久化与临时关联，`notifications` 用于系统提醒，`webRequest` 用于只读观察上述原生发送边界。`declarativeNetRequest` 在当前迁移版本中仅用于启动时删除旧实验版本留下的动态规则；当前代码不会添加、重定向或阻止任何请求，后续完成迁移后可移除此权限。通过已授予的站点权限使用 tabs API 校验页面身份和定位标签页，不另申请 `tabs` 权限。不使用 `webRequestBlocking`、cookies、debugger、scripting 或无限存储权限。仅在 `chatgpt.com` / `chat.openai.com` 页面注入，不监控其他网站。
+权限用途：`storage` 用于本地持久化与临时关联，`notifications` 用于系统提醒，`webRequest` 用于只读观察上述原生发送边界，`alarms` 只在存在尚未完成页面语义确认的 network-completion candidate 时安排 30 秒一次的低频复核，candidate 清除后不再续约，也不作为常驻 keepalive。`declarativeNetRequest` 在当前迁移版本中仅用于启动时删除旧实验版本留下的动态规则；当前代码不会添加、重定向或阻止任何请求，后续完成迁移后可移除此权限。通过已授予的站点权限使用 tabs API 校验页面身份和定位标签页，不另申请 `tabs` 权限。不使用 `webRequestBlocking`、cookies、debugger、scripting 或无限存储权限。仅在 `chatgpt.com` / `chat.openai.com` 页面注入，不监控其他网站。

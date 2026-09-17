@@ -163,9 +163,9 @@
       $(".count").textContent = next.queue?.items.length || 0;
       $(".status").textContent = (next.status || next.queue?.reason || "队列就绪").replaceAll("Queue", "队列");
       $(".status").hidden = $(".status").textContent === "队列为空";
-      const attention = next.queue?.items.some(i => i.state === "unknown") || next.queue?.paused && next.queue.pauseCause !== "user";
+      const attention = next.queue?.items.some(i => i.state === "unknown") || next.queue?.paused && !["user","stop"].includes(next.queue.pauseCause);
       $(".queue-panel").dataset.state = attention ? "attention" : "normal";
-      $(".queue-state").textContent = next.queueEnabled === false ? "功能已关闭" : attention ? "需要处理" : next.queue?.paused ? "已暂停" : next.queue?.items.length ? "自动发送" : "已就绪";
+      $(".queue-state").textContent = next.queueEnabled === false ? "功能已关闭" : attention ? "需要处理" : next.queue?.paused ? next.queue.pauseCause === "stop" ? "已暂停 · 手动停止" : "已暂停" : next.queue?.items.length ? "自动发送" : "已就绪";
       $(".empty").hidden = Boolean(next.queue?.items.length);
       host.dataset.dark = String(document.documentElement.classList.contains("dark") || document.documentElement.style.colorScheme === "dark");
       const sig = `${next.key}:${next.queue?.revision || 0}`;

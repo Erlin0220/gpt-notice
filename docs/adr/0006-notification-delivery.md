@@ -8,7 +8,7 @@
 
 ## 决策
 
-使用现有 notification record，不另建数据库/后台队列。在 Queue 完成或 attention 状态提交时，用同一次 `storage.local.set` 批量写入状态与 pendingKind；这减少应用层的分步窗口，但不假定 Chrome Storage 提供未文档化的跨键事务语义。只保存路由、时间、耗时、队列来源等最小元数据，不保存问题或摘要。Chrome 调用成功后确认 kind 并删除 pendingKind。失败记录 retryAt，现有 sampler 至少间隔 10 秒重试；Worker 启动只恢复仍与当前账号/对话匹配的未投递记录。无新轮询、权限、依赖或保活。
+使用现有 notification record，不另建数据库/后台队列。在 Queue 完成或 attention 状态提交时，用同一次 `storage.local.set` 批量写入状态与 pendingKind；这减少应用层的分步窗口，但不假定 Chrome Storage 提供未文档化的跨键事务语义。只保存路由、时间、耗时、队列来源等最小元数据，不保存问题或摘要。Chrome 调用成功后确认 kind 并删除 pendingKind。失败记录 retryAt，现有 sampler 至少间隔 10 秒重试；Worker 启动只恢复仍与当前账号/对话匹配的未投递记录。另增加 `alarms` 权限，仅在 network completion candidate 第一次语义 probe 未完成时创建 30 秒一次的 one-shot safety net；candidate 消失后不再续约，不作为 Worker keepalive。
 
 审批、异常与最终结果分离 ID；同一完成结果的 generic → rich 同 ID 静默 update。先 update 也处理 OS 成功但本地确认前崩溃的窗口。明确关闭/点击只消费该事件；系统自动关闭不消费。Stop 或本轮终态取消已经失效的未投递审批；关闭提醒开关取消待补送。正常连续队列仍只通知最终结果；暂停或关闭队列功能不关闭独立手动回复提醒，且有待发消息时不宣称整队已完成。
 
@@ -16,7 +16,7 @@
 
 ## 边界
 
-系统通知只使用 Chrome Notifications API 支持的标题、正文、icon、contextMessage、eventTime、silent，不试图通过 CSS 改字体/圆角/背景。API 成功不等于 OS 横幅可见；勿扰/合并、浏览器崩溃及通知被 OS 清理无法靠本地记录做到绝对 exactly-once。冻结/丢弃的页面不保证及时语义确认。恢复通知使用通用文字，优先隐私而非持久化摘要。
+系统通知只使用 Chrome Notifications API 支持的标题、正文、icon、contextMessage、eventTime、silent，不试图通过 CSS 改字体/圆角/背景。API 成功不等于 OS 横幅可见；勿扰/合并、浏览器崩溃及通知被 OS 清理无法靠本地记录做到绝对 exactly-once。frozen 页只保留候选等待恢复；discarded 或 document 已替换时放弃该次精确恢复。恢复通知使用通用文字，优先隐私而非持久化摘要。
 
 侧栏折叠与被动缓存减少无意义项目 fan-out，缓解相关 429 风险，不绕过服务器限流。DNR 只保留旧规则删除迁移。
 

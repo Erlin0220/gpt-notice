@@ -11,6 +11,7 @@ const serial = fn => {
 const PAGE_URLS = [...Queue.HOSTS].map(host => `https://${host}/*`);
 const REQUEST_PREFIX = "notice:request:";
 const CLEANUP_KEY = "notice:last-cleanup";
+const COMPLETION_ALARM = "notice:completion-probe";
 const REQUEST_TTL = 10 * 60_000;
 const FEATURE_KEYS = {
   sidebarCollapse: "notice:sidebar-collapse-enabled",
@@ -109,7 +110,7 @@ async function captureRequest(observation) {
   if (!context) return;
   await pruneStorage().catch(() => {});
   await chrome.storage.session.set({
-    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, sentAt: 0 }
+    [REQUEST_PREFIX + observation.requestId]: { ...observation, scope: context.scope, url: context.url, sentAt: 0, completedAt: 0 }
   });
 }
 function readUsage(raw) {
@@ -173,6 +174,7 @@ chrome.webRequest.onErrorOccurred.addListener(details => {
 }, REQUEST_FILTER);
 chrome.notifications.onClicked.addListener(id => void serial(() => openNotice(id)).catch(() => {}));
 chrome.notifications.onClosed.addListener((id, byUser) => { if (byUser) void serial(() => markNoticeClosed(id)).catch(() => {}); });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm?.name === COMPLETION_ALARM) void serial(retryCompletionRequests).catch(() => {}); });
 async function handle(message, sender) {
   if (message?.type === "NOTICE_POPUP") {
     if (sender.url !== chrome.runtime.getURL("popup.html")) throw new Error("仅扩展面板可读取概览");
@@ -271,6 +273,8 @@ async function handle(message, sender) {
     await pruneNotices().catch(() => {});
   }
   notificationError ||= await retryNotices(message.scope, route.url);
+  const clearTurn = command.op === "claim" ? result.item?.baseline : command.op === "start" ? command.previousUserId : command.op === "stop" || command.op === "settle" && (result.state.paused || !result.state.items.length) ? command.userId : "";
+  if (clearTurn) await clearCompletionRequests(message.scope, route.url, clearTurn);
   return { ok: true, queue: result.state, usage: usage.state, item: result.item, conflict: result.conflict, notificationError };
 }
 
@@ -374,31 +378,51 @@ async function networkNoticeEligible(observation, route, probe) {
   return stored[FEATURE_KEYS.queue] === false || queue?.paused || !queue?.items?.length || ["attention", "blocked", "failed"].includes(probe?.state);
 }
 
+async function scheduleCompletionProbe() {
+  if (!await chrome.alarms.get(COMPLETION_ALARM)) await chrome.alarms.create(COMPLETION_ALARM, { periodInMinutes: 0.5 });
+}
+async function clearCompletionRequests(scope, url, turnId) {
+  const routeId = Queue.route(url).id, stored = await chrome.storage.session.get(null);
+  const keys = Object.entries(stored).filter(([key, value]) => key.startsWith(REQUEST_PREFIX) && value?.completedAt && value.scope === scope && value.turnId === turnId && Queue.route(value.url).id === routeId).map(([key]) => key);
+  if (keys.length) {
+    await chrome.storage.session.remove(keys);
+    if (!Object.entries(stored).some(([key, value]) => key.startsWith(REQUEST_PREFIX) && value?.completedAt && !keys.includes(key))) await chrome.alarms.clear(COMPLETION_ALARM);
+  }
+}
+async function probeCompletedRequest(key, observation) {
+  let tab;
+  try { tab = await chrome.tabs.get(observation.tabId); } catch { await chrome.storage.session.remove(key); return false; }
+  const route = Queue.route(tab?.url), originRoute = Queue.route(observation.url);
+  if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) { await chrome.storage.session.remove(key); return false; }
+  if (tab?.discarded) { await chrome.storage.session.remove(key); return false; }
+  if (tab?.frozen) return true;
+  try { await chrome.tabs.sendMessage(observation.tabId, { type: "NOTICE_COMPLETION_HINT", scope: observation.scope, turnId: observation.turnId, at: observation.completedAt }, { frameId: 0, documentId: observation.documentId }); } catch {}
+  const probe = await completionProbe(observation, route);
+  if (probe?.state === "stale" || probe?.state === "stopped" || probe?.generationId && probe.generationId !== observation.turnId) { await chrome.storage.session.remove(key); return false; }
+  if (!await networkNoticeEligible(observation, route, probe)) return true;
+  const queueKey = Queue.key(observation.scope, route.url), queue = (await chrome.storage.local.get(queueKey))[queueKey];
+  const queueFinal = !queue?.items?.length && Boolean(queue?.receipts?.some(r => r.userId === observation.turnId));
+  const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
+  const publication = completionPublication(probe?.state, probe?.hidden === true, { prompt: probe?.prompt, response: probe?.response, elapsedMs, queueFinal });
+  if (!publication) return true;
+  const id = noticeId(observation.scope, route.id, observation.turnId, publication.kind);
+  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind);
+  await chrome.storage.session.remove(key); await pruneNotices().catch(() => {});
+  return false;
+}
+async function retryCompletionRequests() {
+  const stored = await chrome.storage.session.get(null); let pending = false;
+  for (const [key, observation] of Object.entries(stored)) if (key.startsWith(REQUEST_PREFIX) && observation?.completedAt && Date.now() - observation.at <= REQUEST_TTL) pending = await probeCompletedRequest(key, observation) || pending;
+  if (!pending) await chrome.alarms.clear(COMPLETION_ALARM);
+}
+
 async function completeConversationRequest(details) {
   const key = REQUEST_PREFIX + details.requestId;
   const observation = (await chrome.storage.session.get(key))[key];
-  await chrome.storage.session.remove(key);
-  if (!observation || !observation.sentAt || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL) return;
-  if (!Number.isFinite(details.statusCode) || details.statusCode < 200 || details.statusCode >= 300) return;
-
-  let tab;
-  try { tab = await chrome.tabs.get(observation.tabId); } catch { return; }
-  const route = Queue.route(tab?.url);
-  const originRoute = Queue.route(observation.url);
-  if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) return;
-  const probe = tab?.discarded ? { state: "unavailable" } : await completionProbe(observation, route);
-  if (!await networkNoticeEligible(observation, route, probe)) return;
-  const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
-  const generationId = /^[\w:-]{1,300}$/.test(probe?.generationId || "") ? probe.generationId : observation.turnId;
-  const queue = (await chrome.storage.local.get(Queue.key(observation.scope, route.url)))[Queue.key(observation.scope, route.url)];
-  const queueFinal = !queue?.items?.length && (queue?.receipts?.some(r => r.userId === observation.turnId) || false);
-  const publication = completionPublication(probe?.state, probe?.hidden === true, {
-    prompt: probe?.prompt, response: probe?.response, elapsedMs, queueFinal
-  });
-  if (!publication) return;
-  const id = noticeId(observation.scope, route.id, generationId, publication.kind);
-  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind);
-  await pruneNotices().catch(() => {});
+  if (!observation || !observation.sentAt || observation.tabId !== details.tabId || observation.documentId !== details.documentId || Date.now() - observation.at > REQUEST_TTL || !Number.isFinite(details.statusCode) || details.statusCode < 200 || details.statusCode >= 300) { await chrome.storage.session.remove(key); return; }
+  const completed = { ...observation, completedAt: Date.now() };
+  await chrome.storage.session.set({ [key]: completed });
+  if (await probeCompletedRequest(key, completed)) await scheduleCompletionProbe();
 }
 
 async function openNotice(id) {

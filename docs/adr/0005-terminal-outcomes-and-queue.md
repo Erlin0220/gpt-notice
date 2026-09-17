@@ -4,7 +4,7 @@
 
 ## 决策
 
-保留原有单 writer、lease/intent/receipt、单 sampler、独立 UI。仅增加原生 UI 派生的 outcome；sampler 和网络探针复用同一稳定窗口。删除 `transportDone` 完成旁路及请求阶段 `finalQueueRequest`/额外 Queue read。网络结束不是业务结束，也不是发送回执。
+保留原有单 writer、lease/intent/receipt、单 sampler、独立 UI。原生 UI 派生 outcome 仍是业务终态；网络结束不是业务结束，也不是发送回执。但真实后台页验证表明“一次 network probe 失败后立即丢弃 request correlation”会把通知和 Queue 同时重新绑回页面 sampler，所以 network completion 现在保留为**带 TTL 的 wake candidate**：立即提示精确 document、继续复用同一语义判定；仍未终态时只用 30 秒 Chrome Alarm 做低频复核，不能直接 settle。
 
 | 页面事实 | Queue / 提醒 |
 | --- | --- |
@@ -15,11 +15,12 @@
 | 原生审批或继续生成 | 仍是活动轮次；至多一次需要处理提醒，不代替用户操作 |
 | 原生限额、策略、账号限制或未分类错误 | 暂停，发非成功提醒；点击 Queue 继续也不能绕过仍存在的原生阻塞 |
 | intent 后无精确送达回执 | 仍使用既有 unknown 隔离，绝不自动重发 |
-| 只有 transport 结束、无完成控件，或 probe 超时/页面冻结 | 不推测完成、不释放 Queue |
+| 只有 network 结束、无完成控件，或 probe 超时/页面冻结 | 不推测完成；保留 candidate，30 秒后复核，frozen 等恢复 |
+| 同一 generation 的 network 已完成，原生 Copy 等最终动作已出现，但 Stop/busy 仍残留 | 视为后台 UI 陈旧；允许完成。显式 Stop、error、approval 仍优先 |
 
 这里只检查当前轮/原生 composer 的 alert、错误控件及窄范围状态标签；助手正文、代码示例和历史错误不是失败信号。正常安全拒答文本也不自动等同于账户策略封禁。`completed` 与 `recoverable` 的相同发送前置条件仍包括空草稿、无附件/IME、原生可发送、正确账号/路由/消息、未暂停及无未知 outbox。
 
-两轮阈值是本产品对“允许下一条”与“避免持续耗额”的小型固定取舍，不宣称是上游通用最佳值。不增加重试调度器、退避系统、HITL 自动审批、offscreen、心跳或页面请求钩子。
+两轮阈值是本产品对“允许下一条”与“避免持续耗额”的小型固定取舍，不宣称是上游通用最佳值。不增加通用重试调度器、HITL 自动审批、offscreen、心跳或页面请求钩子；completion Alarm 只服务未确认 candidate，candidate 清空后不再唤醒 Worker。
 
 与 ADR-0002 不冲突：已经进入兼容性、安全、人工或冲突暂停仍需明确恢复；本决策只让已确认的 recoverable 终态不被错误地归为必暂停。取代早期 README/范围文档中“探针不可用时先发 generic”的规则；无事实不能发完成提醒。
 

@@ -9,10 +9,10 @@ const P = require("../projects-core");
 const scope = "a".repeat(64);
 function harness(storage = {}, session = {}, created = []) {
   const notificationCalls = [], focused = [], tabs = new Map([[1,{id:1,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}],[2,{id:2,windowId:1,url:"https://chatgpt.com/c/a",frozen:false,discarded:false}]]);
-  const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]), probes = new Map(), probeCalls = [];
+  const scopes = new Map([[1, scope], [2, scope]]), documents = new Map([[1, "doc-1"], [2, "doc-2"]]), probes = new Map(), probeCalls = [], hints = [];
   let sessionRules = [{id:910001}], dynamicRules = [{id:910001,action:{type:"block"},condition:{}}];
   const webEvents = {}, registrations = {};
-  let listener, clicked, closed, removed, failWrite = false, failNotify = false, permission = "granted", sequence = 0, tabQueries = 0;
+  let listener, clicked, closed, removed, alarmListener, alarm, failWrite = false, failNotify = false, permission = "granted", sequence = 0, tabQueries = 0;
   let offset = 0, writeFilter = () => false;
   class Clock extends Date { static now() { return Date.now() + offset; } }
   const event = name => ({ addListener(fn, filter, options) { webEvents[name] = fn; registrations[name] = { filter, options }; } });
@@ -37,6 +37,7 @@ function harness(storage = {}, session = {}, created = []) {
       }
     },
     webRequest: Object.fromEntries(["onBeforeRequest", "onSendHeaders", "onCompleted", "onErrorOccurred"].map(name => [name, event(name)])),
+    alarms: { onAlarm: { addListener(fn) { alarmListener = fn; } }, async get(name) { return alarm?.name === name ? clone(alarm) : null; }, async create(name, info) { alarm = { name, ...info }; }, async clear(name) { if (alarm?.name === name) alarm = null; return true; } },
     notifications: {
       onClicked: { addListener(fn) { clicked = fn; } }, onButtonClicked: { addListener() {} }, onClosed: { addListener(fn) { closed = fn; } },
       async getPermissionLevel() { return permission; },
@@ -48,6 +49,7 @@ function harness(storage = {}, session = {}, created = []) {
       async sendMessage(id, message, options) {
         if (!tabs.has(id) || options.documentId && options.documentId !== documents.get(id)) throw new Error("No matching document");
         if (message?.type === "NOTICE_COMPLETION_PROBE") { probeCalls.push({ id, message, options }); return probes.get(id) || { scope: scopes.get(id), url: tabs.get(id).url, state:"running", hidden:false, generationId:message.turnId, prompt:"", response:"" }; }
+        if (message?.type === "NOTICE_COMPLETION_HINT") { hints.push({ id, message, options }); return { ok:true }; }
         return { scope: scopes.get(id), url: tabs.get(id).url };
       },
       async update(id) { focused.push(id); }, async create(value) { focused.push(value.url); } },
@@ -73,7 +75,7 @@ function harness(storage = {}, session = {}, created = []) {
     await emit("onSendHeaders", details);
   };
   const popup = () => new Promise(resolve => listener({ type:"NOTICE_POPUP" }, { url:"popup.html" }, resolve));
-  return { send, sendUsage, sendProjects, setting, shortcutLimit, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, registrations, created, focused, notificationCalls, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
+  return { send, sendUsage, sendProjects, setting, shortcutLimit, observe, before, emit, popup, storage, session, tabs, scopes, documents, probes, probeCalls, hints, registrations, created, focused, notificationCalls, alarm:()=>alarm, fireAlarm:async()=>{ if(alarmListener&&alarm){ alarmListener(clone(alarm)); await drain(); } }, advance:ms=>{offset+=ms;}, failWrites:fn=>{writeFilter=fn;}, rules:()=>clone(dynamicRules), click: id => clicked(id), closeNotice: (id, byUser) => closed?.(id, byUser), dropNotification: id => { const index = created.findIndex(item => item.id === id); if (index >= 0) created.splice(index,1); }, closeTab: id => {tabs.delete(id); removed?.(id);}, writeFailure: v => {failWrite=v;}, notifyFailure: v=>{failNotify=v;}, permission: v=>{permission=v;}, tabQueryCount: ()=>tabQueries };
 }
 test("startup removes the legacy sidebar blocker and never installs another request rule", async () => {
   const h = harness();
@@ -184,11 +186,27 @@ test("hidden running request stays silent until semantic completion", async () =
   await h.emit("onSendHeaders",request);
   await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(h.created.length,0);
-  assert.equal(Object.keys(h.session).some(key=>key.startsWith("notice:request:")),false);
+  assert.equal(Object.values(h.session).some(value=>value?.turnId==="network-user"&&value.completedAt>0),true);
+  assert.equal(h.hints.length,1);
+  assert.equal(h.alarm()?.name,"notice:completion-probe");
   await h.send({op:"settle",userId:"network-user",notice:{prompt:"后台问题",response:"最终摘要",elapsedMs:2200}});
   assert.equal(h.created.length,1);
+  assert.equal(h.alarm(),null);
   assert.match(h.created[0].message,/最终摘要/);
   assert.equal(Object.values(h.storage).find(value=>value?.kind==="completed")?.kind,"completed");
+});
+test("a nonterminal network probe is retried from an alarm instead of being forgotten", async () => {
+  const h = harness();
+  await h.send({op:"start",userId:"alarm-user"});
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"running",hidden:true,generationId:"alarm-user",prompt:"后台问题",response:""});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"alarm-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,0);assert.equal(h.hints.length,1);assert.ok(h.alarm());
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"alarm-user",prompt:"后台问题",response:"完成"});
+  h.advance(31_000);await h.fireAlarm();
+  assert.equal(h.created.length,1);assert.equal(h.hints.length,2);
+  assert.equal(Object.values(h.session).some(value=>value?.turnId==="alarm-user"),false);
+  assert.equal(h.alarm(),null);
 });
 test("hidden semantic completion publishes only a generic notice without reply preview", async () => {
   const h = harness();
@@ -215,9 +233,9 @@ test("probe timeout alone stays silent instead of guessing completion", async ()
   h.tabs.get(1).frozen = true;
   h.probes.set(1,new Promise(()=>{}));
   await h.emit("onCompleted",{...request,statusCode:200});
-  await new Promise(resolve=>setTimeout(resolve,750));
-  assert.equal(h.probeCalls.length,1);
+  assert.equal(h.probeCalls.length,0);
   assert.equal(h.created.length,0);
+  assert.ok(h.alarm());
 });
 test("pending Queue work suppresses interim network notifications", async () => {
   const h = harness();
