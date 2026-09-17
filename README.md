@@ -54,6 +54,8 @@ gpt-notice 选择从交互源头减量：
 
 这比“硬拦截接口”更稳：原生页面仍然拥有完整控制权，ChatGPT 改接口或返回结构时，扩展不需要伪造一套后端行为。
 
+完整的 Network 调研、不同折叠 / 展开状态对应的请求矩阵，以及为什么最终选择“减少触发而不是拦接口”，见 [ChatGPT Web 侧栏请求行为调研与减量策略](docs/research/chatgpt-sidebar-network.md)。
+
 ## Highlights
 
 | 能力 | gpt-notice 的做法 |
@@ -278,6 +280,7 @@ node scripts/e2e-live-readonly.mjs "<Profile 目录>" "<项目首页 URL>" "<已
 
 ## 设计与文档
 
+- [ChatGPT Web 侧栏请求行为调研与减量策略](docs/research/chatgpt-sidebar-network.md)
 - [范围与来源](docs/scope-v080.md)
 - [通知投递决策 ADR-0006](docs/adr/0006-notification-delivery.md)
 - [隐私说明](PRIVACY.md)
