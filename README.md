@@ -40,6 +40,8 @@ GET /backend-api/gizmos/{projectId}/conversations?...
       请求变多 / 429 风险上升
 ```
 
+一组 2026-09-16 的真实浏览器对比很直观：在同一账号、同一页面版本下，刷新后观察约 10 秒，**使用前（原生“项目”展开）约 63 次 Fetch/XHR；使用 gpt-notice 默认折叠后约 51 次 Fetch/XHR**。这是当时页面版本与缓存状态下的实测样本，不是固定请求数承诺；真正稳定的目标是避免多个项目同时展开造成的 fan-out。
+
 gpt-notice 选择从交互源头减量：
 
 ```text

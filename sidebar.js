@@ -191,12 +191,6 @@
     return rows.find(row => row.querySelector('[data-marquee-text]')?.textContent?.trim() === project.name) || null;
   }
 
-  function nativeMoreTemplate() {
-    const native = sectionRoot(sectionButtons().get("projects"));
-    const button = [...(native?.querySelectorAll("button") || [])].find(value => value.textContent.trim() === "查看更多");
-    return button ? button.cloneNode(true) : null;
-  }
-
   function makeIcon(project) {
     const nativeMain = nativeRowFor(project);
     const nativeIcon = nativeMain?.firstElementChild;
@@ -273,8 +267,10 @@
 
   function moreRow() {
     const li = document.createElement("li"); li.className = "list-none";
-    const native = nativeMoreTemplate(), button = native || document.createElement("button");
-    button.type = "button"; button.className = native?.className || FALLBACK.more; button.textContent = "查看更多";
+    const button = document.createElement("button");
+    button.type = "button"; button.className = FALLBACK.more; button.textContent = "查看更多"; button.style.color = "var(--text-tertiary)";
+    button.onmouseenter = button.onfocus = () => button.style.color = "var(--text-primary)";
+    button.onmouseleave = button.onblur = () => button.style.color = "var(--text-tertiary)";
     button.addEventListener("click", () => { showAll = true; signature = ""; render(lastRaw, lastUrl, lastScope); }); li.append(button); return li;
   }
 

@@ -62,7 +62,9 @@ test("shortcut section defaults to eight rows, popup can change the limit, and n
   const extra = ["d","e","f","1","2","3","4","5"].map((c,i)=>({id:`g-p-${c.repeat(32)}`,short_url:`g-p-${c.repeat(32)}-extra-${i}`,display:{name:i===7?"怪物火车":`extra-${i}`,...(i===7?{}:{emoji:"terminal",theme:"#3A83F7"})}}));
   await page.evaluate(({base,extra})=>localStorage.setItem("cache/regression-user/regression-workspace/snorlax-history",JSON.stringify({timestamp:Date.now(),value:{pages:[{items:[...base,...extra].map(gizmo=>({gizmo:{gizmo}}))}]}})),{base:projects,extra});
   await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(8);
-  await expect(page.locator(`${shortcut} button`,{hasText:"查看更多"})).toBeVisible();
+  const more=page.locator(`${shortcut} button`,{hasText:"查看更多"});await expect(more).toBeVisible();
+  await page.evaluate(()=>{document.documentElement.style.setProperty('--text-tertiary','rgb(128, 128, 128)');document.documentElement.style.setProperty('--text-primary','rgb(255, 255, 255)');});
+  await expect(more).toHaveCSS('color','rgb(128, 128, 128)');await more.hover();await expect(more).toHaveCSS('color','rgb(255, 255, 255)');await page.locator('main').hover();await expect(more).toHaveCSS('color','rgb(128, 128, 128)');
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await expect(popup.locator("#shortcutCount")).toHaveValue("8");await popup.locator("#shortcutCount").fill("4");await popup.locator("#shortcutCount").press("Tab");
   await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(4);await popup.close();
