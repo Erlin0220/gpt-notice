@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const { test, expect } = require("./fixtures");
+const expectedVersion = require("../../manifest.json").version;
 
 test.describe("live ChatGPT read-only smoke", () => {
   test.skip(process.env.GPT_NOTICE_REAL_CHATGPT !== "1", "Enable explicitly with an authenticated test profile.");
@@ -24,6 +25,6 @@ test.describe("live ChatGPT read-only smoke", () => {
       };
     });
     fs.writeFileSync(testInfo.outputPath("storage-redacted.json"), JSON.stringify(diagnostic, null, 2));
-    expect(diagnostic.version).toBe("0.8.0");
+    expect(diagnostic.version).toBe(expectedVersion);
   });
 });

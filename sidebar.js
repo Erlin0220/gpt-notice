@@ -22,7 +22,7 @@
   };
 
   let enabled = null, limit = 8, pendingCollapse = "", previousNewChatKey = "";
-  let cachedRaw = "", cachedProjects = [], documentScope = "", changedAccount = false;
+  let cachedRaw = "", cachedProjects = [], cachedScope = "", documentScope = "", quarantinedScope = "";
   let host = null, body = null, signature = "", expanded = true, showAll = false;
   let lastRaw = null, lastUrl = "", lastScope = "";
 
@@ -291,14 +291,28 @@
   }
 
   function collect(scope, url) {
+    if (cachedScope !== scope) { cachedScope = scope; cachedRaw = ""; cachedProjects = []; }
     const raw = globalThis.ChatGPTPageAdapter.projectCache(scope);
     if (raw !== cachedRaw) { cachedRaw = raw; cachedProjects = P.fromCache(raw); }
     const found = new Map(cachedProjects.map(project => [project.projectId, project]));
-    if (documentScope && documentScope !== scope) changedAccount = true;
+    if (documentScope && documentScope !== scope) quarantinedScope = scope;
     documentScope = scope;
-    if (changedAccount) return [...found.values()];
-    for (const link of document.querySelectorAll('nav a[href*="/project"], header a[href*="/project"]')) {
-      if (link.closest(`#${HOST_ID}`)) continue;
+    const links = [...document.querySelectorAll('nav a[href*="/project"], header a[href*="/project"]')].filter(link => !link.closest(`#${HOST_ID}`));
+    const foreignLink = quarantinedScope === scope && links.some(link => { const parsed = P.route(link.href, location.origin); return parsed && !found.has(parsed.projectId); });
+    if (foreignLink) {
+      const used = new Set();
+      for (const row of nativeRows()) {
+        const name = row.querySelector('[data-marquee-text]')?.textContent?.trim() || "";
+        const match = [...found.values()].find(value => value.name === name && !used.has(value.projectId));
+        const visual = visualOf(row);
+        if (!match || !visual) continue;
+        used.add(match.projectId);
+        found.set(match.projectId, { ...match, visual });
+      }
+      return [...found.values()];
+    }
+    if (quarantinedScope === scope) quarantinedScope = "";
+    for (const link of links) {
       const parsed = P.route(link.href, location.origin), label = link.querySelector('[data-marquee-text], .truncate');
       const name = (label?.textContent || link.getAttribute("title") || link.textContent || "").trim();
       const project = parsed && P.normalize({ ...parsed, name });

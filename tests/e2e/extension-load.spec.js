@@ -165,6 +165,16 @@ test("queued follow-up wakes promptly after stale Stop is reconciled in a hidden
   await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:2500}).toBe(2);
   expect(await page.evaluate(()=>window.sent[1].text)).toBe("queued after stale stop");await foreground.close();
 });
+test("network-confirmed completion advances Queue in the same hidden-tab wake without waiting for another timer",async({page,persistentContext})=>{
+  test.setTimeout(20000);
+  await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(resolve=>setTimeout(resolve,1800));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});
+  await page.goto("https://chatgpt.com/c/background-same-wake");await expect(button(page,"add")).toBeVisible();await page.evaluate(()=>window.autoReply=false);
+  await page.locator("#prompt-textarea").fill("background completion wake");await page.locator("#composer-submit-button").click();await enqueue(page,"send without foregrounding completed tab");
+  const foreground=await persistentContext.newPage();await foreground.goto("https://chatgpt.com/c/foreground-holder");await foreground.bringToFront();
+  await page.waitForTimeout(700);await page.evaluate(()=>window.finish("semantically complete before transport closes"));
+  await expect.poll(()=>page.evaluate(()=>window.sent.length),{timeout:2800,intervals:[100,150,250]}).toBe(2);
+  expect(await page.evaluate(()=>window.sent[1].text)).toBe("send without foregrounding completed tab");await foreground.close();
+});
 test("transport completion without native final controls never releases Queue",async({page,persistentContext,extensionServiceWorker})=>{
   test.setTimeout(40000);
   await page.route("https://chatgpt.com/backend-api/f/conversation",async route=>{await new Promise(r=>setTimeout(r,1500));await route.fulfill({status:200,contentType:"text/event-stream",body:"data: [DONE]\n\n"});});

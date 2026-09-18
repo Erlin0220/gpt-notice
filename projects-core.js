@@ -6,7 +6,6 @@
   "use strict";
   const PREFIX = "notice:projects:";
   const clean = (value, max) => typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
-  // Observed native project identifiers, not a guessed slug/name conversion.
   function route(value, origin = "https://chatgpt.com") {
     try {
       const url = new URL(value, origin);
@@ -47,7 +46,7 @@
       }).filter(Boolean);
     } catch { return []; }
   }
-  function merge(raw, observations = [], now = Date.now()) {
+  function merge(raw, observations = [], now = Date.now(), promote = "") {
     if (raw && (raw.version !== 1 || !Array.isArray(raw.items))) throw new Error("项目快捷数据版本不兼容，未覆盖原数据");
     if (!Array.isArray(observations) || observations.length > 500) throw new Error("项目观察数量无效");
     const items = new Map((raw?.items || []).map(p => [p.projectId, p]));
@@ -56,14 +55,15 @@
       const value = normalize(observation);
       if (!value) continue;
       const old = items.get(value.projectId);
-      // A stale native cache must not undo a newer title seen on a project page.
       if (value.observedAt && old?.observedAt > value.observedAt) continue;
       const next = { ...old, ...value, observedAt: value.observedAt || now };
       if (old && value.observedAt && (old.emoji !== value.emoji || old.theme !== value.theme) && !value.visual) delete next.visual;
       if (old && ["shortUrl", "name", "emoji", "theme"].every(k => old[k] === next[k]) && JSON.stringify(old.visual || null) === JSON.stringify(next.visual || null)) continue;
       items.set(value.projectId, next); changed = true;
     }
-    return { state: changed ? { version: 1, revision: (raw?.revision || 0) + 1, items: [...items.values()] } : raw, changed };
+    const ordered = [...items.values()], index = ordered.findIndex(item => item.projectId === promote);
+    if (index > 0) { ordered.unshift(...ordered.splice(index, 1)); changed = true; }
+    return { state: changed ? { version: 1, revision: (raw?.revision || 0) + 1, items: ordered } : raw, changed };
   }
   return { PREFIX, route, normalize, fromCache, merge };
 });

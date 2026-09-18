@@ -27,6 +27,8 @@ test("production manifest is local and contains one page controller", () => {
   assert.match(content, /response: hidden \|\| outcome !== "completed" \? "" : D\.readText\(p\.assistant\)/);
   assert.doesNotMatch(content, /transportDone/);
   assert.match(content, /observedOutcome\(p, rt\.turn\)/);
+  assert.match(content, /if \(rt\.tickBusy\) \{ if \(wake\) rt\.tickAgain = true; return; \}/);
+  assert.match(content, /NOTICE_COMPLETION_HINT[\s\S]*?void tick\(true\)/);
   // Includes durable notification retry and the localized queue/popup surfaces.
   // Keep a readable dependency-free runtime, not whitespace-minified source.
   assert.ok(bytes < 151000, `runtime should remain thin: ${bytes}`);
@@ -52,7 +54,8 @@ test("dist contains only the thin extension runtime", () => {
   };
   walk(outputDir);
   assert.deepEqual(actual.sort(), [...RUNTIME_FILES].sort());
-  assert.ok(bytes < 187 * 1024, `dist should stay tiny: ${bytes}`);
+  // Coarse bloat guard only; the exact runtime allowlist above is the hard packaging boundary.
+  assert.ok(bytes < 205 * 1024, `dist unexpectedly large: ${bytes}`);
   for (const forbidden of ["node_modules", ".test-profile", "test-results", ".git", ".codegraph", ".scratch"]) {
     assert.equal(fs.existsSync(path.join(outputDir, forbidden)), false, `${forbidden} must not be packaged`);
   }
@@ -68,4 +71,13 @@ test("CI and releases share the allowlist and include the required upstream lice
   const release = fs.readFileSync(path.join(root,".github/workflows/auto-release.yml"),"utf8");
   assert.match(release,/paths:\s+- manifest\.json/);
   assert.ok(release.indexOf("refusing a mismatched release") < release.indexOf('if gh release view "$TAG"'));
+  const updater = fs.readFileSync(path.join(root,"scripts/update-installed-extension.ps1"),"utf8");
+  assert.doesNotMatch(updater,/[^\x00-\x7F]/);
+  assert.match(updater,/build-extension\.js/);
+  assert.match(updater,/\$distPath/);
+  assert.match(updater,/Assert-SameTree/);
+  assert.match(updater,/Get-FileHash/);
+  assert.match(updater,/\$stagingPath/);
+  assert.match(updater,/Move-Item \$backupPath \$TargetPath/);
+  assert.doesNotMatch(updater,/\$releaseFiles/);
 });

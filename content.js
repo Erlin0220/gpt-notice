@@ -1,13 +1,13 @@
 (() => {
   "use strict";
   if (globalThis.ChatGPTNotice) return;
-  const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage;
+  const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage, P = globalThis.ChatGPTProjects;
   const QUEUE_SETTING = "notice:queue-enabled";
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
-    tickBusy: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
+    tickBusy: false, tickAgain: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
     pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false,
-    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, notificationRetryAt: 0, notificationError: "", completionHint: null };
+    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, projectPromote: null, notificationRetryAt: 0, notificationError: "", completionHint: null };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
@@ -64,9 +64,11 @@
     try {
       const projects = globalThis.ChatGPTSidebar.collect(context.scope, context.url);
       const signature = JSON.stringify(projects);
-      if (rt.projects && signature === rt.projectSignature) return;
-      const reply = await sendRuntime({ type: "NOTICE", scope: context.scope, url: context.url, projects }, "项目快捷访问暂不可用");
+      const promote = rt.projectPromote?.scope === context.scope ? rt.projectPromote.id : "";
+      if (rt.projects && signature === rt.projectSignature && !promote) return;
+      const reply = await sendRuntime({ type: "NOTICE", scope: context.scope, url: context.url, projects, promoteProjectId: promote }, "项目快捷访问暂不可用");
       accept(reply, context);
+      if (promote && reply.projects?.items?.[0]?.projectId === promote && rt.projectPromote?.scope === context.scope && rt.projectPromote.id === promote) rt.projectPromote = null;
       if (current(context)) { rt.projectSignature = signature; render(); }
     } catch { /* Auxiliary metadata failure must never strand Queue or completion. */ }
     finally { rt.projectBusy = false; }
@@ -101,11 +103,10 @@
       if (page.empty) return;
       rt.completionHint = null;
       if (rt.attempt) rt.attempt.submitted = true;
-      rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage" };
+      rt.pending = { at: Date.now(), baseline: rt.page?.userId || "", fromUsage: Q.route(location.href).mode === "usage", project: P.route(location.href, location.origin)?.projectId, text: Q.comparable(D.readText(page.composer)) };
       rt.quietAt = Date.now();
       if (rt.queueEnabled && !rt.sending && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold", baseline: page.userId }).catch(() => {});
     }
-    // Observation only: never preventDefault, replace handlers, patch history or fetch.
   }
   for (const type of ["click", "keydown", "submit"]) document.addEventListener(type, submission, { capture: true, signal: events.signal });
   for (const type of ["beforeinput", "input", "compositionstart", "compositionend", "pointerdown"]) document.addEventListener(type, event => {
@@ -150,7 +151,7 @@
     if (message?.type === "NOTICE_COMPLETION_HINT") {
       rt.completionHint = { scope: message.scope, id: message.turnId, at: message.at };
       if (rt.turn?.id === message.turnId && rt.context?.scope === message.scope) rt.turn.networkAt = message.at;
-      reply({ ok: true }); void tick(); return;
+      reply({ ok: true }); void tick(true); return;
     }
     if (message?.type === "NOTICE_SCOPE") {
       const url = location.href;
@@ -178,8 +179,9 @@
   };
   chrome.runtime.onMessage.addListener(runtimeListener);
 
-  async function tick() {
-    if (rt.tickBusy || rt.disposed) return;
+  async function tick(wake = false) {
+    if (rt.disposed) return;
+    if (rt.tickBusy) { if (wake) rt.tickAgain = true; return; }
     rt.tickBusy = true;
     try {
       runtime();
@@ -211,9 +213,11 @@
       }
       rt.page = p;
       try { globalThis.ChatGPTSidebar.sample(url); } catch {}
+      const now = Date.now();
+      const pendingSubmission = Boolean(rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline);
+      if (route.mode === "conversation" && pendingSubmission && rt.pending?.project && rt.pending.text && Q.comparable(D.readText(p.user)) === rt.pending.text) rt.projectPromote = { scope, id: rt.pending.project };
       void refreshProjects(rt.context);
       if (scope && (!rt.usage || route.mode === "conversation" && !rt.queue)) await request({ op: "get" });
-      const now = Date.now();
       if (scope && route.mode === "conversation" && rt.notificationRetryAt && now >= rt.notificationRetryAt) await request({ op: "get" });
       if (scope && rt.usage?.resetAt && now >= rt.usage.resetAt) await request(null, rt.context, { op: "get" });
       if (!scope || route.mode !== "conversation") { render(); return; }
@@ -226,13 +230,9 @@
         const node = D.receipt(item, p);
         if (node) await request({ op: "receipt", id: item.id, claim: item.claim, userId: D.messageId(node), text: D.readText(node) });
       }
-      // The native user turn may render attachment/file chips or other metadata
-      // that was not present in the composer text. The captured native submit
-      // event plus a new user message in the same live conversation is enough
-      // to begin completion tracking; Queue delivery still requires its stricter
-      // text-matching receipt below and therefore cannot be acknowledged here.
+      // Native turns may add attachment metadata; Queue receipts still require exact text.
       const durableSubmission = Boolean(rt.queue?.holdUntil && (!rt.queue?.turn || rt.queue.turn.done) && rt.queue.holdBaseline && p.userId && p.userId !== rt.queue.holdBaseline);
-      const confirmedSubmission = Boolean(rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline || durableSubmission);
+      const confirmedSubmission = Boolean(pendingSubmission || durableSubmission);
       const storedTurn = rt.queue?.turn;
       const storedUser = storedTurn?.userId || storedTurn?.id;
       const resume = storedTurn && !storedTurn.done && storedUser === p.userId;
@@ -266,11 +266,7 @@
       if (active && p.userId === active.id && D.generationMatches(active.generationId, p)) {
         const outcome = observedOutcome(p, active, now);
         if (!active.counted && outcome === "completed" && U.MODELS.has(p.model)) {
-          // A model label can be rendered optimistically before any request is
-          // sent. Only a confirmed completed answer is a safe DOM fallback.
-          // Usage is auxiliary accounting. A storage/validation failure must not
-          // strand the completion state machine or block the next Queue item.
-          // Prefer a visible undercount to delaying the user's conversation.
+          // Count only confirmed completed replies; usage failures must not block Queue.
           try {
             await request(null, rt.context, { op: "record", turnId: active.id, model: p.model, at: active.at });
             active.counted = true;
@@ -281,7 +277,7 @@
           await request({ op: outcome === "attention" ? "attention" : "settle", userId: active.id, generationId: active.generationId, assistantId: p.assistantId, outcome, suppressNotify: Boolean(active.recovered),
             notice: { prompt: D.readText(p.user).slice(0, 1000), response: hidden || outcome !== "completed" ? "" : D.readText(p.assistant).slice(0, 1000), elapsedMs: Math.max(0, now - active.at), hidden } });
           if (outcome !== "attention") {
-            rt.turn = null; rt.stopped = ""; if (rt.completionHint?.id === active.id && (rt.queue?.paused || !rt.queue?.items.length)) rt.completionHint = null; if (outcome !== "completed") rt.quietAt = now;
+            rt.turn = null; rt.stopped = ""; if (rt.completionHint?.id === active.id && (rt.queue?.paused || !rt.queue?.items.length)) rt.completionHint = null; rt.quietAt = ["completed", "recoverable"].includes(outcome) ? 0 : now;
           }
         }
       }
@@ -290,7 +286,10 @@
     } catch (error) {
       // Missing adapters, storage failures and route races do not fall back to sending.
       render(error.message);
-    } finally { rt.tickBusy = false; }
+    } finally {
+      rt.tickBusy = false;
+      if (rt.tickAgain) { rt.tickAgain = false; void tick(true); }
+    }
   }
 
   function errorAllowsNext(p) {
@@ -385,8 +384,8 @@
       else if (name === "resolve-retry" || name === "resolve-remove") await request({ op: "resolve", id: payload.id, confirmed: true, retry: name === "resolve-retry" }, context);
     } finally { rt.actionBusy = false; render(); }
   }
-  for (const type of ["popstate", "pageshow"]) addEventListener(type, () => void tick(), { signal: events.signal });
-  for (const type of ["visibilitychange", "resume"]) document.addEventListener(type, () => void tick(), { signal: events.signal });
+  for (const type of ["popstate", "pageshow"]) addEventListener(type, () => void tick(true), { signal: events.signal });
+  for (const type of ["visibilitychange", "resume"]) document.addEventListener(type, () => void tick(true), { signal: events.signal });
   globalThis.ChatGPTNotice = { dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; } };
   void (async () => {
     try {

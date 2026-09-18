@@ -202,7 +202,7 @@ async function handle(message, sender) {
     await chrome.storage.local.set({ [key]: value });
     if (message.feature === "notifications" && !value) {
       const stored = await chrome.storage.local.get(null), writes = {};
-      for (const [k, n] of Object.entries(stored)) if (k.startsWith("notice:notification:") && n?.pendingKind) { delete n.pendingKind; writes[k] = n; }
+      for (const [k, n] of Object.entries(stored)) if (k.startsWith("notice:notification:") && n?.pendingKind) { delete n.pendingKind; delete n.pendingOutcome; writes[k] = n; }
       if (Object.keys(writes).length) await chrome.storage.local.set(writes);
     }
     return { ok: true, settings: await featureSettings() };
@@ -217,7 +217,7 @@ async function handle(message, sender) {
   if (message.projects) {
     const key = Projects.PREFIX + message.scope;
     const stored = await chrome.storage.local.get(key);
-    const result = Projects.merge(stored[key], message.projects);
+    const result = Projects.merge(stored[key], message.projects, Date.now(), message.promoteProjectId);
     if (result.changed) await chrome.storage.local.set({ [key]: result.state });
     return { ok: true, projects: result.state };
   }
@@ -264,14 +264,14 @@ async function handle(message, sender) {
   const queueFinal = result.state.items.length === 0 && result.state.receipts.some(r => r.userId === command.userId);
   const publication = result.notify ? completionPublication(result.outcome || "completed", command.notice?.hidden === true, { ...command.notice, queueFinal }) : null;
   const notificationId = publication ? noticeId(message.scope, route.id, command.generationId || command.userId, publication.kind) : "";
-  const intent = notificationId && stored["notice:notifications"] !== false ? await noticeIntent(notificationId, { url: route.url, scope: message.scope, tabId: sender.tab.id, queueFinal, elapsedMs: Math.max(0, Date.now() - (result.state.turn?.at || Date.now())) }, publication.kind) : null;
+  const intent = notificationId && stored["notice:notifications"] !== false ? await noticeIntent(notificationId, { url: route.url, scope: message.scope, tabId: sender.tab.id, queueFinal, elapsedMs: Math.max(0, Date.now() - (result.state.turn?.at || Date.now())) }, publication.kind, result.outcome || command.outcome || "completed") : null;
   // Queue finality and the minimal notification intent commit together. No
   // prompt or reply text is persisted, including during failure recovery.
   if (intent) writes[noticeKey(notificationId)] = intent;
   if (!result.conflict && (command.op === "stop" || command.op === "settle" && result.state.turn?.done)) {
     const key = noticeKey(noticeId(message.scope, route.id, command.generationId || command.userId, "attention"));
     const n = (await chrome.storage.local.get(key))[key];
-    if (n?.pendingKind) { delete n.pendingKind; writes[key] = n; }
+    if (n?.pendingKind) { delete n.pendingKind; delete n.pendingOutcome; writes[key] = n; }
   }
   if (Object.keys(writes).length) await chrome.storage.local.set(writes);
   let notificationError = "";
@@ -291,7 +291,7 @@ const noticeKey = id => `notice:notification:${id}`;
 // legacy completion ID for generic -> rich enrichment, separate other events.
 const noticeId = (scope, routeId, generationId, kind) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}${["attention", "failed"].includes(kind) ? `|${kind}` : ""}`;
 
-async function noticeIntent(id, routing, kind) {
+async function noticeIntent(id, routing, kind, outcome = kind) {
   const key = noticeKey(id);
   const stored = await chrome.storage.local.get([key, "notice:notifications"]);
   if (stored["notice:notifications"] === false) return null;
@@ -299,10 +299,10 @@ async function noticeIntent(id, routing, kind) {
   // attention record is not proof that its later successful result was read.
   const previous = ["generic", "completed"].includes(kind) && ["attention", "failed"].includes(stored[key]?.kind) ? null : stored[key];
   if (previous?.dismissedAt || previous?.closedAt || previous?.consumedAt || (NOTICE_RANK[previous?.kind] || 0) >= (NOTICE_RANK[kind] || 0)) return null;
-  return { ...previous, ...routing, at: previous?.at || Date.now(), pendingKind: kind };
+  return { ...previous, ...routing, at: previous?.at || Date.now(), pendingKind: kind, pendingOutcome: outcome };
 }
-async function publishNotice(id, routing, payload, kind) {
-  const intent = await noticeIntent(id, routing, kind);
+async function publishNotice(id, routing, payload, kind, outcome = kind) {
+  const intent = await noticeIntent(id, routing, kind, outcome);
   if (!intent) return "";
   await chrome.storage.local.set({ [noticeKey(id)]: intent });
   return deliverNotice(id, intent, payload);
@@ -322,7 +322,7 @@ async function deliverNotice(id, record, payload) {
     const updated = await chrome.notifications.update(id, { ...options, silent: true });
     if (!updated) await chrome.notifications.create(id, options);
     const delivered = { ...record, kind: record.pendingKind };
-    delete delivered.pendingKind; delete delivered.retryAt;
+    delete delivered.pendingKind; delete delivered.pendingOutcome; delete delivered.retryAt;
     await chrome.storage.local.set({ [key]: delivered });
     return "";
   } catch (error) {
@@ -336,7 +336,7 @@ async function retryNotices(scope, url) {
   if (stored["notice:notifications"] === false) return error;
   for (const [key, n] of Object.entries(stored)) {
     if (!key.startsWith("notice:notification:") || !n?.pendingKind || n.dismissedAt || n.scope !== scope || Queue.route(n.url).id !== Queue.route(url).id) continue;
-    const outcome = n.pendingKind === "generic" ? "completed" : n.pendingKind;
+    const outcome = n.pendingOutcome || (n.pendingKind === "generic" ? "completed" : n.pendingKind);
     const publication = completionPublication(outcome, true, n);
     if (publication) error = await deliverNotice(key.slice("notice:notification:".length), n, publication.payload) || error;
   }
@@ -346,7 +346,7 @@ async function retryNotices(scope, url) {
 async function markNoticeClosed(id) {
   const key = noticeKey(id);
   const notice = (await chrome.storage.local.get(key))[key];
-  if (notice && !notice.dismissedAt) { delete notice.pendingKind; await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } }); }
+  if (notice && !notice.dismissedAt) { delete notice.pendingKind; delete notice.pendingOutcome; await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } }); }
 }
 
 async function completionProbe(observation, route) {
@@ -413,7 +413,7 @@ async function probeCompletedRequest(key, observation) {
   const publication = completionPublication(probe?.state, probe?.hidden === true, { prompt: probe?.prompt, response: probe?.response, elapsedMs, queueFinal });
   if (!publication) return true;
   const id = noticeId(observation.scope, route.id, observation.turnId, publication.kind);
-  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind);
+  await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind, probe?.state || "completed");
   await chrome.storage.session.remove(key); await pruneNotices().catch(() => {});
   return false;
 }
@@ -453,6 +453,7 @@ async function openNotice(id) {
     await chrome.tabs.create({ url: notice.url, active: true });
   }
   delete notice.pendingKind;
+  delete notice.pendingOutcome;
   await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } });
   await chrome.notifications.clear(id);
 }

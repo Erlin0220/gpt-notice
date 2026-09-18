@@ -40,6 +40,20 @@ test("project merge is idempotent, updates names and short URLs, retains absent 
   assert.throws(()=>P.merge({version:2,items:[]},[]),/不兼容/);
   assert.throws(()=>P.merge(state,new Array(501)),/数量/);
 });
+test("project merge can promote a newly used project without changing metadata", () => {
+  const first = `g-p-${"3".repeat(32)}`, second = `g-p-${"4".repeat(32)}`;
+  const observations = [
+    {projectId:first,shortUrl:`${first}-first`,name:"First"},
+    {projectId:second,shortUrl:`${second}-second`,name:"Second"}
+  ];
+  const state = P.merge(undefined, observations, at).state;
+  const promoted = P.merge(state, [], at + 1, second);
+  assert.equal(promoted.changed, true);
+  assert.deepEqual(promoted.state.items.map(item => item.projectId), [second, first]);
+  assert.equal(promoted.state.items[0].name, "Second");
+  assert.equal(P.merge(promoted.state, [], at + 2, second).changed, false);
+  assert.equal(P.merge(promoted.state, [], at + 3, `g-p-${"5".repeat(32)}`).changed, false);
+});
 
 test("route keys only exist for stable formal conversations, independent of tab and project label", () => {
   for (const path of ["/", "/g/g-p-one/project", "/g/project-two/project", "/c/WEB:temporary", "/share/abc", "/plugins"]) assert.equal(Q.key(scope, "https://chatgpt.com" + path), "");

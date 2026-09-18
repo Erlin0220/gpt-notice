@@ -59,7 +59,7 @@ function harness(storage = {}, session = {}, created = []) {
   const sender = tabId => ({tab:tabs.get(tabId),url:tabs.get(tabId)?.url,documentId:`doc-${tabId}`,frameId:0});
   const send = (command, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,command}, sender(tabId), resolve));
   const sendUsage = (usage, tabId = 1) => new Promise(resolve => listener({type:"NOTICE",scope,url:"https://chatgpt.com/c/a",instance:`instance-${tabId}`,usage}, sender(tabId), resolve));
-  const sendProjects = (projects, tabId = 1, requestedScope = scope) => new Promise(resolve => listener({type:"NOTICE",scope:requestedScope,url:tabs.get(tabId).url,projects}, sender(tabId), resolve));
+  const sendProjects = (projects, tabId = 1, requestedScope = scope, promoteProjectId = "") => new Promise(resolve => listener({type:"NOTICE",scope:requestedScope,url:tabs.get(tabId).url,projects,promoteProjectId}, sender(tabId), resolve));
   const setting = (feature, enabled) => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature,enabled}, {url:"popup.html"}, resolve));
   const shortcutLimit = value => new Promise(resolve => listener({type:"NOTICE_FEATURE_SETTING",feature:"shortcutCount",value}, {url:"popup.html"}, resolve));
   const reloadActive = () => new Promise(resolve => listener({type:"NOTICE_RELOAD_ACTIVE"}, {url:"popup.html"}, resolve));
@@ -141,6 +141,17 @@ test("projects persist with account isolation, no deletion on partial observatio
   restart.scopes.set(1, "b".repeat(64));
   assert.equal((await restart.sendProjects([])).ok, false);
   assert.deepEqual((await restart.sendProjects([], 1, "b".repeat(64))).projects.items, []);
+});
+test("project observations can promote an existing shortcut through the service worker writer", async () => {
+  const h = harness(), first = `g-p-${"c".repeat(32)}`, second = `g-p-${"d".repeat(32)}`;
+  await h.sendProjects([
+    {projectId:first,shortUrl:`${first}-first`,name:"First"},
+    {projectId:second,shortUrl:`${second}-second`,name:"Second"}
+  ]);
+  const reply = await h.sendProjects([], 1, scope, second);
+  assert.equal(reply.ok, true);
+  assert.deepEqual(reply.projects.items.map(item => item.projectId), [second, first]);
+  assert.deepEqual(h.storage[P.PREFIX + scope].items.map(item => item.projectId), [second, first]);
 });
 test("service worker serializes concurrent claims and persists intent", async () => {
   const h = harness();
@@ -359,6 +370,15 @@ test("settle notification failure survives the completed turn and retries withou
   assert.equal((await h.send({op:"get"})).notificationError,"");assert.equal(h.created.length,1);
   assert.equal(Object.values(h.storage).some(n=>n?.pendingKind),false);
   await h.send({op:"get"});assert.equal(h.created.length,1);
+});
+test("blocked notification retry preserves the original blocking reason", async () => {
+  const h=harness();await h.send({op:"start",userId:"blocked-retry"});h.notifyFailure(true);
+  const reply=await h.send({op:"settle",userId:"blocked-retry",outcome:"blocked",notice:{hidden:true}});
+  assert.ok(reply.notificationError);
+  const pending=Object.values(h.storage).find(n=>n?.pendingKind);assert.equal(pending.pendingKind,"failed");assert.equal(pending.pendingOutcome,"blocked");
+  h.notifyFailure(false);h.advance(11000);await h.send({op:"get"});
+  assert.equal(h.created.length,1);assert.match(h.created[0].message,/限额、策略或账号受限/);
+  assert.equal(Object.values(h.storage).some(n=>n?.pendingOutcome),false);
 });
 test("completion and notification intent share one storage write", async () => {
   const h=harness();await h.send({op:"start",userId:"atomic"});

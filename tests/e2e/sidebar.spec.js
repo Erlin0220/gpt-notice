@@ -110,6 +110,61 @@ test("projects survive refresh; names open in place while compose opens a new pr
   const before=await revision();await page.waitForTimeout(3500);expect(await revision()).toBe(before);
 });
 
+test("creating a conversation in a project promotes that shortcut to the top", async ({page,extensionServiceWorker}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-promote?sidebar-poc=1");
+  await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
+  await expect(page.locator(`${shortcut} [data-project-id]`).first()).toHaveAttribute("data-project-id", ids[0]);
+
+  await page.evaluate(path => window.routeTo(path), `/g/${projects[1].short_url}/project`);
+  await page.locator("#prompt-textarea").fill("new project conversation");
+  await page.locator("#composer-submit-button").click();
+  await expect(page).toHaveURL(new RegExp(`/g/${projects[1].short_url}/c/project-first$`));
+  await expect(page.locator(`${shortcut} [data-project-id]`).first()).toHaveAttribute("data-project-id", ids[1]);
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId?.startsWith("g-p-")))?.items?.[0]?.projectId||"" )).toBe(ids[1]);
+});
+
+test("project first send still promotes when ChatGPT exposes a plain conversation route first", async ({page,extensionServiceWorker}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-promote-intermediate?sidebar-poc=1");
+  await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
+  await page.evaluate(({path}) => { window.routeTo(path); window.projectFirstIntermediate = true; }, {path:`/g/${projects[1].short_url}/project`});
+  await page.locator("#prompt-textarea").fill("new project conversation with intermediate route");
+  await page.locator("#composer-submit-button").click();
+  await expect(page).toHaveURL(/\/c\/project-first$/);
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId?.startsWith("g-p-")))?.items?.[0]?.projectId||"" )).toBe(ids[1]);
+});
+
+test("a failed project send followed by manual navigation does not promote the project", async ({page,extensionServiceWorker}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-promote-cancelled?sidebar-poc=1");
+  await expect(page.locator(`${shortcut} [data-project-id]`).first()).toHaveAttribute("data-project-id", ids[0]);
+  await page.evaluate(path => window.routeTo(path), `/g/${projects[1].short_url}/project`);
+  await page.evaluate(()=>window.clickDrops=true);
+  await page.locator("#prompt-textarea").fill("this send never leaves the project page");
+  await page.locator("#composer-submit-button").click();
+  await page.evaluate(()=>window.routeTo("/c/existing-manual-navigation"));
+  await page.waitForTimeout(1500);
+  await expect(page.locator(`${shortcut} [data-project-id]`).first()).toHaveAttribute("data-project-id", ids[0]);
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId?.startsWith("g-p-")))?.items?.[0]?.projectId||"" )).toBe(ids[0]);
+});
+
+test("project promotion survives an in-flight project refresh", async ({page,extensionServiceWorker}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-promote-race?sidebar-poc=1");
+  await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
+  await extensionServiceWorker.evaluate(()=>{
+    const original=chrome.storage.local.get.bind(chrome.storage.local);let delayed=false;
+    chrome.storage.local.get=async keys=>{
+      const values=Array.isArray(keys)?keys:[keys];
+      if(!delayed&&values.some(key=>typeof key==="string"&&key.startsWith("notice:projects:"))){delayed=true;globalThis.__projectGetStarted=true;await new Promise(resolve=>setTimeout(resolve,1800));}
+      return original(keys);
+    };
+  });
+  await page.evaluate(path => window.routeTo(path), `/g/${projects[1].short_url}/project`);
+  await expect.poll(()=>extensionServiceWorker.evaluate(()=>Boolean(globalThis.__projectGetStarted))).toBe(true);
+  await page.locator("#prompt-textarea").fill("promotion must survive busy refresh");
+  await page.locator("#composer-submit-button").click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId?.startsWith("g-p-")))?.items?.[0]?.projectId||"" ),{timeout:6000}).toBe(ids[1]);
+  await expect(page.locator(`${shortcut} [data-project-id]`).first()).toHaveAttribute("data-project-id", ids[1]);
+});
+
 test("native project cache changes update name and URL without erasing other projects, and SPA account switches do not copy old DOM", async ({page,extensionServiceWorker}) => {
   await page.goto("https://chatgpt.com/c/sidebar-updates");
   await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
@@ -127,6 +182,19 @@ test("native project cache changes update name and URL without erasing other pro
   const sets=await extensionServiceWorker.evaluate(async()=>Object.entries(await chrome.storage.local.get(null)).filter(([key])=>key.startsWith("notice:projects:")).map(([,value])=>value.items));
   expect(sets.map(items=>items.length).sort()).toEqual([0,3]);
   expect(JSON.stringify(sets)).not.toContain("Old account DOM");
+
+  const nextId=`g-p-${"d".repeat(32)}`;
+  await page.evaluate(({nextId})=>{
+    localStorage.removeItem("cache/regression-user/regression-workspace/snorlax-history");
+    localStorage.setItem("cache/regression-user/other-workspace/snorlax-history",JSON.stringify({timestamp:Date.now(),value:{pages:[{items:[{gizmo:{gizmo:{id:nextId,short_url:`${nextId}-other`,display:{name:"Other workspace project",emoji:"heart",theme:"#FA423E"}}}}]}]}}));
+    window.renderNativeProjects();
+  },{nextId});
+  await expect(page.locator(`${shortcut} [data-project-id="${nextId}"]`)).toHaveCount(1);
+  await expect.poll(()=>extensionServiceWorker.evaluate(async nextId=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId===nextId))?.items.find(item=>item.projectId===nextId)?.visual||null,nextId)).toEqual({sprite:"core",symbol:"a1bba7",color:"rgb(255, 103, 100)"});
+  await page.evaluate(()=>document.querySelector('nav a[href*="-secret/project"]')?.remove());
+  await page.waitForTimeout(1200);
+  await page.evaluate(({nextId})=>{const a=document.createElement("a");a.href=`/g/${nextId}-fresh/project`;a.title="Fresh workspace project";document.querySelector("nav").append(a);},{nextId});
+  await expect.poll(()=>extensionServiceWorker.evaluate(async nextId=>Object.values(await chrome.storage.local.get(null)).find(value=>value?.items?.some(item=>item.projectId===nextId))?.items.find(item=>item.projectId===nextId)?.shortUrl||"",nextId)).toBe(`${nextId}-fresh`);
 });
 
 test("sidebar fallback remains navigable and collapse does not depend on sprite loading", async ({page}) => {
