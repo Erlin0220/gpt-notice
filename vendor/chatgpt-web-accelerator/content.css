@@ -1,0 +1,48 @@
+/* ChatGPT Web Accelerator - Content Style */
+
+/* Core virtualization class */
+.chatgpt-accelerator-hidden {
+  content-visibility: hidden !important;
+}
+
+/* Force hardware acceleration on active elements during scrolling */
+.chatgpt-accelerator-gpu {
+  will-change: transform, opacity;
+}
+
+/* Debug Mode Styles - Visual feedback for virtualized blocks */
+.chatgpt-accelerator-debug [data-testid^="conversation-turn-"],
+.chatgpt-accelerator-debug article {
+  position: relative;
+  transition: outline 0.2s ease;
+}
+
+.chatgpt-accelerator-debug [data-testid^="conversation-turn-"]::after,
+.chatgpt-accelerator-debug article::after {
+  content: "● ACTIVE (Rendered)";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(16, 185, 129, 0.9); /* emerald-500 */
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: bold;
+  padding: 3px 8px;
+  border-radius: 12px;
+  z-index: 50;
+  font-family: 'Outfit', 'Inter', -apple-system, sans-serif;
+  pointer-events: none;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.chatgpt-accelerator-debug .chatgpt-accelerator-hidden {
+  outline: 2px dashed #ef4444 !important; /* red-500 */
+  outline-offset: -2px;
+}
+
+.chatgpt-accelerator-debug .chatgpt-accelerator-hidden::after {
+  content: "○ VIRTUALIZED (Hidden)";
+  background: rgba(239, 68, 68, 0.9); /* red-500 */
+  color: #ffffff;
+}
+

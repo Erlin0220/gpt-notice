@@ -86,7 +86,7 @@ test("startup removes the legacy sidebar blocker and never installs another requ
 test("popup feature switches persist independently without changing network behavior", async () => {
   const h = harness();
   let popup = await h.popup();
-  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:true, notifications:true });
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, toolFold:true, queue:true, notifications:true });
   assert.equal(h.rules().length, 0);
 
   let result = await h.setting("sidebarCollapse", false);
@@ -98,6 +98,9 @@ test("popup feature switches persist independently without changing network beha
   result = await h.setting("queue", false);
   assert.equal(result.settings.queue, false);
   assert.equal(h.storage["notice:queue-enabled"], false);
+  result = await h.setting("toolFold", false);
+  assert.equal(result.settings.toolFold, false);
+  assert.equal(h.storage["notice:tool-fold-enabled"], false);
   result = await h.setting("notifications", false);
   assert.equal(result.settings.notifications, false);
   assert.equal(h.storage["notice:notifications"], false);
@@ -109,7 +112,7 @@ test("popup feature switches persist independently without changing network beha
   assert.equal(result.ok, true);
   assert.equal(h.storage["notice:shortcut-project-limit"], 12);
   popup = await h.popup();
-  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, queue:false, notifications:false });
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, toolFold:false, queue:false, notifications:false });
 });
 test("popup can explicitly refresh the active ChatGPT page when its content script is stale", async () => {
   const h = harness();

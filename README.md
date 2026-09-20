@@ -65,6 +65,8 @@ gpt-notice 选择从交互源头减量：
 | **减少侧栏请求** | 新聊天默认折叠置顶 / 项目 / 聊天，降低多项目同时展开产生的请求扇出 |
 | **项目快捷访问** | 从 ChatGPT 已经加载的数据中逐步学习项目，不额外批量请求项目详情 |
 | **原生体验优先** | 不创建第二个输入框，不接管 Send / Stop / 模型 / 附件 |
+| **长对话性能优化** | 直接复用固定版本的 ChatGPT Web Accelerator，用实测高度占位并虚拟化离屏 turn，避免自研裁剪算法 |
+| **工具调用折叠** | 工具调用跟随原生“思考了 …”一起展开 / 收起，完成后保持原生默认折叠；面板开关可独立关闭 |
 | **消息队列** | 在正式 Conversation 中给原生 Composer 增加轻量 FIFO Queue |
 | **完成提醒** | 网络完成只作为候选，必须再经过页面语义确认，避免切 Tab / HTTP 完成误报 |
 | **人工处理提醒** | approval、quota、policy、error 等状态单独提醒，不自动替用户确认 |
@@ -176,6 +178,8 @@ npm run build
 - 不新增第二套高频轮询；只有存在未确认的 network-completion candidate 时，才用 Chrome Alarm 每 30 秒做一次低频语义复核；
 - 旧实验版本留下的 DNR 拦截规则只会被清理，不会重新创建。
 
+“长对话性能优化”直接加载 vendored `ChatGPT Web Accelerator`。默认 JS 模式用 `IntersectionObserver` 判断视口范围，在 turn 离屏前读取真实高度，再用 `contain-intrinsic-size` 保留该高度并通过 `content-visibility` 跳过内部渲染；新增 turn 由上游自己的 `MutationObserver` 发现。gpt-notice 不再维护“最近两轮”、`nth-last-child` 或 `display:none` 之类的自研裁剪规则，也不把性能逻辑接进 Queue 主循环。
+
 ## 为什么尽量保持“薄”
 
 ChatGPT Web 本身已经有完整的 Composer、Streaming、Stop、附件、项目和路由系统。gpt-notice 只补原生产品缺失的几个点，而不是再造一个 ChatGPT 客户端。
@@ -234,6 +238,17 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 </details>
 
 <details>
+<summary><strong>长工具调用如何折叠</strong></summary>
+
+当 ChatGPT 原生回复带有“思考了 … / Thought for …”折叠区时，gpt-notice 不再额外造一行“工具调用 · N”。工具调用直接跟随原生思考区：思考区收起时工具调用一起隐藏，展开思考区时原生工具调用一起显示。
+
+折叠只改变页面展示，不移动 React DOM、不读取或改写工具参数 / 结果，也不新增观察器。它跟随原生思考按钮的 `aria-expanded` 状态，并复用扩展现有低频页面 tick；原生思考区自动收起后，工具调用同步收起，后续新出现的工具调用也直接进入同一折叠状态。
+
+扩展面板提供独立的“工具调用折叠”气泡开关，默认开启。关闭时当前页面立即恢复全部原生工具调用；重新开启后，已有长工具调用重新按默认折叠规则处理。
+
+</details>
+
+<details>
 <summary><strong>完成提醒如何避免误报和漏报</strong></summary>
 
 系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的生命周期；网络完成不等于回复完成，仍需要精确 document 的页面状态确认。网络结束后如果第一次 probe 仍是 running / unavailable，不再立即丢弃关联，而是保留最小 candidate、主动唤醒对应 document，并用 30 秒 Chrome Alarm 继续有限复核，直到语义终态、路由失效或 10 分钟 TTL 到期。
@@ -262,6 +277,16 @@ Chrome Notifications API 能控制标题、正文、icon、`contextMessage`、�
 </details>
 
 ## 开发与验收
+
+完整验收统一使用：
+
+```sh
+npm run verify
+```
+
+它会依次运行单元/静态测试、完整 Playwright E2E、构建、vendored upstream 完整性检查，以及非 vendor 文件的 staged / unstaged diff whitespace 检查。
+
+需要分开执行时：
 
 ```sh
 npm ci

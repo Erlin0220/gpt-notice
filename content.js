@@ -3,11 +3,12 @@
   if (globalThis.ChatGPTNotice) return;
   const Q = globalThis.ChatGPTQueueCore, D = globalThis.ChatGPTPageAdapter, U = globalThis.ChatGPTUsage, P = globalThis.ChatGPTProjects;
   const QUEUE_SETTING = "notice:queue-enabled";
+  const TOOL_FOLD_SETTING = "notice:tool-fold-enabled";
   const instance = crypto.randomUUID();
   const rt = { context: null, queue: null, usage: null, page: null, turn: null, lastUserId: "", previousTail: "",
     tickBusy: false, tickAgain: false, actionBusy: false, sending: false, writing: false, composing: false, inputEpoch: 0,
     pending: null, retryBaseline: null, attempt: null, addAttempt: null, quietAt: Date.now(), stopped: "", disposed: false,
-    queueEnabled: true, projects: null, projectSignature: "", projectBusy: false, projectPromote: null, notificationRetryAt: 0, notificationError: "", completionHint: null };
+    queueEnabled: true, toolFoldEnabled: true, projects: null, projectSignature: "", projectBusy: false, projectPromote: null, notificationRetryAt: 0, notificationError: "", completionHint: null };
   const events = new AbortController();
   const ui = globalThis.ChatGPTQueueUI.create(action);
   const RELOAD_REQUIRED = "扩展已更新，请刷新当前页面后再操作；草稿和附件未改动";
@@ -17,6 +18,7 @@
     rt.disposed = true;
     clearInterval(interval);
     events.abort();
+    try { globalThis.ChatGPTToolFold?.dispose(); } catch {}
     try { chrome.storage.onChanged.removeListener(storageListener); } catch {}
     try { chrome.runtime.onMessage.removeListener(runtimeListener); } catch {}
   }
@@ -119,6 +121,10 @@
   const storageListener = (changes, area) => {
     if (area !== "local") return;
     if (Object.hasOwn(changes, QUEUE_SETTING)) rt.queueEnabled = changes[QUEUE_SETTING].newValue !== false;
+    if (Object.hasOwn(changes, TOOL_FOLD_SETTING)) {
+      rt.toolFoldEnabled = changes[TOOL_FOLD_SETTING].newValue !== false;
+      try { rt.toolFoldEnabled ? globalThis.ChatGPTToolFold?.sync() : globalThis.ChatGPTToolFold?.dispose(); } catch {}
+    }
     if (!rt.context) return;
     for (const [key, change] of Object.entries(changes)) {
       const n = change.newValue;
@@ -187,6 +193,7 @@
       runtime();
       const url = location.href;
       const route = Q.route(url);
+      if (rt.toolFoldEnabled) try { globalThis.ChatGPTToolFold?.sync(); } catch {}
       if (route.mode === "off") { rt.context = { mode: "off", url, scope: "", key: "" }; rt.page = null; render(); return; }
       const scope = await D.scope();
       if (location.href !== url) return;
@@ -389,8 +396,9 @@
   globalThis.ChatGPTNotice = { dispose() { disconnect(); ui.dispose(); delete globalThis.ChatGPTNotice; } };
   void (async () => {
     try {
-      const settings = await chrome.storage.local.get([QUEUE_SETTING]);
+      const settings = await chrome.storage.local.get([QUEUE_SETTING, TOOL_FOLD_SETTING]);
       rt.queueEnabled = settings[QUEUE_SETTING] !== false;
+      rt.toolFoldEnabled = settings[TOOL_FOLD_SETTING] !== false;
     }
     catch (error) { render(error.message); }
     if (rt.disposed) return;

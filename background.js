@@ -15,6 +15,7 @@ const COMPLETION_ALARM = "notice:completion-probe";
 const REQUEST_TTL = 10 * 60_000;
 const FEATURE_KEYS = {
   sidebarCollapse: "notice:sidebar-collapse-enabled",
+  toolFold: "notice:tool-fold-enabled",
   queue: "notice:queue-enabled",
   notifications: "notice:notifications"
 };

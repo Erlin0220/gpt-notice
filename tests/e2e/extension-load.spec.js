@@ -18,11 +18,16 @@ test("MV3 loads and popup lists only pending conversation queues",async({page,ex
   const shortcutBox=await popup.locator("#shortcutCount").evaluate(el=>{const s=getComputedStyle(el);return {value:el.value,width:parseFloat(s.width),height:parseFloat(s.height)}});
   expect(shortcutBox.value).toBe("8");expect(shortcutBox.width).toBeGreaterThanOrEqual(50);expect(shortcutBox.height).toBeGreaterThanOrEqual(28);
 });
-test("popup exposes independent sidebar-collapse, Queue, and notification switches",async({page,persistentContext,extensionServiceWorker,extensionId})=>{
+test("popup exposes independent sidebar, tool-fold, Queue, and notification switches",async({page,persistentContext,extensionServiceWorker,extensionId})=>{
   await page.goto("https://chatgpt.com/c/settings");await expect(button(page,"add")).toBeVisible();
   await button(page,"queue").click();await button(page,"pause").click();await button(page,"close").first().click();await enqueue(page,"saved while Queue is later disabled");
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
-  for(const id of ["sidebarCollapse","queue","notifications"])await expect(popup.locator(`#${id}`)).toBeChecked();
+  for(const id of ["sidebarCollapse","toolFold","queue","notifications"])await expect(popup.locator(`#${id}`)).toBeChecked();
+
+  await popup.locator('label.setting:has(#toolFold)').click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:tool-fold-enabled"))["notice:tool-fold-enabled"])).toBe(false);
+  await popup.locator('label.setting:has(#toolFold)').click();
+  await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:tool-fold-enabled"))["notice:tool-fold-enabled"])).toBe(true);
 
   await popup.locator('label.setting:has(#queue)').click();
   await expect(button(page,"queue")).toBeHidden();await expect(button(page,"add")).toBeHidden();
@@ -41,6 +46,25 @@ test("popup exposes independent sidebar-collapse, Queue, and notification switch
 
   await popup.locator('label.setting:has(#notifications)').click();
   await expect.poll(()=>extensionServiceWorker.evaluate(async()=>(await chrome.storage.local.get("notice:notifications"))["notice:notifications"])).toBe(false);
+});
+
+test("vendored long-chat accelerator preserves measured geometry while virtualizing offscreen turns",async({page})=>{
+  await page.goto("https://chatgpt.com/c/longchat-perf");await expect(button(page,"add")).toBeVisible();
+  const fullHeight=await page.evaluate(()=>{
+    for(let i=0;i<20;i++){
+      const node=window.addMessage(i%2?'assistant':'user',`perf-${i}`,`perf ${i}`,i%2?window.model:undefined);
+      node.style.minHeight='320px';
+    }
+    const height=document.documentElement.scrollHeight;
+    window.scrollTo(0,height);
+    return height;
+  });
+  await expect.poll(()=>page.locator('.chatgpt-accelerator-hidden').count()).toBeGreaterThan(0);
+  const optimized=await page.locator('.chatgpt-accelerator-hidden').evaluateAll(turns=>turns.map(turn=>{const style=getComputedStyle(turn);return {display:style.display,contentVisibility:style.contentVisibility,intrinsic:turn.style.getPropertyValue('contain-intrinsic-size'),height:turn.getBoundingClientRect().height};}));
+  expect(optimized.every(turn=>turn.display!=='none')).toBe(true);
+  expect(optimized.every(turn=>turn.contentVisibility==='hidden')).toBe(true);
+  expect(optimized.every(turn=>/px$/.test(turn.intrinsic)&&turn.height>0)).toBe(true);
+  expect(Math.abs(await page.evaluate(()=>document.documentElement.scrollHeight)-fullHeight)).toBeLessThanOrEqual(2);
 });
 test("home and project first sends change modes without replacing the UI root",async({page,extensionServiceWorker})=>{
   await page.goto("https://chatgpt.com/");await expect(button(page,"usage")).toBeVisible();await expect(button(page,"queue")).toBeHidden();
@@ -457,6 +481,37 @@ test("a large historical transcript keeps tail detection and button identity sta
   await page.evaluate(()=>{window.originalQueueButton=document.getElementById('chatgpt-message-queue-root').shadowRoot.querySelector('[data-action="queue"]');const fragment=document.createDocumentFragment();for(let i=0;i<1500;i++){const turn=document.createElement('section');turn.dataset.testid='conversation-turn-history-'+i;const message=document.createElement('div');message.dataset.messageAuthorRole=i%2?'assistant':'user';message.dataset.messageId='history-'+i;message.textContent='historical text '.repeat(20);turn.append(message);fragment.append(turn);}document.getElementById('messages').prepend(fragment);});
   await enqueue(page,'tail still works');await button(page,'queue').click();await expect(page.locator(`${host} .preview`)).toHaveText('tail still works');
   expect(await page.evaluate(()=>window.originalQueueButton===document.getElementById('chatgpt-message-queue-root').shadowRoot.querySelector('[data-action="queue"]'))).toBe(true);
+});
+
+test("native tool calls follow the Thought fold, auto-collapse, and respect the popup setting",async({page,extensionServiceWorker})=>{
+  await page.goto('https://chatgpt.com/c/tool-fold');await expect(button(page,'add')).toBeVisible();
+  await page.evaluate(()=>{
+    const turn=[...document.querySelectorAll('[data-testid^="conversation-turn-"]')].at(-1);
+    const flow=document.createElement('div');flow.id='tool-flow';flow.className='flex max-w-full flex-col gap-4 grow';turn.append(flow);
+    const thought=document.createElement('div');thought.className='flex flex-col';
+    const thoughtButton=document.createElement('button');thoughtButton.id='native-thought';thoughtButton.type='button';thoughtButton.textContent='思考了 1m 23s';thoughtButton.setAttribute('aria-expanded','false');
+    thoughtButton.onclick=()=>thoughtButton.setAttribute('aria-expanded',String(thoughtButton.getAttribute('aria-expanded')!=='true'));
+    thought.append(thoughtButton);flow.append(thought);
+    window.nativeToolClicks=0;
+    window.addToolCall=()=>{const outer=document.createElement('div');outer.className='contents';const inner=document.createElement('div');inner.className='contents';const marker=document.createElement('span');marker.className='group/tool-message';const native=document.createElement('button');native.type='button';native.textContent='已调用工具';native.onclick=()=>window.nativeToolClicks++;marker.append(native);inner.append(marker);outer.append(inner);flow.append(outer);return outer;};
+    window.addToolCall();
+  });
+  await page.waitForTimeout(1200);
+  await expect(page.locator('[data-gpt-notice-tool-fold-control]')).toHaveCount(0);
+  expect(await page.locator('#tool-flow > .contents').evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).display==='none'))).toBe(true);
+
+  await page.locator('#native-thought').click();await expect(page.locator('#native-thought')).toHaveAttribute('aria-expanded','true');
+  await expect.poll(()=>page.locator('#tool-flow > .contents').evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).display!=='none'))).toBe(true);
+  await page.locator('#tool-flow > .contents button').first().click();expect(await page.evaluate(()=>window.nativeToolClicks)).toBe(1);
+
+  await page.evaluate(()=>document.getElementById('native-thought').setAttribute('aria-expanded','false'));
+  await expect.poll(()=>page.locator('#tool-flow > .contents').evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).display==='none'))).toBe(true);
+  expect(await page.evaluate(()=>getComputedStyle(window.addToolCall()).display)).toBe('none');
+
+  await extensionServiceWorker.evaluate(()=>chrome.storage.local.set({'notice:tool-fold-enabled':false}));
+  expect(await page.locator('#tool-flow > .contents').evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).display!=='none'))).toBe(true);
+  await extensionServiceWorker.evaluate(()=>chrome.storage.local.set({'notice:tool-fold-enabled':true}));
+  expect(await page.locator('#tool-flow > .contents').evaluateAll(nodes=>nodes.every(node=>getComputedStyle(node).display==='none'))).toBe(true);
 });
 
 test("native network send increments Pro usage without any assistant model DOM",async({page,extensionServiceWorker})=>{

@@ -18,7 +18,12 @@
     "run_at": "document_start"
   }, {
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-    "js": ["queue-core.js", "usage-core.js", "chatgpt-dom.js", "queue-ui.js", "content.js"],
+    "js": ["queue-core.js", "usage-core.js", "chatgpt-dom.js", "queue-ui.js", "tool-fold.js", "content.js"],
+    "run_at": "document_idle"
+  }, {
+    "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+    "css": ["vendor/chatgpt-web-accelerator/content.css"],
+    "js": ["vendor/chatgpt-web-accelerator/content.js"],
     "run_at": "document_idle"
   }],
   "icons": { "16": "icons/chatgpt.png", "32": "icons/chatgpt.png", "48": "icons/chatgpt.png", "128": "icons/chatgpt.png" }
