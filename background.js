@@ -15,6 +15,8 @@ const COMPLETION_ALARM = "notice:completion-probe";
 const REQUEST_TTL = 10 * 60_000;
 const FEATURE_KEYS = {
   sidebarCollapse: "notice:sidebar-collapse-enabled",
+  longChatPerf: "enabled",
+  scrollStabilizer: "notice:scroll-stabilizer-enabled",
   toolFold: "notice:tool-fold-enabled",
   queue: "notice:queue-enabled",
   notifications: "notice:notifications"
@@ -71,6 +73,13 @@ function completionPublication(state, hidden, meta = {}) {
     message: state === "completed" ? (!hidden && cleanNoticePreview(meta.response, 150)) || "回复已就绪，点击查看对话。" : state === "attention" ? "等待审批、确认或继续操作；请回到原生页面处理。" : state === "blocked" ? "限额、策略或账号受限；请处理原生提示后继续。" : "回复出现异常；请回到对话检查后继续。",
     contextMessage: `gpt-notice · 本轮用时 ${formatElapsed(meta.elapsedMs)}`
   } };
+}
+function frozenPublication(meta = {}) {
+  return {
+    title: "后台回复待确认",
+    message: "ChatGPT 请求已结束，但后台页面暂未响应最终状态确认；可能被浏览器节流或冻结。切回对应 ChatGPT 页面后会继续确认回复并推进 Queue。",
+    contextMessage: `gpt-notice · 已等待 ${formatElapsed(meta.elapsedMs)}`
+  };
 }
 async function pageContext(tabId, documentId) {
   // Tab IDs survive worker restarts, but are not account/document identities.
@@ -280,6 +289,9 @@ async function handle(message, sender) {
     notificationError = await deliverNotice(notificationId, intent, publication.payload);
     await pruneNotices().catch(() => {});
   }
+  if (!result.conflict && (command.op === "stop" || command.op === "settle" && result.state.turn?.done)) {
+    await clearFrozenWait(message.scope, route.id, command.generationId || command.userId);
+  }
   notificationError ||= await retryNotices(message.scope, route.url);
   const clearTurn = command.op === "claim" ? result.item?.baseline : command.op === "start" ? command.previousUserId : command.op === "stop" || command.op === "settle" && (result.state.paused || !result.state.items.length) ? command.userId : "";
   if (clearTurn) await clearCompletionRequests(message.scope, route.url, clearTurn);
@@ -290,7 +302,7 @@ const NOTICE_RANK = { generic: 1, attention: 2, failed: 3, completed: 4 };
 const noticeKey = id => `notice:notification:${id}`;
 // A dismissed approval must not consume the subsequent final result. Keep the
 // legacy completion ID for generic -> rich enrichment, separate other events.
-const noticeId = (scope, routeId, generationId, kind) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}${["attention", "failed"].includes(kind) ? `|${kind}` : ""}`;
+const noticeId = (scope, routeId, generationId, kind) => `notice:${scope.slice(0,16)}:${routeId}:${generationId}${["attention", "failed", "frozen"].includes(kind) ? `|${kind}` : ""}`;
 
 async function noticeIntent(id, routing, kind, outcome = kind) {
   const key = noticeKey(id);
@@ -337,8 +349,9 @@ async function retryNotices(scope, url) {
   if (stored["notice:notifications"] === false) return error;
   for (const [key, n] of Object.entries(stored)) {
     if (!key.startsWith("notice:notification:") || !n?.pendingKind || n.dismissedAt || n.scope !== scope || Queue.route(n.url).id !== Queue.route(url).id) continue;
-    const outcome = n.pendingOutcome || (n.pendingKind === "generic" ? "completed" : n.pendingKind);
-    const publication = completionPublication(outcome, true, n);
+    const publication = n.frozen
+      ? { payload: frozenPublication(n) }
+      : completionPublication(n.pendingOutcome || (n.pendingKind === "generic" ? "completed" : n.pendingKind), true, n);
     if (publication) error = await deliverNotice(key.slice("notice:notification:".length), n, publication.payload) || error;
   }
   return error;
@@ -350,12 +363,22 @@ async function markNoticeClosed(id) {
   if (notice && !notice.dismissedAt) { delete notice.pendingKind; delete notice.pendingOutcome; await chrome.storage.local.set({ [key]: { ...notice, dismissedAt: Date.now() } }); }
 }
 
+async function clearFrozenWait(scope, routeId, generationId) {
+  const id = noticeId(scope, routeId, generationId, "frozen");
+  const key = noticeKey(id), notice = (await chrome.storage.local.get(key))[key];
+  if (!notice?.frozen || notice.dismissedAt || notice.consumedAt) return;
+  delete notice.pendingKind;
+  delete notice.pendingOutcome;
+  await chrome.storage.local.set({ [key]: { ...notice, consumedAt: Date.now() } });
+  await chrome.notifications.clear(id).catch(() => {});
+}
+
 async function completionProbe(observation, route) {
   let timer;
   try {
     const value = await Promise.race([
       chrome.tabs.sendMessage(observation.tabId, {
-        type: "NOTICE_COMPLETION_PROBE", scope: observation.scope, turnId: observation.turnId
+        type: "NOTICE_COMPLETION_PROBE", scope: observation.scope, turnId: observation.turnId, at: observation.completedAt
       }, { frameId: 0, documentId: observation.documentId }),
       new Promise(resolve => { timer = setTimeout(() => resolve({ state: "unavailable" }), 700); })
     ]);
@@ -365,9 +388,11 @@ async function completionProbe(observation, route) {
     if (probedRoute.mode !== "conversation" || probedRoute.id !== route.id) return { state: "stale" };
     return value;
   } catch {
-    // An immediate sendMessage failure means the exact document no longer exists.
-    // A timeout or missing document is not evidence that the reply completed.
-    return { state: "stale" };
+    // A live background document can temporarily reject or defer extension
+    // messaging while the browser/window is throttled. The surrounding tab +
+    // route checks decide staleness; a probe transport failure alone is not
+    // evidence that this completed request belongs to a dead document.
+    return { state: "unavailable" };
   } finally {
     clearTimeout(timer);
   }
@@ -389,6 +414,14 @@ async function networkNoticeEligible(observation, route, probe) {
 async function scheduleCompletionProbe() {
   if (!await chrome.alarms.get(COMPLETION_ALARM)) await chrome.alarms.create(COMPLETION_ALARM, { periodInMinutes: 0.5 });
 }
+async function publishFrozenWait(observation, route) {
+  const elapsedMs = Math.max(0, Date.now() - (observation.sentAt || observation.at));
+  const id = noticeId(observation.scope, route.id, observation.turnId, "frozen");
+  await publishNotice(id, {
+    url: route.url, scope: observation.scope, tabId: observation.tabId, documentId: observation.documentId,
+    elapsedMs, queueFinal: false, frozen: true
+  }, frozenPublication({ elapsedMs }), "attention", "attention");
+}
 async function clearCompletionRequests(scope, url, turnId) {
   const routeId = Queue.route(url).id, stored = await chrome.storage.session.get(null);
   const keys = Object.entries(stored).filter(([key, value]) => key.startsWith(REQUEST_PREFIX) && value?.completedAt && value.scope === scope && value.turnId === turnId && Queue.route(value.url).id === routeId).map(([key]) => key);
@@ -403,9 +436,10 @@ async function probeCompletedRequest(key, observation) {
   const route = Queue.route(tab?.url), originRoute = Queue.route(observation.url);
   if (route.mode !== "conversation" || originRoute.mode === "conversation" && originRoute.id !== route.id) { await chrome.storage.session.remove(key); return false; }
   if (tab?.discarded) { await chrome.storage.session.remove(key); return false; }
-  if (tab?.frozen) return true;
+  if (tab?.frozen) { await publishFrozenWait(observation, route); return true; }
   try { await chrome.tabs.sendMessage(observation.tabId, { type: "NOTICE_COMPLETION_HINT", scope: observation.scope, turnId: observation.turnId, at: observation.completedAt }, { frameId: 0, documentId: observation.documentId }); } catch {}
   const probe = await completionProbe(observation, route);
+  if (probe?.state === "unavailable") { await publishFrozenWait(observation, route); return true; }
   if (probe?.state === "stale" || probe?.state === "stopped" || probe?.generationId && probe.generationId !== observation.turnId) { await chrome.storage.session.remove(key); return false; }
   if (!await networkNoticeEligible(observation, route, probe)) return true;
   const queueKey = Queue.key(observation.scope, route.url), queue = (await chrome.storage.local.get(queueKey))[queueKey];
@@ -415,6 +449,7 @@ async function probeCompletedRequest(key, observation) {
   if (!publication) return true;
   const id = noticeId(observation.scope, route.id, observation.turnId, publication.kind);
   await publishNotice(id, { url: route.url, scope: observation.scope, tabId: observation.tabId, elapsedMs, queueFinal }, publication.payload, publication.kind, probe?.state || "completed");
+  await clearFrozenWait(observation.scope, route.id, observation.turnId);
   await chrome.storage.session.remove(key); await pruneNotices().catch(() => {});
   return false;
 }
@@ -442,12 +477,26 @@ async function openNotice(id) {
   // A reused tab may now contain a different conversation.
   const candidates = tabs.filter(t => Queue.route(t.url).id === desired).sort((a, b) => Number(b.id === notice.tabId) - Number(a.id === notice.tabId));
   let tab;
+  if (notice.frozen && Number.isInteger(notice.tabId)) {
+    const candidate = candidates.find(item => item.id === notice.tabId);
+    // A truly frozen tab cannot answer pageContext until it is activated. Only
+    // wake the exact still-frozen URL that produced this notice. A reused or
+    // already-running tab must pass scope/document validation before focus.
+    if (candidate?.frozen === true && candidate.url === notice.url) {
+      await chrome.tabs.update(candidate.id, { active: true });
+      await chrome.windows.update(candidate.windowId, { focused: true });
+      const context = await pageContext(candidate.id, notice.documentId);
+      if (context?.scope === notice.scope) tab = candidate;
+    }
+  }
   for (const candidate of candidates) {
+    if (tab) break;
     if ((await pageContext(candidate.id))?.scope === notice.scope) { tab = candidate; break; }
   }
   if (tab) {
-    await chrome.tabs.update(tab.id, { active: true });
+    if (!tab.active) await chrome.tabs.update(tab.id, { active: true });
     await chrome.windows.update(tab.windowId, { focused: true });
+    if (notice.frozen) await retryCompletionRequests().catch(() => {});
   } else {
     const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true, url: PAGE_URLS });
     if (!active || (await pageContext(active.id))?.scope !== notice.scope) return;

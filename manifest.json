@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "gpt-notice · 消息队列与完成提醒",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "减少 ChatGPT Web 侧栏频繁请求，缓解接口 429；提供项目快捷访问、消息队列、完成提醒和本地用量记录，保留原生输入体验。",
   "minimum_chrome_version": "120",
   "permissions": ["notifications", "storage", "webRequest", "declarativeNetRequest", "alarms"],
@@ -18,12 +18,12 @@
     "run_at": "document_start"
   }, {
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-    "js": ["queue-core.js", "usage-core.js", "chatgpt-dom.js", "queue-ui.js", "tool-fold.js", "content.js"],
+    "js": ["queue-core.js", "usage-core.js", "chatgpt-dom.js", "queue-ui.js", "tool-fold.js", "scroll-stabilizer.js", "content.js"],
     "run_at": "document_idle"
   }, {
     "matches": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
-    "css": ["vendor/chatgpt-web-accelerator/content.css"],
-    "js": ["vendor/chatgpt-web-accelerator/content.js"],
+    "css": ["longchat-perf.css"],
+    "js": ["longchat-perf.js"],
     "run_at": "document_idle"
   }],
   "icons": { "16": "icons/chatgpt.png", "32": "icons/chatgpt.png", "48": "icons/chatgpt.png", "128": "icons/chatgpt.png" }

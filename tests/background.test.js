@@ -46,7 +46,7 @@ function harness(storage = {}, session = {}, created = []) {
       async clear(id) { closed?.(id, false); return true; }
     },
     tabs: { onRemoved: { addListener(fn) { removed = fn; } }, async get(id) { return tabs.get(id); }, async query(query = {}) { tabQueries += 1; return [...tabs.values()].filter(tab => !query.active || tab.id === 1); },
-      async sendMessage(id, message, options) {
+      async sendMessage(id, message, options = {}) {
         if (!tabs.has(id) || options.documentId && options.documentId !== documents.get(id)) throw new Error("No matching document");
         if (message?.type === "NOTICE_COMPLETION_PROBE") { probeCalls.push({ id, message, options }); return probes.get(id) || { scope: scopes.get(id), url: tabs.get(id).url, state:"running", hidden:false, generationId:message.turnId, prompt:"", response:"" }; }
         if (message?.type === "NOTICE_COMPLETION_HINT") { hints.push({ id, message, options }); return { ok:true }; }
@@ -86,7 +86,7 @@ test("startup removes the legacy sidebar blocker and never installs another requ
 test("popup feature switches persist independently without changing network behavior", async () => {
   const h = harness();
   let popup = await h.popup();
-  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, toolFold:true, queue:true, notifications:true });
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, longChatPerf:true, scrollStabilizer:true, toolFold:true, queue:true, notifications:true });
   assert.equal(h.rules().length, 0);
 
   let result = await h.setting("sidebarCollapse", false);
@@ -101,6 +101,12 @@ test("popup feature switches persist independently without changing network beha
   result = await h.setting("toolFold", false);
   assert.equal(result.settings.toolFold, false);
   assert.equal(h.storage["notice:tool-fold-enabled"], false);
+  result = await h.setting("longChatPerf", false);
+  assert.equal(result.settings.longChatPerf, false);
+  assert.equal(h.storage.enabled, false);
+  result = await h.setting("scrollStabilizer", false);
+  assert.equal(result.settings.scrollStabilizer, false);
+  assert.equal(h.storage["notice:scroll-stabilizer-enabled"], false);
   result = await h.setting("notifications", false);
   assert.equal(result.settings.notifications, false);
   assert.equal(h.storage["notice:notifications"], false);
@@ -112,7 +118,7 @@ test("popup feature switches persist independently without changing network beha
   assert.equal(result.ok, true);
   assert.equal(h.storage["notice:shortcut-project-limit"], 12);
   popup = await h.popup();
-  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, toolFold:false, queue:false, notifications:false });
+  assert.deepEqual({ ...popup.settings }, { sidebarCollapse:true, longChatPerf:false, scrollStabilizer:false, toolFold:false, queue:false, notifications:false });
 });
 test("popup can explicitly refresh the active ChatGPT page when its content script is stale", async () => {
   const h = harness();
@@ -246,7 +252,7 @@ test("visible running request stays silent until semantic completion", async () 
   await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(h.created.length,0);
 });
-test("probe timeout alone stays silent instead of guessing completion", async () => {
+test("a frozen completed request gives a factual resume notice without guessing semantic completion", async () => {
   const h = harness();
   const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-user",author:{role:"user"}}]});
   await h.emit("onSendHeaders",request);
@@ -254,8 +260,61 @@ test("probe timeout alone stays silent instead of guessing completion", async ()
   h.probes.set(1,new Promise(()=>{}));
   await h.emit("onCompleted",{...request,statusCode:200});
   assert.equal(h.probeCalls.length,0);
-  assert.equal(h.created.length,0);
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"后台回复待确认");
+  assert.match(h.created[0].message,/后台页面暂未响应最终状态确认/);
   assert.ok(h.alarm());
+  h.tabs.get(1).frozen = false;
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"frozen-user",prompt:"",response:""});
+  await h.fireAlarm();
+  const frozenRecord = Object.entries(h.storage).find(([key,value])=>key.includes("|frozen")&&value?.frozen)?.[1];
+  assert.ok(frozenRecord?.consumedAt);
+  assert.equal(Object.keys(h.session).some(key=>key.startsWith("notice:request:")),false);
+});
+test("a failed frozen notice retry keeps the factual frozen wording", async () => {
+  const h = harness(); h.notifyFailure(true);
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-retry",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  h.tabs.get(1).frozen = true;
+  await h.emit("onCompleted",{...request,statusCode:200});
+  const pending = Object.values(h.storage).find(value=>value?.frozen && value?.pendingKind);
+  assert.equal(pending.pendingKind,"attention");
+  assert.ok(pending.retryAt);
+  h.notifyFailure(false); h.advance(11000);
+  await h.send({op:"get"});
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"后台回复待确认");
+  assert.match(h.created[0].message,/后台页面暂未响应最终状态确认/);
+});
+test("a non-frozen but unresponsive background page gets a factual resume notice", async () => {
+  const h = harness();
+  h.probes.set(1,{state:"unavailable"});
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"throttled-user",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.tabs.get(1).frozen,false);
+  assert.equal(h.created.length,1);
+  assert.equal(h.created[0].title,"后台回复待确认");
+  assert.match(h.created[0].message,/请求已结束/);
+  assert.ok(h.alarm());
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"completed",hidden:true,generationId:"throttled-user",prompt:"",response:""});
+  await h.fireAlarm();
+  assert.ok(Object.entries(h.storage).find(([key,value])=>key.includes("|frozen")&&value?.frozen)?.[1]?.consumedAt);
+  assert.equal(Object.keys(h.session).some(key=>key.startsWith("notice:request:")),false);
+});
+test("frozen recovery notice never consumes a later approval attention", async () => {
+  const h = harness();
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-approval",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  h.tabs.get(1).frozen = true;
+  await h.emit("onCompleted",{...request,statusCode:200});
+  assert.equal(h.created.length,1);
+  assert.match(h.created[0].id,/\|frozen$/);
+  h.tabs.get(1).frozen = false;
+  h.probes.set(1,{scope,url:"https://chatgpt.com/c/a",state:"attention",hidden:true,generationId:"frozen-approval",prompt:"",response:""});
+  await h.fireAlarm();
+  assert.ok(h.created.some(item=>/\|attention$/.test(item.id)));
+  assert.ok(Object.entries(h.storage).find(([key,value])=>key.includes("|frozen")&&value?.frozen)?.[1]?.consumedAt);
 });
 test("pending Queue work suppresses interim network notifications", async () => {
   const h = harness();
@@ -317,6 +376,21 @@ test("notification click does not focus a tab reused for another conversation", 
   h.click(h.created[0].id);
   await new Promise(resolve=>setTimeout(resolve,10));
   assert.deepEqual(h.focused,[2]);
+});
+test("frozen notification never pre-focuses a reused non-frozen tab before scope validation", async () => {
+  const h = harness();
+  const request = await h.before({action:"next",model:"gpt-5-6-thinking",messages:[{id:"frozen-focus",author:{role:"user"}}]});
+  await h.emit("onSendHeaders",request);
+  h.tabs.get(1).frozen = true;
+  await h.emit("onCompleted",{...request,statusCode:200});
+  const frozen = h.created.find(item=>/\|frozen$/.test(item.id));
+  assert.ok(frozen);
+  h.tabs.get(1).frozen = false;
+  h.scopes.set(1,"b".repeat(64));
+  h.closeTab(2);
+  h.click(frozen.id);
+  await h.send({op:"get"});
+  assert.deepEqual(h.focused, []);
 });
 test("notification failures never mark delivery and a later semantic completion can retry", async () => {
   const h=harness();h.notifyFailure(true);

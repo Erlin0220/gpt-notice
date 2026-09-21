@@ -25,6 +25,31 @@
     :host([data-dark=true]){--n-bg:#242424;--n-fg:#eee;--n-muted:#b2b2b2;--n-line:#484848;--n-hover:#363636}
     @media(max-width:550px){button{padding:5px 7px}.usage{max-width:52vw;font-size:11px}.bar button{padding:5px 7px}.panel{width:100%}.usage-popover{width:min(340px,calc(100vw - 20px))}.usage-backdrop{padding:12px}}
   `;
+  const nativeFloatingSelector = '.popover,[popover]:popover-open,dialog[open],[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
+  const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  const visibleRect = node => {
+    if (!node?.isConnected) return null;
+    const style = getComputedStyle(node), rect = node.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && rect.width > 0 && rect.height > 0 ? rect : null;
+  };
+  function nativeOverlayOverlaps(regions) {
+    for (const node of document.querySelectorAll(nativeFloatingSelector)) {
+      const overlay = visibleRect(node);
+      if (overlay && regions.some(rect => intersects(rect, overlay))) return true;
+    }
+    return false;
+  }
+  function blocksRect(rect) {
+    if (!rect?.width || !rect?.height) return false;
+    if (nativeOverlayOverlaps([rect])) return true;
+    const composer = globalThis.ChatGPTPageAdapter?.composer?.(document);
+    const composerRect = visibleRect(composer?.closest?.("form") || composer);
+    if (composerRect && intersects(rect, composerRect)) return true;
+    const queueHost = document.getElementById("chatgpt-message-queue-root");
+    if (!queueHost || queueHost.hidden) return false;
+    const regions = [visibleRect(queueHost), ...[...(queueHost.shadowRoot?.querySelectorAll('.panel:not([hidden]), .usage-popover:not([hidden]), .usage-backdrop:not([hidden]) .usage-settings, .notice:not([hidden])') || [])].map(visibleRect)].filter(Boolean);
+    return regions.some(region => intersects(rect, region));
+  }
   function create(onAction) {
     const host = document.createElement("div");
     host.id = "chatgpt-message-queue-root";
@@ -87,16 +112,6 @@
       finally { button.disabled = retired; }
     });
     const observer = new ResizeObserver(() => position());
-    const nativeFloatingSelector = '.popover,[popover]:popover-open,dialog[open],[role="menu"],[role="listbox"],[role="dialog"],[data-radix-popper-content-wrapper]';
-    const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-    function nativeOverlayOverlaps(regions) {
-      for (const node of document.querySelectorAll(nativeFloatingSelector)) {
-        const style = getComputedStyle(node);
-        const overlay = node.getBoundingClientRect();
-        if (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0" && overlay.width > 0 && overlay.height > 0 && regions.some(rect => intersects(rect, overlay))) return true;
-      }
-      return false;
-    }
     function place() {
       frame = 0;
       if (!anchorNode?.isConnected) { host.hidden = true; host.removeAttribute("data-native-overlay"); return; }
@@ -201,5 +216,5 @@
       anchor(node) { if (node !== anchorNode) { observer.disconnect(); anchorNode = node; if (node) observer.observe(node); } position(); },
       dispose() { clearTimeout(noticeTimer); clearTimeout(overlayTimer); cancelAnimationFrame(frame); observer.disconnect(); removeEventListener("scroll",onScroll,true); removeEventListener("resize",onScroll); document.removeEventListener("click",onDocumentClick,true); document.removeEventListener("keydown",rescanNativeOverlay,true); document.removeEventListener("toggle",rescanNativeOverlay,true); host.remove(); } };
   }
-  globalThis.ChatGPTQueueUI = { create };
+  globalThis.ChatGPTQueueUI = { create, blocksRect };
 })();

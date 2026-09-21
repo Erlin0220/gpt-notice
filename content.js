@@ -19,6 +19,7 @@
     clearInterval(interval);
     events.abort();
     try { globalThis.ChatGPTToolFold?.dispose(); } catch {}
+    try { globalThis.ChatGPTScrollStabilizer?.dispose(); } catch {}
     try { chrome.storage.onChanged.removeListener(storageListener); } catch {}
     try { chrome.runtime.onMessage.removeListener(runtimeListener); } catch {}
   }
@@ -84,22 +85,31 @@
     ui.anchor(p?.anchor || null);
   }
   function isInput(target) { return Boolean(target?.closest?.(D.COMPOSER)); }
+  function isComposerControl(target) {
+    if (!target) return false;
+    if (rt.page?.anchor?.contains?.(target)) return true;
+    const form = target.closest?.("form");
+    return Boolean(form?.querySelector?.(D.COMPOSER));
+  }
+  function isNativeTurnControl(target) {
+    return D.nativeTurnControl(target);
+  }
   function submission(event) {
     if (event.defaultPrevented || rt.writing) return;
     const button = event.target?.closest?.("button");
-    if (event.type === "click" && button?.matches(D.STOP)) {
+    if (event.type === "click" && button?.matches(D.STOP) && isComposerControl(button)) {
       rt.stopped = D.snapshot().userId;
       const generationId = rt.turn?.id === rt.stopped ? rt.turn.generationId : rt.stopped;
       if (rt.queueEnabled && current(rt.context) && rt.context?.mode === "conversation") void request({ op: "stop", userId: rt.stopped, generationId }).catch(() => {});
       return;
     }
     const retry = event.target?.closest?.('button, [role="menuitem"]');
-    if (event.type === "click" && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
+    if (event.type === "click" && isNativeTurnControl(retry) && /^(regenerate|retry|try again|重新生成|重试|再试一次)$/i.test((retry?.getAttribute("aria-label") || retry?.textContent || "").trim())) {
       const page = D.snapshot();
       rt.retryBaseline = { userId: page.userId, assistantId: page.assistantId };
       if (rt.queueEnabled && rt.context?.mode === "conversation" && current(rt.context)) void request({ op: "hold" }).catch(() => {});
     }
-    const nativeSend = event.type === "click" && button?.matches(D.SEND) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
+    const nativeSend = event.type === "click" && button?.matches(D.SEND) && isComposerControl(button) || event.type === "keydown" && event.key === "Enter" && !event.shiftKey && !event.isComposing && isInput(event.target) || event.type === "submit" && event.target?.contains?.(rt.page?.composer);
     if (nativeSend) {
       const page = D.snapshot();
       if (page.empty) return;
@@ -153,6 +163,33 @@
     const delay = hinted ? 0 : outcome === "completed" ? 3000 : 2000;
     return fingerprint && now - active.stableAt >= delay && now - active.at >= delay ? outcome : "running";
   }
+  async function recoverProbeTurn(message, scope, url, p) {
+    if (rt.turn?.id === message.turnId && rt.context?.scope === scope) {
+      if (Number.isFinite(message.at) && message.at > 0) rt.turn.networkAt = message.at;
+      return rt.turn;
+    }
+    const key = Q.key(scope, url);
+    if (!key || p.userId !== message.turnId) return rt.turn;
+    const stored = (await chrome.storage.local.get(key))[key];
+    const turn = stored?.turn, userId = turn?.userId || turn?.id;
+    // An exact network candidate may wake a throttled hidden document after
+    // its in-memory controller state was lost. Rebuild only from the durable
+    // current turn; never borrow a retry/regeneration or a stopped turn.
+    if (!turn || turn.done || turn.stopped || turn.outcome === "stopped" || turn.id !== message.turnId || userId !== p.userId) return rt.turn;
+    if (!rt.queue || stored.revision >= rt.queue.revision) rt.queue = stored;
+    const now = Date.now();
+    rt.turn = {
+      id: p.userId,
+      generationId: turn.id,
+      at: Number.isFinite(turn.at) ? turn.at : now,
+      fingerprint: "",
+      stableAt: now,
+      counted: true,
+      recovered: true,
+      networkAt: Number.isFinite(message.at) && message.at > 0 ? message.at : now
+    };
+    return rt.turn;
+  }
   const runtimeListener = (message, sender, reply) => {
     if (message?.type === "NOTICE_COMPLETION_HINT") {
       rt.completionHint = { scope: message.scope, id: message.turnId, at: message.at };
@@ -173,13 +210,15 @@
       if (rt.disposed || location.href !== url || scope !== message.scope) { reply(null); return; }
       const p = D.snapshot(document, true);
       const sameTurn = p.userId === message.turnId && current(rt.context) && rt.context.scope === scope;
-      const state = !sameTurn ? "stale" : observedOutcome(p, rt.turn);
+      const active = sameTurn ? await recoverProbeTurn(message, scope, url, p) : null;
+      const state = !sameTurn ? "stale" : observedOutcome(p, active);
       reply({
         scope, url, state, hidden: document.hidden,
-        generationId: rt.turn?.id === message.turnId ? rt.turn.generationId : message.turnId,
+        generationId: active?.id === message.turnId ? active.generationId : message.turnId,
         prompt: sameTurn ? D.readText(p.user).slice(0, 1000) : "",
         response: state === "completed" ? D.readText(p.assistant).slice(0, 1000) : ""
       });
+      if (active) void tick(true);
     })().catch(() => reply(null));
     return true;
   };
@@ -194,7 +233,7 @@
       const url = location.href;
       const route = Q.route(url);
       if (rt.toolFoldEnabled) try { globalThis.ChatGPTToolFold?.sync(); } catch {}
-      if (route.mode === "off") { rt.context = { mode: "off", url, scope: "", key: "" }; rt.page = null; render(); return; }
+      if (route.mode === "off") { try { globalThis.ChatGPTScrollStabilizer?.sample(null); } catch {} rt.context = { mode: "off", url, scope: "", key: "" }; rt.page = null; render(); return; }
       const scope = await D.scope();
       if (location.href !== url) return;
       const key = Q.key(scope, url);
@@ -219,6 +258,7 @@
         if (!current(rt.context)) return;
       }
       rt.page = p;
+      try { globalThis.ChatGPTScrollStabilizer?.sample(p.assistant || p.user || null); } catch {}
       try { globalThis.ChatGPTSidebar.sample(url); } catch {}
       const now = Date.now();
       const pendingSubmission = Boolean(rt.pending && now - rt.pending.at < 60000 && p.userId && p.userId !== rt.pending.baseline);

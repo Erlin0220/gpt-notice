@@ -16,6 +16,12 @@
   const TURN = '[data-testid^="conversation-turn-"], article';
   const turn = n => n?.closest(TURN);
   const MESSAGE = '[data-message-author-role]';
+  const UNTRUSTED_TURN_CONTENT = '.markdown, .prose, pre, code, [data-message-author-role], [class~="group/tool-message"], [data-testid*="app"], [data-testid*="widget"], [role="application"]';
+  const nativeSurfaceControl = (node, owner) => Boolean(node && owner?.contains?.(node) && visible(node) && !node.closest(UNTRUSTED_TURN_CONTENT));
+  function nativeTurnControl(node) {
+    const owner = turn(node);
+    return nativeSurfaceControl(node, owner);
+  }
   // Classify native UI only, never prose produced by the assistant. Blocking
   // signals win over transient wording (e.g. "network error: quota exceeded").
   function failureKind(value) {
@@ -54,13 +60,20 @@
     return nodes.length === 1 ? nodes[0] : null;
   }
   function sendButton(doc = document) {
+    const input = composer(doc);
+    const box = input?.closest("form") || input?.parentElement;
+    if (!box) return null;
     // Never mistake Stop/interrupt for Send even when they reuse the same id.
-    return all(doc, SEND).find(n => visible(n) && !n.matches(STOP) && !/stop|停止|中止/i.test(n.getAttribute("aria-label") || "")) || null;
+    // Keep native transport controls inside the composer boundary so content or
+    // embedded tool surfaces cannot spoof a send control elsewhere in the turn.
+    return all(box, SEND).find(n => visible(n) && !n.matches(STOP) && !/stop|停止|中止/i.test(n.getAttribute("aria-label") || "")) || null;
   }
   function snapshot(doc = document, completion = false) {
     const input = composer(doc);
     const box = input?.closest("form") || input?.parentElement;
-    const stop = all(doc, STOP).some(visible);
+    // Native Stop belongs to the composer. A same-label button rendered by an
+    // assistant/tool response must not keep Queue in a false running state.
+    const stop = Boolean(box && all(box, STOP).some(visible));
     const messages = tail(doc);
     const users = messages.filter(n => n.dataset.messageAuthorRole === "user");
     const assistants = messages.filter(n => n.dataset.messageAuthorRole === "assistant");
@@ -73,16 +86,19 @@
     const trailingTurn = lastGroup?.matches(TURN) ? lastGroup : lastGroup?.querySelector(TURN);
     const activeTurn = user && trailingTurn && (user.compareDocumentPosition(trailingTurn) & 4) ? trailingTurn : afterUser ? assistantTurn : turn(user);
     const local = selector => activeTurn ? all(activeTurn, selector) : [];
-    const nativeUI = n => visible(n) && !n.closest('.markdown, .prose, pre, code, [data-message-author-role="user"]');
+    const nativeUI = n => nativeSurfaceControl(n, activeTurn);
     const waiting = local('button').some(n => nativeUI(n) && /^(allow|approve|confirm|continue|continue generating|allow once|always allow|允许|批准|确认|继续|继续生成|允许一次|始终允许)$/i.test(n.innerText.trim()));
     const busy = local('[role="status"], [data-state="loading"]').some(n => nativeUI(n) && !failureKind(n.textContent) && /working|thinking|searching|generating|正在处理|正在思考|正在搜索|正在生成/i.test(n.textContent.slice(0,200)));
-    const errors = [...local('[role="alert"], [data-testid*="error"]'), ...(box ? all(box, '[role="alert"], [data-testid*="error"]') : [])].filter(nativeUI);
+    const errors = [
+      ...local('[role="alert"], [data-testid*="error"]').filter(nativeUI),
+      ...(box ? all(box, '[role="alert"], [data-testid*="error"]').filter(n => nativeSurfaceControl(n, box)) : [])
+    ];
     // Some native reasoning failures are short button/status labels rather than alerts.
     const labels = local('button, [role="status"]').filter(nativeUI).map(n => (n.getAttribute('aria-label') || n.textContent || '').trim());
     const kinds = errors.map(n => failureKind(n.textContent) || "failed");
     for (const label of labels) if (/^(?:unable to think|could(?: not|n't) think|thinking failed|无法思考|未能思考|思考失败|you stopped this response|response stopped|用户已停止|你已停止|已停止生成)[.!。！]?$/i.test(label)) kinds.push(failureKind(label));
     const failure = ["blocked", "stopped", "failed", "recoverable"].find(kind => kinds.includes(kind)) || "";
-    const copy = afterUser && Boolean(assistantTurn?.querySelector('button[data-testid="copy-turn-action-button"]'));
+    const copy = afterUser && Boolean(assistantTurn && all(assistantTurn, 'button[data-testid="copy-turn-action-button"]').some(nativeTurnControl));
     const outcome = waiting ? "attention" : stop || busy ? "running" : failure || (copy && messageId(assistant) ? "completed" : "idle");
     // Upload inputs may be cleared after upload. Native removal controls remain
     // the evidence that the composer still owns an attachment (including images).
@@ -178,5 +194,5 @@
     }
     return globalThis.ChatGPTQueueCore.comparable(readText(input)) === globalThis.ChatGPTQueueCore.comparable(value);
   }
-  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, failureKind, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, projectCache, write };
+  return { COMPOSER, STOP, SEND, visible, enabled, readText, messageId, failureKind, nativeTurnControl, composer, sendButton, snapshot, precedes, generationMatches, receipt, scope, projectCache, write };
 });

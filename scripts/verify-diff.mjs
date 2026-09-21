@@ -6,8 +6,7 @@ for (const staged of [false, true]) {
     ...(staged ? ["--cached"] : []),
     "--check",
     "--",
-    ".",
-    ":(exclude)vendor/chatgpt-web-accelerator/**"
+    "."
   ];
   const result = spawnSync("git", args, { stdio: "inherit", shell: false });
   if (result.error) throw result.error;

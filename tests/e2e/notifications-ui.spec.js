@@ -91,7 +91,7 @@ test("popup shows compact localized switches, scoped queues and honest permissio
   await page.goto("https://chatgpt.com/c/popup-reviewed");await expect(control(page,"queue")).toBeVisible();
   await extensionServiceWorker.evaluate(()=>{chrome.notifications.getPermissionLevel=async()=>"denied";});
   const popup=await persistentContext.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
-  await expect(popup.getByRole("switch")).toHaveCount(4);await expect(popup.locator("#permission")).toHaveText("浏览器未允许");
+  await expect(popup.getByRole("switch")).toHaveCount(6);await expect(popup.locator("#permission")).toHaveText("浏览器未允许");
   await expect(popup.locator("#shortcutCount")).toHaveValue("8");await expect(popup.locator("#shortcutCount")).toBeEnabled();
   await expect(popup.locator("#delivery")).toContainText("勿扰");
   await popup.locator('label:has(#notifications)').click();await expect(popup.locator("#delivery")).toHaveText("提醒已关闭，不影响消息发送。");

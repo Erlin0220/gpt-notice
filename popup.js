@@ -11,7 +11,7 @@
       document.getElementById("delivery").textContent = settings?.notifications === false ? "提醒已关闭，不影响消息发送。" : reply.permission !== "granted" ? "请检查浏览器通知权限。系统勿扰设置也可能隐藏横幅。" : reply.notification?.pending ? `有 ${reply.notification.pending} 条提醒等待补送。` : reply.notification?.lastAt ? `最近提交系统：${new Date(reply.notification.lastAt).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" })}。系统勿扰模式可能隐藏横幅。` : "队列只在最终完成时提醒，避免逐条打扰。";
     };
     showDelivery(reply.settings);
-    for (const feature of ["sidebarCollapse", "toolFold", "queue", "notifications"]) {
+    for (const feature of ["sidebarCollapse", "longChatPerf", "scrollStabilizer", "toolFold", "queue", "notifications"]) {
       const control = document.getElementById(feature);
       control.checked = reply.settings?.[feature] !== false;
       control.disabled = false;

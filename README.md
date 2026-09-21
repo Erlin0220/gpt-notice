@@ -65,7 +65,8 @@ gpt-notice 选择从交互源头减量：
 | **减少侧栏请求** | 新聊天默认折叠置顶 / 项目 / 聊天，降低多项目同时展开产生的请求扇出 |
 | **项目快捷访问** | 从 ChatGPT 已经加载的数据中逐步学习项目，不额外批量请求项目详情 |
 | **原生体验优先** | 不创建第二个输入框，不接管 Send / Stop / 模型 / 附件 |
-| **长对话性能优化** | 直接复用固定版本的 ChatGPT Web Accelerator，用实测高度占位并虚拟化离屏 turn，避免自研裁剪算法 |
+| **长对话性能优化** | 使用浏览器原生 `content-visibility:auto` 与 intrinsic-size 占位，减少屏外渲染成本，不隐藏或卸载 React turn |
+| **滚动稳定器** | 只在用户原本跟随最新消息时纠正长会话异常回跳；主动向上阅读立即停用自动纠正，并提供“最新消息”兜底按钮 |
 | **工具调用折叠** | 工具调用跟随原生“思考了 …”一起展开 / 收起，完成后保持原生默认折叠；面板开关可独立关闭 |
 | **消息队列** | 在正式 Conversation 中给原生 Composer 增加轻量 FIFO Queue |
 | **完成提醒** | 网络完成只作为候选，必须再经过页面语义确认，避免切 Tab / HTTP 完成误报 |
@@ -178,7 +179,11 @@ npm run build
 - 不新增第二套高频轮询；只有存在未确认的 network-completion candidate 时，才用 Chrome Alarm 每 30 秒做一次低频语义复核；
 - 旧实验版本留下的 DNR 拦截规则只会被清理，不会重新创建。
 
-“长对话性能优化”直接加载 vendored `ChatGPT Web Accelerator`。默认 JS 模式用 `IntersectionObserver` 判断视口范围，在 turn 离屏前读取真实高度，再用 `contain-intrinsic-size` 保留该高度并通过 `content-visibility` 跳过内部渲染；新增 turn 由上游自己的 `MutationObserver` 发现。gpt-notice 不再维护“最近两轮”、`nth-last-child` 或 `display:none` 之类的自研裁剪规则，也不把性能逻辑接进 Queue 主循环。
+“长对话性能优化”现在只使用浏览器原生 CSS：turn 使用 `content-visibility:auto`，并用 `contain-intrinsic-size:auto 500px` 给尚未渲染的屏外内容提供占位。它不再用 JavaScript `IntersectionObserver` 把 turn 强制切成 `content-visibility:hidden`，也没有为性能功能新增 `MutationObserver`、节点卸载或 GPU `will-change`。原因是已经用 fixture 稳定复现：旧虚拟化 turn 被 ChatGPT SPA/React 复用到新会话时，旧 hidden 状态可以跟着节点留下，最终表现为新会话整块空白；关闭优化才会恢复。
+
+“滚动稳定器”与性能优化是独立能力。它不修改 ChatGPT 的虚拟列表实现，也不 monkey-patch `scrollTop` / `scrollTo`；只复用现有低频页面 sampler 定位最新 turn 和滚动容器，用窄范围 `ResizeObserver` + 用户滚动意图 + `requestAnimationFrame` 判断是否发生了非用户触发的明显回跳。用户向上滚动、拖动滚动条或按 PageUp/Home 时立即解除自动跟随；若页面短时间反复抢夺滚动位置，扩展停止自动纠正，只保留“↓ 最新消息”按钮。
+
+扩展面板仍保留独立开关。关闭时只移除根节点上的性能 class，恢复浏览器默认渲染；重新开启后 CSS 会自动覆盖当前和之后出现的 turn，不需要追踪滚动容器或路由。新版初始化还会清理旧版本留下的 `chatgpt-accelerator-hidden/unloaded` class 与内联高度状态，避免升级后继续继承旧虚拟化结果。这个实现刻意比旧方案保守：减少屏外 layout/paint 成本，但不尝试删除 DOM 或强制隐藏 React 管理的内容。
 
 ## 为什么尽量保持“薄”
 
@@ -240,9 +245,11 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 <details>
 <summary><strong>长工具调用如何折叠</strong></summary>
 
-当 ChatGPT 原生回复带有“思考了 … / Thought for …”折叠区时，gpt-notice 不再额外造一行“工具调用 · N”。工具调用直接跟随原生思考区：思考区收起时工具调用一起隐藏，展开思考区时原生工具调用一起显示。
+当 ChatGPT 原生回复仍带有“思考了 … / Thought for …”折叠区时，工具调用继续跟随原生思考区：思考区收起时工具调用一起隐藏，展开时一起显示。
 
-折叠只改变页面展示，不移动 React DOM、不读取或改写工具参数 / 结果，也不新增观察器。它跟随原生思考按钮的 `aria-expanded` 状态，并复用扩展现有低频页面 tick；原生思考区自动收起后，工具调用同步收起，后续新出现的工具调用也直接进入同一折叠状态。
+2026-09 的 ChatGPT Web 在很多工具型回复中已经不再提供 turn 级 `aria-expanded` Thought 按钮，而是每个工具行自己提供“打开工具调用列表 / Open tool call list”。这种当前结构下，gpt-notice 会把同一回复里重复的、纯摘要型“已调用工具”行压成最后一条，保留一个原生工具列表入口；包含 iframe、图片、表格、App surface 或额外交互控件的工具行 fail-open，不隐藏。
+
+两条路径都只改变展示属性，不移动 React DOM、不读取或改写工具参数 / 结果、不模拟点击，也不新增观察器；同步仍复用现有低频页面 tick。
 
 扩展面板提供独立的“工具调用折叠”气泡开关，默认开启。关闭时当前页面立即恢复全部原生工具调用；重新开启后，已有长工具调用重新按默认折叠规则处理。
 
@@ -253,7 +260,11 @@ Queue 按账号 / Workspace 与正式 Conversation 保存；重开同一对话�
 
 系统提醒采用“后台网络候选完成 + 页面语义确认”的两层机制。Service Worker 只读观察原生 conversation POST 的生命周期；网络完成不等于回复完成，仍需要精确 document 的页面状态确认。网络结束后如果第一次 probe 仍是 running / unavailable，不再立即丢弃关联，而是保留最小 candidate、主动唤醒对应 document，并用 30 秒 Chrome Alarm 继续有限复核，直到语义终态、路由失效或 10 分钟 TTL 到期。
 
-仍在生成、页面无法响应、探针超时、账号 / Workspace / conversation 不匹配时都不会直接发成功提醒。若网络已完成且同一轮已经出现原生 Copy 等最终动作，允许把仍残留的 Stop / busy 视为后台 UI 陈旧状态；显式 Stop、错误、审批仍优先。frozen 页面只保留 candidate 等待恢复，discarded / 换 document 则停止这次精确恢复。
+仍在生成、页面无法响应、探针超时、账号 / Workspace / conversation 不匹配时都不会直接发成功提醒。若网络已完成且同一轮已经出现原生 Copy 等最终动作，允许把仍残留的 Stop / busy 视为后台 UI 陈旧状态；显式 Stop、错误、审批仍优先。
+
+后台节流导致页面 controller 丢失内存里的 active turn 时，精确 network probe 可以从该 conversation 已持久化的 current turn 恢复这一个临时状态，再执行同一套终态判断。恢复要求 scope、route、document、原生 user message 和 generation 全部一致，并拒绝 Stop、已结束 turn 与重生成借位；因此不会把“HTTP 已结束”直接当成“回复已完成”。
+
+Chrome 明确标记 tab 为 `frozen` 时，页面不能执行 event handler、timer 或原生 Send，所以扩展不会伪装成“后台仍能点击发送”。如果这一轮网络请求已经结束，会发一个不宣称回复成功的“后台标签页已冻结”提醒，并继续保留 completion candidate；点击提醒会激活原标签页、解除冻结，然后立即重新做语义确认并继续 Queue。discarded / 换 document 则停止这次精确恢复。
 
 完成状态与待投递通知意图通过同一次 `storage.local.set` 批量提交。Chrome 通知创建失败时保留最小恢复记录，复用现有 sampler 以至少 10 秒间隔重试；Worker 再次启动时也可以恢复。30 秒 Alarm 只在存在未确认 completion candidate 时存在，不做常驻 keepalive。
 

@@ -6,6 +6,8 @@
 
 保留原有单 writer、lease/intent/receipt、单 sampler、独立 UI。原生 UI 派生 outcome 仍是业务终态；网络结束不是业务结束，也不是发送回执。但真实后台页验证表明“一次 network probe 失败后立即丢弃 request correlation”会把通知和 Queue 同时重新绑回页面 sampler，所以 network completion 现在保留为**带 TTL 的 wake candidate**：立即提示精确 document、继续复用同一语义判定；仍未终态时只用 30 秒 Chrome Alarm 做低频复核，不能直接 settle。
 
+2026-09-20 的真实隐藏标签页复现还确认了另一个恢复缺口：network candidate、documentId、当前 user message 与原生 Copy 都正确时，页面低频 controller 的内存 turn 仍可能因为后台节流/重建而缺失，导致 probe 永远返回 running。精确 probe 现在允许从同一 scope/conversation 的 durable Queue current turn **只读重建临时 controller turn**，但仅限 durable turn 未完成、未 Stop、且 generation id 与 candidate 的原生 user message id 完全一致；重生成、旧请求、scope/route/document 不匹配仍 fail closed。重建后仍走同一个原生终态判定，network candidate 本身依旧不能直接 settle。
+
 另一个恢复缺口来自原生 Send：仅存在页面内存的 pending baseline 时，扩展重载、页面刷新或 content controller 重建会留下 durable hold，却无法证明后来出现的新 user turn 属于这次发送。现在 hold 同步持久化发送前最后一个原生 user message ID (`holdBaseline`)；恢复时必须观察到一个位于该 baseline 之后的新原生 user turn，才允许重新建立 turn。baseline 本身是原生消息 ID，不保存 prompt 正文，也不把经过的时间当送达证据。
 
 | 页面事实 | Queue / 提醒 |
@@ -17,7 +19,8 @@
 | 原生审批或继续生成 | 仍是活动轮次；至多一次需要处理提醒，不代替用户操作 |
 | 原生限额、策略、账号限制或未分类错误 | 暂停，发非成功提醒；点击 Queue 继续也不能绕过仍存在的原生阻塞 |
 | intent 后无精确送达回执 | 仍使用既有 unknown 隔离，绝不自动重发 |
-| 只有 network 结束、无完成控件，或 probe 超时/页面冻结 | 不推测完成；保留 candidate，30 秒后复核，frozen 等恢复 |
+| 只有 network 结束、无完成控件，或 probe 超时 | 不推测完成；保留 candidate，30 秒后复核 |
+| network 已结束且精确 tab 被 Chrome 标记为 frozen | 不推测完成、不 settle、不发送下一条；发一次“页面被冻结、点击恢复”的 attention，保留 candidate；激活解冻后再语义确认 |
 | 同一 generation 的 network 已完成，原生 Copy 等最终动作已出现，但 Stop/busy 仍残留 | 视为后台 UI 陈旧；允许完成。显式 Stop、error、approval 仍优先 |
 
 这里只检查当前轮/原生 composer 的 alert、错误控件及窄范围状态标签；助手正文、代码示例和历史错误不是失败信号。正常安全拒答文本也不自动等同于账户策略封禁。`completed` 与 `recoverable` 的相同发送前置条件仍包括空草稿、无附件/IME、原生可发送、正确账号/路由/消息、未暂停及无未知 outbox。
@@ -35,7 +38,7 @@
 - [dsh-auto-continue](https://github.com/HsiangNianian/dsh-auto-continue/tree/94a3e102681d8ba06c5e2bb85bf9f939b001d11b)：`src/host/engine.ts` 以 host `turn/end` 原因区分 completed/aborted/失败并限制连续尝试。只借鉴已知原因分类、用户 Stop 优先和有界恢复；不移植自动发“继续”、loop guard、事件流重连和退避系统。
 - [chatgpt-done-notifier](https://github.com/kkonstantin08/chatgpt-done-notifier/tree/54381bf1c3362570d0dd8186dc258fa0c35e95ad)：`src/content/state-machine.ts` 跟踪真实生成周期、错误、手动 Stop 与稳定窗口；复核了这些思路，不复制未确认许可证的实现，也不引入其 Observer/offscreen 路径。
 - [chatgpt.js](https://github.com/KudoAI/chatgpt.js/tree/43f377e0485c3ca8eaaf1cb8363fc8b03afd602c)：`src/chatgpt.js` 的 `isIdle()` 依赖 DOM/MutationObserver；idle 工具不提供本项目需要的送达保证或完整异常分类，不作为 Queue 的最终判据，不新增库依赖。
-- Chrome [webRequest](https://developer.chrome.com/docs/extensions/reference/api/webRequest)、[MV3 Worker 生命周期](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)、[Page Lifecycle](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)：运输层结束、worker 存活和页面可执行性是不同边界。不以保活或网络重放规避它们；Workbox Background Sync 的失败请求重放与本产品边界相反。
+- Chrome [webRequest](https://developer.chrome.com/docs/extensions/reference/api/webRequest)、[MV3 Worker 生命周期](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle)、[tabs.frozen](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Page Lifecycle](https://developer.chrome.com/docs/web-platform/page-lifecycle-api)：运输层结束、worker 存活和页面可执行性是不同边界。Chrome 明确说明 frozen tab 不能执行 event handler 或 timer，激活后才解冻；因此冻结期间 Queue 不能合法地依赖 DOM 点击继续。不以保活或网络重放规避这些边界；Workbox Background Sync 的失败请求重放与本产品边界相反。
 
 这些实现提供可复核思路，不代表所有库具有相同成熟度，更不能证明 ChatGPT DOM 是稳定契约。
 

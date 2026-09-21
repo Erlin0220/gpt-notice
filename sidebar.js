@@ -97,9 +97,25 @@
     finishPendingCollapse();
   }
 
+  const SYMBOL = /^[a-z0-9-]+$/i;
+  function spriteHref(value, expectedKind = "") {
+    if (typeof value !== "string" || value.length > 500) return null;
+    try {
+      const url = new URL(value, location.origin);
+      if (url.origin !== location.origin || url.username || url.password || url.search) return null;
+      const match = /^\/cdn\/assets\/sprites-(core|shell)-[a-z0-9._-]+\.svg$/i.exec(url.pathname), kind = match?.[1]?.toLowerCase() || "";
+      const symbol = url.hash.slice(1);
+      if (!match || expectedKind && kind !== expectedKind || symbol && !SYMBOL.test(symbol)) return null;
+      return { kind, base: url.pathname, symbol };
+    } catch { return null; }
+  }
   function spriteBase(kind) {
-    const use = document.querySelector(`use[href*="/cdn/assets/sprites-${kind}-"]`);
-    return use?.getAttribute("href")?.split("#")[0] || "";
+    if (kind !== "core" && kind !== "shell") return "";
+    for (const use of document.querySelectorAll("use[href]")) {
+      const parsed = spriteHref(use.getAttribute("href") || "", kind);
+      if (parsed) return parsed.base;
+    }
+    return "";
   }
 
   function setChevron() {
@@ -173,12 +189,11 @@
     const icon = main?.firstElementChild, svg = icon?.querySelector("svg"), use = svg?.querySelector("use[href]");
     if (!icon || !svg) return null;
     if (!use) return { sprite: "shell", symbol: "folder" };
-    const href = use.getAttribute("href") || "", sprite = href.includes("sprites-core-") ? "core" : href.includes("sprites-shell-") ? "shell" : "";
-    const symbol = href.split("#")[1] || "";
-    if (!sprite || !symbol) return null;
-    const visual = { sprite, symbol }, holder = icon.querySelector('[data-testid="project-folder-icon"]');
+    const parsed = spriteHref(use.getAttribute("href") || "");
+    if (!parsed?.symbol) return null;
+    const visual = { sprite: parsed.kind, symbol: parsed.symbol }, holder = icon.querySelector('[data-testid="project-folder-icon"]');
     const color = holder?.style?.color || "";
-    if (color) visual.color = color;
+    if (color && color.length <= 32 && (!globalThis.CSS?.supports || CSS.supports("color", color))) visual.color = color;
     return visual;
   }
 
@@ -193,21 +208,9 @@
 
   function makeIcon(project) {
     const nativeMain = nativeRowFor(project);
-    const nativeIcon = nativeMain?.firstElementChild;
-    if (nativeIcon) {
-      const clone = nativeIcon.cloneNode(true);
-      // Native animated folder SVGs carry document-global clip IDs. Keep their
-      // exact path geometry but avoid duplicate IDs in this independent row.
-      for (const node of clone.querySelectorAll("[id]")) {
-        const old = node.id, next = `${project.projectId}-${old}`;
-        node.id = next;
-        for (const clipped of clone.querySelectorAll("[clip-path]")) if (clipped.getAttribute("clip-path") === `url(#${old})`) clipped.setAttribute("clip-path", `url(#${next})`);
-      }
-      return clone;
-    }
     const wrap = document.createElement("div"); wrap.className = "relative flex items-center justify-center [opacity:var(--menu-item-icon-opacity,1)] icon";
     const holder = document.createElement("div"); holder.dataset.testid = "project-folder-icon";
-    const visual = project.visual || visualOf(nativeMain);
+    const visual = visualOf(nativeMain) || project.visual;
     if (visual) {
       if (visual.color) holder.style.color = visual.color;
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20"); svg.setAttribute("viewBox", "0 0 20 20"); svg.setAttribute("class", "icon");
@@ -248,12 +251,15 @@
 
   function projectRow(project, current) {
     const template = nativeRowTemplate();
-    const li = template?.querySelector('[role="button"][data-sidebar-item="true"]') ? template.cloneNode(true) : fallbackRow();
+    const li = fallbackRow();
     const row = li.querySelector('[class~="group/project-unfurl-row"]') || li.firstElementChild;
     const main = li.querySelector('[role="button"][data-sidebar-item="true"]');
+    const templateRow = template?.querySelector('[class~="group/project-unfurl-row"]'), templateMain = template?.querySelector('[role="button"][data-sidebar-item="true"]');
+    if (template?.className) li.className = template.className;
+    if (templateRow?.className) row.className = templateRow.className;
+    if (templateMain?.className) main.className = templateMain.className;
     main.removeAttribute("aria-controls"); main.removeAttribute("aria-expanded"); main.removeAttribute("data-state"); main.removeAttribute("data-active"); main.dataset.projectId = project.projectId;
     main.replaceChildren(makeIcon(project), nameNode(project));
-    for (const child of [...row.children].slice(1)) child.remove();
     row.append(makeCompose(project));
     if (project.projectId === current?.projectId) main.dataset.active = "";
     main.setAttribute("aria-label", project.name); main.title = project.name;

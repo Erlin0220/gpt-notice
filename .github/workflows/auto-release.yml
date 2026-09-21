@@ -18,14 +18,15 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout latest main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
@@ -172,13 +173,26 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
+          TARGET_SHA: ${{ steps.version.outputs.target_sha }}
         shell: bash
         run: |
           set -euo pipefail
+          REMOTE_TAG_SHA="$(git ls-remote origin "refs/tags/${TAG}^{}" | awk '{print $1}')"
+          if [[ -z "$REMOTE_TAG_SHA" ]]; then
+            REMOTE_TAG_SHA="$(git ls-remote origin "refs/tags/${TAG}" | awk '{print $1}')"
+          fi
+          if [[ -z "$REMOTE_TAG_SHA" || "$REMOTE_TAG_SHA" != "$TARGET_SHA" ]]; then
+            echo "Remote tag $TAG does not resolve to packaged commit $TARGET_SHA" >&2
+            exit 1
+          fi
           gh release view "$TAG" \
             --json url,tagName,name,isDraft,isPrerelease,publishedAt,assets \
             > release-info.json
           jq -e --arg tag "$TAG" '.isDraft == false and .tagName == $tag' release-info.json >/dev/null
           jq -e --arg asset "chatgpt-task-notifier-v${VERSION}.zip" '[.assets[].name] | index($asset) != null' release-info.json >/dev/null
           jq -e '[.assets[].name] | index("SHA256SUMS.txt") != null' release-info.json >/dev/null
+          rm -rf release-verify
+          mkdir release-verify
+          gh release download "$TAG" --dir release-verify --pattern "chatgpt-task-notifier-v${VERSION}.zip" --pattern SHA256SUMS.txt
+          (cd release-verify && sha256sum -c SHA256SUMS.txt)
           cat release-info.json
