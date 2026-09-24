@@ -48,7 +48,7 @@
     const groups = new Map();
     for (const marker of doc.querySelectorAll(MARKER)) {
       const row = toolRow(marker), flow = row?.parentElement;
-      const turn = marker.closest('[data-turn-id], [data-testid^="conversation-turn-"]');
+      const turn = marker.closest('[data-turn-id], [data-testid^="conversation-turn-"], [data-turn-key]');
       if (!row || !flow || !turn || !row.classList.contains("contents") || !turn.contains(flow)) continue;
       let group = groups.get(flow);
       if (!group) groups.set(flow, group = []);

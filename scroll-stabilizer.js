@@ -98,7 +98,7 @@
   }
 
   function attach(anchor) {
-    const nextTurn = anchor?.closest?.('[data-testid^="conversation-turn-"]') || null;
+    const nextTurn = anchor?.closest?.('[data-testid^="conversation-turn-"], [data-turn-key]') || null;
     if (!nextTurn?.isConnected) { detach(); return; }
     const nextScroller = scrollableAncestor(nextTurn);
     const nextContent = nextTurn.parentElement;

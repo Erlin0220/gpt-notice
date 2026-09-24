@@ -1,4 +1,5 @@
-html.gpt-notice-longchat-perf [data-testid^="conversation-turn-"] {
+html.gpt-notice-longchat-perf [data-testid^="conversation-turn-"],
+html.gpt-notice-longchat-perf [data-turn-key] {
   content-visibility: auto;
   contain-intrinsic-size: auto 500px;
 }

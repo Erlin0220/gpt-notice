@@ -7,16 +7,51 @@
   // Keep the selectors verified by the previous extension and the live web regression.
   const COMPOSER = '#prompt-textarea, main textarea[placeholder], main [contenteditable="true"][data-virtualkeyboard]';
   const STOP = 'button[data-testid*="stop"], button[aria-label*="Stop"], button[aria-label*="stop"], button[aria-label*="停止"], button[aria-label*="中止"], button[aria-label*="取消生成"]';
-  const SEND = '#composer-submit-button, button[data-testid*="send-button"], button[data-testid*="composer-submit"]';
+  const SEND = '#composer-submit-button, button[data-testid*="send-button"], button[data-testid*="composer-submit"], button[aria-label="Send"], button[aria-label="发送"]';
+  const TURN = '[data-testid^="conversation-turn-"], article, [data-turn-key]';
+  const CURRENT_USER = '[data-chatgpt-search-unit-key$=":user"][data-chatgpt-search-message-ids]';
+  const CURRENT_ASSISTANT = '[data-content-search-unit-key$=":assistant"]';
+  const MESSAGE = `[data-message-author-role], ${CURRENT_USER}, ${CURRENT_ASSISTANT}`;
   const all = (doc, selector) => [...doc.querySelectorAll(selector)];
   const visible = n => Boolean(n?.isConnected && n.getClientRects().length && getComputedStyle(n).visibility !== "hidden");
   const enabled = n => Boolean(n && !n.disabled && n.getAttribute("aria-disabled") !== "true");
-  const readText = n => String(n?.value ?? n?.innerText ?? n?.textContent ?? "").replace(/\r\n?/g, "\n");
-  const messageId = n => n?.getAttribute("data-message-id") || "";
-  const TURN = '[data-testid^="conversation-turn-"], article';
   const turn = n => n?.closest(TURN);
-  const MESSAGE = '[data-message-author-role]';
-  const UNTRUSTED_TURN_CONTENT = '.markdown, .prose, pre, code, [data-message-author-role], [class~="group/tool-message"], [data-testid*="app"], [data-testid*="widget"], [role="application"]';
+  function messageRole(n) {
+    const legacy = n?.getAttribute("data-message-author-role") || "";
+    if (legacy) return legacy;
+    if (n?.matches?.(CURRENT_USER)) return "user";
+    if (n?.matches?.(CURRENT_ASSISTANT)) return "assistant";
+    return "";
+  }
+  function readText(n) {
+    if (!n) return "";
+    let value;
+    if (n.matches?.(CURRENT_USER)) value = n.querySelector('[data-user-message-bubble="true"]')?.innerText ?? "";
+    else if (n.matches?.(CURRENT_ASSISTANT)) {
+      const blocks = all(n, '[data-markdown-text-style="assistant-message"]');
+      value = blocks.length ? blocks.map(block => block.innerText ?? block.textContent ?? "").join("\n") : "";
+    } else value = n.value ?? n.innerText ?? n.textContent ?? "";
+    return String(value).replace(/\r\n?/g, "\n");
+  }
+  const uniqueIds = values => [...new Set(values.flatMap(value => String(value || "").trim().split(/\s+/)).filter(value => value && value.length <= 200))];
+  function assistantMessageId(n) {
+    if (!n) return "";
+    const direct = uniqueIds([n.getAttribute("data-chatgpt-search-message-ids")]);
+    if (direct.length === 1) return direct[0];
+    const selected = uniqueIds(all(n, '[data-chatgpt-selection-message-id]').map(node => node.getAttribute("data-chatgpt-selection-message-id")));
+    if (selected.length === 1) return selected[0];
+    const key = n.closest('[data-content-search-turn-key]')?.getAttribute("data-content-search-turn-key") || "";
+    return /^fallback-turn-/i.test(key) ? "" : key;
+  }
+  function messageId(n) {
+    const legacy = n?.getAttribute("data-message-id") || "";
+    if (legacy) return legacy;
+    const role = messageRole(n), owner = turn(n);
+    if (role === "user") return owner?.getAttribute("data-turn-key") || "";
+    if (role !== "assistant") return "";
+    return assistantMessageId(n);
+  }
+  const UNTRUSTED_TURN_CONTENT = '.markdown, .prose, pre, code, [data-message-author-role], [data-chatgpt-search-unit-key$=":user"], [data-user-message-bubble], [data-markdown-text-style="assistant-message"], [class~="group/tool-message"], [data-testid*="app"], [data-testid*="widget"], [role="application"]';
   const nativeSurfaceControl = (node, owner) => Boolean(node && owner?.contains?.(node) && visible(node) && !node.closest(UNTRUSTED_TURN_CONTENT));
   function nativeTurnControl(node) {
     const owner = turn(node);
@@ -32,25 +67,36 @@
     if (/error|wrong|failed|错误|失败|出错/i.test(text)) return "failed";
     return "";
   }
-  let messageRoot = null, cachedUser = null, discoveryAfter = 0;
+  let messageRoot = null, cachedUser = null, currentTailTurn = null, discoveryAfter = 0;
   function tail(doc) {
+    const currentTurns = all(doc, '[data-turn-key]');
+    if (currentTurns.length) {
+      const groups = currentTurns.slice(-12);
+      currentTailTurn = groups.at(-1) || null;
+      messageRoot = null;
+      const nodes = groups.flatMap(node => all(node, `${CURRENT_USER}, ${CURRENT_ASSISTANT}`));
+      const user = nodes.findLast(n => messageRole(n) === "user");
+      if (user) cachedUser = user;
+      return nodes;
+    }
+    currentTailTurn = null;
     if (!messageRoot?.isConnected || messageRoot.ownerDocument !== doc) {
       if (Date.now() < discoveryAfter) return [];
       discoveryAfter = Date.now() + 2000;
       const nodes = all(doc, MESSAGE);
-      cachedUser = nodes.findLast(n => n.dataset.messageAuthorRole === "user") || null;
+      cachedUser = nodes.findLast(n => messageRole(n) === "user") || null;
       const last = turn(nodes.at(-1));
       messageRoot = last?.parentElement || null;
       // Live ChatGPT wraps each turn in its own div; the fixture/direct layout
       // puts sections directly under the transcript. Cache their common parent.
-      if (messageRoot?.children.length === 1) messageRoot = messageRoot.parentElement;
+      if (!last?.hasAttribute("data-turn-key") && messageRoot?.children.length === 1) messageRoot = messageRoot.parentElement;
       while (messageRoot && cachedUser && !messageRoot.contains(cachedUser)) messageRoot = messageRoot.parentElement;
       if (!messageRoot) return [];
     }
     const groups = [];
     for (let node = messageRoot.lastElementChild; node && groups.length < 12; node = node.previousElementSibling) groups.push(node);
     const nodes = groups.reverse().flatMap(n => n.matches(MESSAGE) ? [n] : all(n, MESSAGE));
-    const user = nodes.findLast(n => n.dataset.messageAuthorRole === "user");
+    const user = nodes.findLast(n => messageRole(n) === "user");
     if (user) cachedUser = user;
     else if (cachedUser?.isConnected && messageRoot.contains(cachedUser)) nodes.unshift(cachedUser);
     return nodes;
@@ -75,15 +121,15 @@
     // assistant/tool response must not keep Queue in a false running state.
     const stop = Boolean(box && all(box, STOP).some(visible));
     const messages = tail(doc);
-    const users = messages.filter(n => n.dataset.messageAuthorRole === "user");
-    const assistants = messages.filter(n => n.dataset.messageAuthorRole === "assistant");
+    const users = messages.filter(n => messageRole(n) === "user");
+    const assistants = messages.filter(n => messageRole(n) === "assistant");
     const user = users.at(-1) || null;
     const assistant = assistants.at(-1) || null;
     const afterUser = Boolean(user && assistant && (user.compareDocumentPosition(assistant) & 4));
     const assistantTurn = turn(assistant);
     // An error-only turn need not contain an assistant message at all.
     const lastGroup = messageRoot?.lastElementChild;
-    const trailingTurn = lastGroup?.matches(TURN) ? lastGroup : lastGroup?.querySelector(TURN);
+    const trailingTurn = currentTailTurn || (lastGroup?.matches(TURN) ? lastGroup : lastGroup?.querySelector(TURN));
     const activeTurn = user && trailingTurn && (user.compareDocumentPosition(trailingTurn) & 4) ? trailingTurn : afterUser ? assistantTurn : turn(user);
     const local = selector => activeTurn ? all(activeTurn, selector) : [];
     const nativeUI = n => nativeSurfaceControl(n, activeTurn);
@@ -98,7 +144,9 @@
     const kinds = errors.map(n => failureKind(n.textContent) || "failed");
     for (const label of labels) if (/^(?:unable to think|could(?: not|n't) think|thinking failed|无法思考|未能思考|思考失败|you stopped this response|response stopped|用户已停止|你已停止|已停止生成)[.!。！]?$/i.test(label)) kinds.push(failureKind(label));
     const failure = ["blocked", "stopped", "failed", "recoverable"].find(kind => kinds.includes(kind)) || "";
-    const copy = afterUser && Boolean(assistantTurn && all(assistantTurn, 'button[data-testid="copy-turn-action-button"]').some(nativeTurnControl));
+    const copy = afterUser && Boolean(assistantTurn && all(assistantTurn, 'button').some(n => nativeTurnControl(n) && (
+      n.matches('button[data-testid="copy-turn-action-button"]') || /^(?:copy|copy response|复制)$/i.test((n.getAttribute("aria-label") || "").trim())
+    )));
     const outcome = waiting ? "attention" : stop || busy ? "running" : failure || (copy && messageId(assistant) ? "completed" : "idle");
     // Upload inputs may be cleared after upload. Native removal controls remain
     // the evidence that the composer still owns an attachment (including images).
@@ -113,24 +161,31 @@
       model: afterUser ? assistant?.getAttribute("data-message-model-slug") || "" : "",
       copy,
       // Never read or hash streamed answer tokens. Content is sampled only after native controls are idle.
-      settledText: completion && afterUser && outcome === "completed" ? (assistant.textContent || "").slice(0,200000) : "" };
+      settledText: completion && afterUser && outcome === "completed" ? readText(assistant).slice(0,200000) : "" };
+  }
+  function userNode(userId, doc = document) {
+    if (!userId) return null;
+    const escaped = CSS.escape(userId);
+    return doc.querySelector(`[data-message-author-role="user"][data-message-id="${escaped}"]`) ||
+      doc.querySelector(`[data-turn-key="${escaped}"] ${CURRENT_USER}`);
   }
   function precedes(userId, node, doc = document) {
     if (!userId || !node?.isConnected) return false;
-    const baseline = doc.querySelector(`[data-message-author-role="user"][data-message-id="${CSS.escape(userId)}"]`);
+    const baseline = userNode(userId, doc);
     return Boolean(baseline?.isConnected && (baseline.compareDocumentPosition(node) & 4));
   }
   function generationMatches(generationId, page, doc = document) {
     if (generationId === page.userId) return true;
     if (!generationId?.startsWith(`${page.userId}:`) || !page.assistant) return false;
     const responseId = generationId.slice(page.userId.length + 1);
+    if (page.assistantId === responseId) return true;
     const marker = doc.querySelector(`[data-message-author-role="assistant"][data-message-id="${CSS.escape(responseId)}"]`);
     // Another tab may still show the previous answer to this same user message.
     // Require this regeneration's native marker, allowing subsequent tool segments.
     return Boolean(marker && (marker === page.assistant || (marker.compareDocumentPosition(page.assistant) & 4)));
   }
   function receipt(item, page) {
-    const baseline = document.querySelector(`[data-message-author-role="user"][data-message-id="${CSS.escape(item.baseline)}"]`);
+    const baseline = userNode(item.baseline);
     if (!baseline) return null; // Missing/virtualized baseline cannot prove delivery.
     return page.users.find(n => (baseline.compareDocumentPosition(n) & 4) && messageId(n) && globalThis.ChatGPTQueueCore.comparable(readText(n)) === globalThis.ChatGPTQueueCore.comparable(item.text)) || null;
   }
