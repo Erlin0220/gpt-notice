@@ -57,6 +57,22 @@ test("shortcut projects live in native sidebar flow and manual expansion is resp
   await expect(projectsButton).toHaveAttribute("aria-expanded","false");
 });
 
+test("shortcut list starts with a new-chat link that opens in a new tab", async ({page,persistentContext}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-new-chat");
+  await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
+  const first = page.locator(`${shortcut} .gn-list > li`).first().locator("[data-shortcut-new-chat]");
+  await expect(first).toHaveAttribute("target", "_blank");
+  await expect(first).toHaveAttribute("href", "/");
+  await expect(first).toHaveText(/^(新聊天|New chat)$/);
+  const original = page.url();
+  const opened = persistentContext.waitForEvent("page");
+  await first.click();
+  const newPage = await opened; await newPage.waitForLoadState("domcontentloaded");
+  await expect(newPage).toHaveURL("https://chatgpt.com/");
+  await expect(page).toHaveURL(original);
+  await newPage.close();
+});
+
 test("shortcut section defaults to eight rows, popup can change the limit, and native mechanics stay intact", async ({page,persistentContext,extensionId}) => {
   await page.goto("https://chatgpt.com/c/sidebar-native-shape");
   const extra = ["d","e","f","1","2","3","4","5"].map((c,i)=>({id:`g-p-${c.repeat(32)}`,short_url:`g-p-${c.repeat(32)}-extra-${i}`,display:{name:i===7?"怪物火车":`extra-${i}`,...(i===7?{}:{emoji:"terminal",theme:"#3A83F7"})}}));

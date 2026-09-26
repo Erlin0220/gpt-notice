@@ -343,6 +343,17 @@
     row.append(main); li.append(row); return li;
   }
 
+  function newChatRow() {
+    const li = fallbackRow();
+    const main = li.querySelector('[role="button"][data-sidebar-item="true"]');
+    const link = document.createElement("a"), label = document.documentElement.lang?.toLowerCase().startsWith("zh") ? "新聊天" : "New chat";
+    link.className = main.className; link.style.cssText = main.style.cssText; link.href = "/"; link.target = "_blank"; link.rel = "noopener noreferrer";
+    link.dataset.fill = ""; link.dataset.sidebarItem = "true"; link.dataset.shortcutNewChat = ""; link.setAttribute("aria-label", label); link.title = label;
+    link.append(inlineSvg(COMPOSE_ICON_PATHS), nameNode({ name: label }));
+    main.replaceWith(link);
+    return li;
+  }
+
   function projectRow(project, current) {
     const template = nativeRowTemplate();
     const li = fallbackRow();
@@ -411,7 +422,7 @@
     if (nextSignature === signature) return;
     signature = nextSignature;
     const visible = showAll ? projects : projects.slice(0, limit);
-    body.replaceChildren(...visible.map(project => projectRow(project, current)));
+    body.replaceChildren(newChatRow(), ...visible.map(project => projectRow(project, current)));
     if (!showAll && projects.length > limit) body.append(moreRow());
     setChevron();
   }
