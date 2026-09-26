@@ -343,17 +343,6 @@
     row.append(main); li.append(row); return li;
   }
 
-  function newChatRow() {
-    const li = fallbackRow();
-    const main = li.querySelector('[role="button"][data-sidebar-item="true"]');
-    const link = document.createElement("a"), label = document.documentElement.lang?.toLowerCase().startsWith("zh") ? "新聊天" : "New chat";
-    link.className = main.className; link.style.cssText = main.style.cssText; link.href = "/"; link.target = "_blank"; link.rel = "noopener noreferrer";
-    link.dataset.fill = ""; link.dataset.sidebarItem = "true"; link.dataset.shortcutNewChat = ""; link.setAttribute("aria-label", label); link.title = label;
-    link.append(inlineSvg(COMPOSE_ICON_PATHS), nameNode({ name: label }));
-    main.replaceWith(link);
-    return li;
-  }
-
   function projectRow(project, current) {
     const template = nativeRowTemplate();
     const li = fallbackRow();
@@ -386,6 +375,36 @@
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault(); location.assign(`/g/${project.shortUrl}/project`);
     });
+    return li;
+  }
+
+  function newChatRow(project, current) {
+    const li = projectRow(project, current), main = li.querySelector('[data-project-id]');
+    const row = main?.parentElement, action = li.querySelector("[data-project-new]");
+    if (!main || !row) return li;
+    if (action) {
+      const boundary = main.contains(action) ? main : row;
+      let node = action;
+      while (node.parentElement && node.parentElement !== boundary) node = node.parentElement;
+      node.remove();
+    }
+    const label = document.documentElement.lang?.toLowerCase().startsWith("zh") ? "新聊天" : "New chat";
+    const text = main.querySelector("[data-marquee-text]"); if (text) text.textContent = label;
+    const oldIcon = main.querySelector('[data-testid="project-folder-icon"] svg'), icon = inlineSvg(COMPOSE_ICON_PATHS);
+    if (oldIcon) {
+      for (const name of ["width", "height", "class"]) {
+        const value = oldIcon.getAttribute(name); if (value) icon.setAttribute(name, value);
+      }
+      oldIcon.closest('[data-testid="project-folder-icon"]')?.style.removeProperty("color");
+      oldIcon.replaceWith(icon);
+    }
+    const link = document.createElement("a");
+    link.className = main.className; link.style.cssText = main.style.cssText;
+    link.href = "/"; link.target = "_blank"; link.rel = "noopener noreferrer";
+    link.dataset.fill = ""; link.dataset.sidebarItem = "true"; link.dataset.shortcutNewChat = "";
+    link.setAttribute("aria-label", label); link.title = label;
+    while (main.firstChild) link.append(main.firstChild);
+    main.replaceWith(link);
     return li;
   }
 
@@ -422,7 +441,7 @@
     if (nextSignature === signature) return;
     signature = nextSignature;
     const visible = showAll ? projects : projects.slice(0, limit);
-    body.replaceChildren(newChatRow(), ...visible.map(project => projectRow(project, current)));
+    body.replaceChildren(newChatRow(visible[0], current), ...visible.map(project => projectRow(project, current)));
     if (!showAll && projects.length > limit) body.append(moreRow());
     setChevron();
   }

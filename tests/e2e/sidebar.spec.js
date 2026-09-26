@@ -64,6 +64,22 @@ test("shortcut list starts with a new-chat link that opens in a new tab", async 
   await expect(first).toHaveAttribute("target", "_blank");
   await expect(first).toHaveAttribute("href", "/");
   await expect(first).toHaveText(/^(新聊天|New chat)$/);
+  const layout = await page.evaluate(() => {
+    const host = document.getElementById("gpt-notice-project-shortcuts");
+    const newChat = host?.querySelector("[data-shortcut-new-chat]");
+    const project = host?.querySelector("[data-project-id]");
+    return {
+      newClass: newChat?.className || "",
+      projectClass: project?.className || "",
+      newContentClass: newChat?.firstElementChild?.className || "",
+      projectContentClass: project?.firstElementChild?.className || "",
+      newTextParentClass: newChat?.querySelector("[data-marquee-text]")?.parentElement?.className || "",
+      projectTextParentClass: project?.querySelector("[data-marquee-text]")?.parentElement?.className || ""
+    };
+  });
+  expect(layout.newClass).toBe(layout.projectClass);
+  expect(layout.newContentClass).toBe(layout.projectContentClass);
+  expect(layout.newTextParentClass).toBe(layout.projectTextParentClass);
   const original = page.url();
   const opened = persistentContext.waitForEvent("page");
   await first.click();
