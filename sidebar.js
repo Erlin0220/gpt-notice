@@ -31,6 +31,16 @@
     moreRow: "flex gap-1 h-9 after:block after:h-px after:content-[''] last:after:hidden",
     more: "Button-G93JGk [--button-font-weight:var(--font-weight-normal)] [--color-text-secondary-ghost:var(--color-text-tertiary)]"
   };
+  const LEGACY = {
+    section: "group/sidebar-expando-section mb-[var(--sidebar-expanded-section-margin-bottom)]",
+    header: "group/sidebar-expando-section-header flex items-center justify-between pe-1.5",
+    head: "text-token-text-tertiary flex w-full items-center justify-start gap-0.5 px-4 py-1.5",
+    title: "__menu-label font-medium",
+    main: "group __menu-item border-b border-transparent bg-clip-padding hoverable gap-1.5 transition-colors keyboard-focused:focus-ring keyboard-focused:-outline-offset-2 can-hover:group-hover/project-unfurl-row:pe-16 can-hover:group-focus-within/project-unfurl-row:pe-16 cant-hover:pe-16 has-[[data-state=open]]:pe-16 group-hover/project-unfurl-row:bg-(--menu-item-highlighted) group-focus-within/project-unfurl-row:bg-(--menu-item-highlighted)",
+    actions: "text-token-text-tertiary pointer-events-none absolute inset-y-0 end-4 z-10 flex items-center gap-2 opacity-0 transition-opacity duration-100 ease-out can-hover:group-hover/project-unfurl-row:pointer-events-auto can-hover:group-hover/project-unfurl-row:opacity-100 can-hover:group-focus-within/project-unfurl-row:pointer-events-auto can-hover:group-focus-within/project-unfurl-row:opacity-100 cant-hover:pointer-events-auto cant-hover:opacity-100 has-[[data-state=open]]:pointer-events-auto has-[[data-state=open]]:opacity-100",
+    action: "disabled:text-token-text-tertiary pointer-events-auto disabled:pointer-events-none touch:min-h-10 keyboard-focused:*:focus-ring relative isolate flex min-h-9 items-center self-stretch rounded-e-[10px] focus:outline-none -my-2 -ms-1 ps-1 -me-2.5 pe-1.5 text-inherit interactive-label-secondary data-[state=open]:text-(--interactive-label-hover-secondary)",
+    more: "group __menu-item border-b border-transparent bg-clip-padding hoverable transition-colors keyboard-focused:focus-ring keyboard-focused:-outline-offset-2 w-full"
+  };
   const PROJECT_ICON_PATHS = {
     folder: [["M5.55933 2.14136C6.06479 2.14136 6.55777 2.30207 6.96655 2.59937L7.81812 3.21851C8.04741 3.38523 8.32368 3.47534 8.60718 3.47534H11.9666C13.2874 3.47534 14.3582 4.54606 14.3582 5.86694V11.4666C14.3582 12.7874 13.2874 13.8582 11.9666 13.8582H4.03296C2.71229 13.8579 1.64136 12.7873 1.64136 11.4666V4.53296C1.6416 3.21244 2.71244 2.1416 4.03296 2.14136H5.55933ZM2.69214 7.85913V11.4666C2.69214 12.2074 3.29219 12.8081 4.03296 12.8083H11.9666C12.7075 12.8083 13.3083 12.2075 13.3083 11.4666V7.85913H2.69214ZM4.03296 3.19214C3.29234 3.19238 2.69239 3.79234 2.69214 4.53296V6.80835H13.3083V5.86694C13.3083 5.12596 12.7075 4.52515 11.9666 4.52515H8.60718C8.10172 4.52515 7.60874 4.36541 7.19995 4.06812L6.34839 3.448C6.11917 3.28145 5.84268 3.19214 5.55933 3.19214H4.03296Z", true]],
     wrench: [["M13.1892 6.42334C13.1892 6.31859 13.1833 6.21512 13.1746 6.11279L12.1755 7.11279C11.2673 8.02099 9.79467 8.02099 8.88647 7.11279C7.97881 6.20472 7.97886 4.73282 8.88647 3.82471L9.88549 2.82471C9.78382 2.81611 9.68096 2.81105 9.5769 2.81104C7.58161 2.81104 5.96375 4.42808 5.96362 6.42334C5.96362 6.49931 5.96585 6.57522 5.97045 6.6499C5.99355 7.02499 6.01126 7.31651 6.01928 7.53369C6.02666 7.73353 6.0298 7.92837 6.00073 8.07764C5.98214 8.17293 5.96215 8.27259 5.92358 8.37451C5.88497 8.47648 5.83314 8.56421 5.78393 8.64795C5.65778 8.86248 5.43743 9.07648 5.15405 9.35986L3.10424 11.4106C2.69418 11.8209 2.69405 12.4858 3.10424 12.896C3.51444 13.3061 4.17936 13.306 4.58959 12.896L6.64037 10.8452C6.92364 10.5619 7.13779 10.3414 7.35229 10.2153C7.43595 10.1662 7.52386 10.1152 7.62573 10.0767C7.72761 10.0381 7.82734 10.0181 7.9226 9.99951C8.07189 9.97047 8.26671 9.9726 8.46655 9.97998C8.68377 9.988 8.97514 10.0067 9.35033 10.0298C9.42502 10.0344 9.50092 10.0366 9.5769 10.0366C11.5721 10.0364 13.1892 8.41856 13.1892 6.42334ZM14.239 6.42334C14.239 8.99846 12.152 11.0862 9.5769 11.0864C9.47938 11.0864 9.38204 11.0836 9.28588 11.0776C8.90478 11.0542 8.62864 11.0372 8.42748 11.0298C8.32751 11.0261 8.25313 11.0247 8.19799 11.0259C8.1435 11.027 8.1228 11.0308 8.1228 11.0308C8.01936 11.0509 8.00361 11.0565 7.99682 11.0591C7.98976 11.0618 7.97312 11.0685 7.88451 11.1206C7.81649 11.1606 7.71987 11.2511 7.38256 11.5884L5.33276 13.6382C4.51249 14.4585 3.18236 14.4584 2.36205 13.6382C1.54175 12.8179 1.54175 11.4878 2.36205 10.6675L4.41186 8.61768C4.74904 8.2805 4.83866 8.18374 4.87865 8.11572C4.93228 8.02447 4.93858 8.00924 4.94115 8.00244C4.94376 7.99553 4.94943 7.97926 4.96948 7.87646C4.96995 7.87261 4.97233 7.85123 4.97338 7.80225C4.97457 7.74705 4.97415 7.67194 4.97045 7.57178C4.96302 7.3707 4.94605 7.09506 4.9226 6.71436C4.91668 6.61819 4.91381 6.52086 4.91381 6.42334C4.91394 3.84818 7.00171 1.76025 9.5769 1.76025C9.92933 1.76029 10.2732 1.80001 10.6042 1.87451C10.6613 1.88736 10.7462 1.90612 10.8191 1.93115C10.8809 1.95238 10.9676 1.98826 11.0515 2.05713L11.1335 2.13721L11.1794 2.19775C11.2786 2.34332 11.3221 2.5261 11.2966 2.70068C11.2723 2.86726 11.1889 2.98477 11.1365 3.04932C11.0875 3.10945 11.0245 3.17198 10.9792 3.21729L9.62963 4.56689C9.13148 5.06504 9.13148 5.87246 9.62963 6.37061C10.1278 6.86865 10.9352 6.86872 11.4333 6.37061L12.783 5.021C12.8284 4.97557 12.8906 4.91177 12.9509 4.86279C13.0155 4.81035 13.133 4.72793 13.2996 4.70361L13.3747 4.69678C13.5257 4.69166 13.6777 4.73576 13.8025 4.8208L13.863 4.8667L13.9431 4.94873C14.0117 5.03235 14.0478 5.11848 14.0691 5.18018C14.0941 5.25296 14.1129 5.33794 14.1257 5.39502C14.2003 5.72622 14.239 6.07072 14.239 6.42334Z"]],
@@ -54,6 +64,11 @@
   let host = null, body = null, signature = "", expanded = true, showAll = false;
   let lastRaw = null, lastUrl = "", lastScope = "";
   const nativeIconCache = new Map();
+
+  function sidebarMode() {
+    const button = sectionButtons().get("projects"), header = sectionHeader(button);
+    return header?.classList?.contains("group/sidebar-expando-section-header") ? "legacy" : "current";
+  }
 
   function newChatKey(value = location.href) {
     try {
@@ -168,22 +183,28 @@
     svg.classList.toggle("-rotate-90", !expanded);
   }
 
-  function createHost() {
-    const node = document.createElement("section");
+  function createHost(mode = sidebarMode()) {
+    const legacy = mode === "legacy";
+    const node = document.createElement(legacy ? "div" : "section");
     node.id = HOST_ID;
-    node.className = FALLBACK.outer;
+    node.dataset.gnSidebarMode = mode;
+    node.className = legacy ? LEGACY.section : FALLBACK.outer;
     node.style.cssText = "min-width:0;max-width:100%;overflow-x:clip";
-    const section = document.createElement("div"); section.className = `${FALLBACK.section} gn-section`;
-    const header = document.createElement("div"); header.className = `${FALLBACK.header} gn-header`;
-    const titleWrap = document.createElement("div"); titleWrap.className = `${FALLBACK.titleWrap} gn-title-wrap`;
-    const titleFlex = document.createElement("div"); titleFlex.className = `${FALLBACK.titleFlex} gn-title-flex`;
-    const head = document.createElement("button"); head.type = "button"; head.className = `${FALLBACK.head} gn-head`; head.setAttribute("aria-expanded", "true");
-    const title = document.createElement("span"); title.className = `${FALLBACK.title} gn-title`; title.textContent = "快捷项目";
+    const section = legacy ? node : document.createElement("div");
+    if (!legacy) section.className = `${FALLBACK.section} gn-section`;
+    const header = document.createElement("div"); header.className = `${legacy ? LEGACY.header : FALLBACK.header} gn-header`;
+    const head = document.createElement("button"); head.type = "button"; head.className = `${legacy ? LEGACY.head : FALLBACK.head} gn-head`; head.setAttribute("aria-expanded", "true");
+    const title = document.createElement(legacy ? "h2" : "span"); title.className = `${legacy ? LEGACY.title : FALLBACK.title} gn-title`; title.textContent = "快捷项目";
+    if (legacy) title.dataset.noSpacing = "true";
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("width", "16"); svg.setAttribute("height", "16"); svg.setAttribute("viewBox", "0 0 16 16"); svg.setAttribute("aria-hidden", "true"); svg.classList.add("gn-chevron");
     const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("fill", "currentColor"); svg.append(use); head.append(title, svg); header.append(head);
-    titleFlex.append(head); titleWrap.append(titleFlex); header.replaceChildren(titleWrap);
+    if (!legacy) {
+      const titleWrap = document.createElement("div"); titleWrap.className = `${FALLBACK.titleWrap} gn-title-wrap`;
+      const titleFlex = document.createElement("div"); titleFlex.className = `${FALLBACK.titleFlex} gn-title-flex`;
+      titleFlex.append(head); titleWrap.append(titleFlex); header.replaceChildren(titleWrap);
+    }
     body = document.createElement("ul"); body.className = "m-0 list-none p-0 gn-list"; body.style.cssText = "min-width:0;max-width:100%;overflow-x:clip";
-    section.append(header, body); node.append(section);
+    section.append(header, body); if (!legacy) node.append(section);
     head.addEventListener("click", () => { expanded = !expanded; setChevron(); });
     return node;
   }
@@ -192,19 +213,43 @@
     if (!host) return;
     const nativeButton = sectionButtons().get("projects"), native = sectionRoot(nativeButton);
     if (!nativeButton || !native || native === host) return;
+    const legacy = host.dataset.gnSidebarMode === "legacy";
+    if (legacy) {
+      host.className = native.className || LEGACY.section;
+      const header = host.querySelector(".gn-header"), head = host.querySelector(".gn-head"), title = host.querySelector(".gn-title");
+      const nativeHeader = sectionHeader(nativeButton), nativeTitle = nativeButton.querySelector("h2");
+      if (nativeHeader?.className) header.className = `${nativeHeader.className} gn-header`;
+      if (nativeButton.className) head.className = `${nativeButton.className} gn-head`;
+      if (nativeTitle?.className) title.className = `${nativeTitle.className} gn-title`;
+      if (nativeTitle?.hasAttribute("data-no-spacing")) title.setAttribute("data-no-spacing", nativeTitle.getAttribute("data-no-spacing") || "true");
+      return;
+    }
     const nativeOuter = native.parentElement?.tagName === "SECTION" && native.parentElement.classList?.contains("group/nav-section") ? native.parentElement : null;
     host.className = `${nativeOuter?.className || FALLBACK.outer}`;
     const section = host.querySelector(".gn-section"); if (section) section.className = `${native.className || FALLBACK.section} gn-section`;
-    const nativeHeader = sectionHeader(nativeButton), header = host.querySelector(".gn-header"), head = host.querySelector(".gn-head"), title = host.querySelector(".gn-title");
+    const nativeHeader = sectionHeader(nativeButton), header = host.querySelector(".gn-header"), head = host.querySelector(".gn-head");
     if (nativeHeader?.className) header.className = nativeHeader.className;
     header.classList.add("gn-header");
     const nativeTitleFlex = nativeButton.parentElement, nativeTitleWrap = nativeTitleFlex?.parentElement;
     const titleFlex = host.querySelector(".gn-title-flex"), titleWrap = host.querySelector(".gn-title-wrap");
-    if (nativeTitleWrap?.className) titleWrap.className = `${nativeTitleWrap.className} gn-title-wrap`;
-    if (nativeTitleFlex?.className) titleFlex.className = `${nativeTitleFlex.className} gn-title-flex`;
+    const legacyDirectHeader = nativeTitleFlex === nativeHeader && nativeHeader.classList?.contains("group/sidebar-expando-section-header");
+    titleWrap.style.display = legacyDirectHeader ? "contents" : "";
+    titleFlex.style.display = legacyDirectHeader ? "contents" : "";
+    titleWrap.className = legacyDirectHeader ? "gn-title-wrap" : `${nativeTitleWrap?.className || FALLBACK.titleWrap} gn-title-wrap`;
+    titleFlex.className = legacyDirectHeader ? "gn-title-flex" : `${nativeTitleFlex?.className || FALLBACK.titleFlex} gn-title-flex`;
     if (nativeButton.className) head.className = `${nativeButton.className} gn-head`;
     const nativeTitle = nativeButton.querySelector("h2, span");
-    if (nativeTitle?.className) title.className = `${nativeTitle.className} gn-title`;
+    let title = host.querySelector(".gn-title");
+    if (nativeTitle && title?.tagName !== nativeTitle.tagName) {
+      const replacement = document.createElement(nativeTitle.tagName.toLowerCase());
+      replacement.textContent = title?.textContent || "快捷项目";
+      replacement.className = "gn-title";
+      title?.replaceWith(replacement);
+      title = replacement;
+    }
+    if (title && nativeTitle?.className) title.className = `${nativeTitle.className} gn-title`;
+    if (title && nativeTitle?.hasAttribute("data-no-spacing")) title.setAttribute("data-no-spacing", nativeTitle.getAttribute("data-no-spacing") || "true");
+    else title?.removeAttribute("data-no-spacing");
     const nativeChevron = nativeButton.querySelector("svg"), currentChevron = head.querySelector(".gn-chevron");
     if (nativeChevron && currentChevron && !currentChevron.matches('[data-native-chevron="true"]')) {
       const clone = nativeChevron.cloneNode(true); clone.classList.add("gn-chevron"); clone.dataset.nativeChevron = "true"; currentChevron.replaceWith(clone);
@@ -223,7 +268,12 @@
   function mount() {
     const point = insertionPoint();
     if (!point) return false;
-    if (!host) host = createHost();
+    const mode = sidebarMode();
+    if (!host || host.dataset.gnSidebarMode !== mode) {
+      host?.remove();
+      host = createHost(mode);
+      signature = "";
+    }
     if (host.parentElement !== point.container || host.nextElementSibling !== point.anchor) point.container.insertBefore(host, point.anchor);
     copyNativeSkin(); setChevron();
     return true;
@@ -303,6 +353,19 @@
   }
 
   function makeIcon(project) {
+    if (sidebarMode() === "legacy") {
+      const nativeMain = nativeRowFor(project), wrap = document.createElement("div"), holder = document.createElement("div");
+      wrap.className = "relative flex items-center justify-center [opacity:var(--menu-item-icon-opacity,1)] icon";
+      holder.dataset.testid = "project-folder-icon";
+      const visual = visualOf(nativeMain) || project.visual;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", "20"); svg.setAttribute("height", "20"); svg.setAttribute("viewBox", "0 0 20 20"); svg.setAttribute("class", "icon"); svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use"), shell = spriteBase("shell");
+      if (visual?.color) holder.style.color = visual.color;
+      const base = visual ? spriteBase(visual.sprite) : shell;
+      if (base) use.setAttribute("href", `${base}#${visual?.symbol || "folder"}`);
+      use.setAttribute("fill", "currentColor"); svg.append(use); holder.append(svg); wrap.append(holder); return wrap;
+    }
     const nativeMain = nativeRowFor(project);
     if (nativeMain) captureNativeIcon(nativeMain);
     const wrap = document.createElement("div"); wrap.className = FALLBACK.iconWrap;
@@ -317,6 +380,12 @@
   }
 
   function nameNode(project) {
+    if (sidebarMode() === "legacy") {
+      const grow = document.createElement("div"); grow.className = "flex min-w-0 grow items-center gap-2.5";
+      const clip = document.createElement("div"); clip.className = "truncate [&:has([data-marquee-text])]:min-w-0 [&:has([data-marquee-text])]:flex-1 [&:has([data-marquee-text])]:overflow-visible";
+      const text = document.createElement("span"); text.dir = "auto"; text.className = "_NCija_viewport block w-full min-w-0 whitespace-nowrap"; text.dataset.marqueeText = "true"; text.draggable = false; text.textContent = project.name;
+      clip.append(text); grow.append(clip); return grow;
+    }
     const wrap = document.createElement("div"); wrap.className = FALLBACK.nameWrap;
     const inner = document.createElement("span"); inner.className = FALLBACK.nameInner;
     const text = document.createElement("span"); text.dir = "auto"; text.className = "block min-w-0 flex-1 truncate select-none"; text.dataset.marqueeText = "true"; text.draggable = false; text.textContent = project.name;
@@ -325,6 +394,14 @@
   }
 
   function makeCompose(project) {
+    if (sidebarMode() === "legacy") {
+      const actions = document.createElement("div"); actions.className = LEGACY.actions;
+      const link = document.createElement("a"); link.className = LEGACY.action; link.href = `/g/${project.shortUrl}/project`; link.target = "_blank"; link.rel = "noopener noreferrer"; link.dataset.projectNew = project.projectId;
+      link.setAttribute("aria-label", `在 ${project.name} 中开启新聊天`); link.title = `在 ${project.name} 中开启新聊天`;
+      const inner = document.createElement("div"); inner.className = "flex items-center justify-center rounded-lg p-1";
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20"); svg.setAttribute("viewBox", "0 0 20 20"); svg.setAttribute("class", "icon-sm"); svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use"), shell = spriteBase("shell"); if (shell) use.setAttribute("href", `${shell}#compose`); use.setAttribute("fill", "currentColor"); svg.append(use); inner.append(svg); link.append(inner); actions.append(link); return actions;
+    }
     const actions = document.createElement("div"); actions.className = FALLBACK.actions;
     const slot = document.createElement("div"); slot.className = FALLBACK.actionSlot;
     const reveal = document.createElement("span"); reveal.className = FALLBACK.actionReveal;
@@ -337,8 +414,9 @@
 
   function fallbackRow() {
     const li = document.createElement("li"); li.className = "list-none";
-    const row = document.createElement("div"); row.className = "relative";
-    const main = document.createElement("div"); main.className = FALLBACK.main; main.tabIndex = 0; main.role = "button"; main.dataset.fill = ""; main.dataset.sidebarItem = "true";
+    const legacy = sidebarMode() === "legacy";
+    const row = document.createElement("div"); row.className = legacy ? "group/project-unfurl-row relative" : "relative";
+    const main = document.createElement("div"); main.className = legacy ? LEGACY.main : FALLBACK.main; main.tabIndex = 0; main.role = "button"; main.dataset.fill = ""; main.dataset.sidebarItem = "true";
     main.style.cssText = "--menu-item-active:var(--interactive-bg-secondary-selected);--menu-item-background:var(--interactive-bg-secondary-default);--menu-item-highlighted:var(--interactive-bg-secondary-hover);--menu-item-open:var(--interactive-bg-secondary-press);--menu-item-pressed:var(--interactive-bg-secondary-press)";
     row.append(main); li.append(row); return li;
   }
@@ -348,6 +426,19 @@
     const li = fallbackRow();
     const row = li.querySelector('[class~="group/project-unfurl-row"]') || li.firstElementChild;
     const main = li.querySelector('[role="button"][data-sidebar-item="true"]');
+    if (sidebarMode() === "legacy") {
+      const templateRow = template?.querySelector('[class~="group/project-unfurl-row"]'), templateMain = template?.querySelector('[role="button"][data-sidebar-item="true"]');
+      if (template?.className) li.className = template.className;
+      if (templateRow?.className) row.className = templateRow.className;
+      if (templateMain?.className) main.className = templateMain.className;
+      main.removeAttribute("aria-controls"); main.removeAttribute("aria-expanded"); main.removeAttribute("data-state"); main.removeAttribute("data-active"); main.dataset.projectId = project.projectId;
+      main.replaceChildren(makeIcon(project), nameNode(project)); row.append(makeCompose(project));
+      if (project.projectId === current?.projectId) main.dataset.active = "";
+      main.setAttribute("aria-label", project.name); main.title = project.name;
+      main.addEventListener("click", () => location.assign(`/g/${project.shortUrl}/project`));
+      main.addEventListener("keydown", event => { if (event.key !== "Enter" && event.key !== " ") return; event.preventDefault(); location.assign(`/g/${project.shortUrl}/project`); });
+      return li;
+    }
     const currentTemplate = template?.matches?.('[data-app-action-sidebar-project-row], .sidebar-item[role="button"]') ? template : null;
     const templateRow = currentTemplate ? null : template?.querySelector('[class~="group/project-unfurl-row"]'), templateMain = currentTemplate || template?.querySelector('[role="button"][data-sidebar-item="true"]');
     if (!currentTemplate && template?.className) li.className = template.className;
@@ -409,6 +500,13 @@
   }
 
   function moreRow() {
+    if (sidebarMode() === "legacy") {
+      const li = document.createElement("li"); li.className = "list-none";
+      const button = document.createElement("button"); button.type = "button"; button.className = LEGACY.more; button.textContent = "查看更多"; button.style.color = "var(--text-tertiary)";
+      button.onmouseenter = button.onfocus = () => button.style.color = "var(--text-primary)";
+      button.onmouseleave = button.onblur = () => button.style.color = "var(--text-tertiary)";
+      button.addEventListener("click", () => { showAll = true; signature = ""; render(lastRaw, lastUrl, lastScope); }); li.append(button); return li;
+    }
     const li = document.createElement("li"); li.className = FALLBACK.moreRow;
     const button = document.createElement("button");
     const nativeProject = sectionRoot(sectionButtons().get("projects"));

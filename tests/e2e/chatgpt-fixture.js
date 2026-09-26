@@ -1,7 +1,7 @@
 // Controlled native-composer fixture. These are real Chromium + MV3 integration
 // tests, not claims about the live ChatGPT service; live verification is separate.
 const html = `<!doctype html><html><head><meta charset="utf-8"><title>Queue regression</title><style>
-body{margin:0;font:16px system-ui}nav{position:fixed;inset:0 auto 0 0;width:220px;overflow:auto}main{max-width:760px;margin:30px auto}form{position:fixed;bottom:32px;left:calc(50% - 360px);width:720px;padding:12px;background:#eee;border-radius:16px}#prompt-textarea{min-height:50px;white-space:pre-wrap;outline:none}#messages{padding-bottom:220px}button{padding:8px}</style></head><body>
+body{margin:0;font:16px system-ui}nav{position:fixed;inset:0 auto 0 0;width:220px;overflow:auto}main{max-width:760px;margin:30px auto}form{position:fixed;bottom:32px;left:calc(50% - 360px);width:720px;padding:12px;background:#eee;border-radius:16px}#prompt-textarea{min-height:50px;white-space:pre-wrap;outline:none}#messages{padding-bottom:220px}button{padding:8px}.original-sidebar button>span.__menu-label{padding-block:8px}</style></head><body>
 <script id="client-bootstrap" type="application/json">{"user":{"id":"regression-user"},"session":{"account":{"id":"regression-workspace"}}}</script>
 <svg aria-hidden="true" width="0" height="0"><use href="/cdn/assets/sprites-shell-test.svg#compose"></use><use href="/cdn/assets/sprites-core-test.svg#1af12c"></use></svg>
 <nav aria-label="侧边栏"><button id="native-sidebar-toggle" data-testid="close-sidebar-button" aria-label="关闭侧边栏" aria-expanded="true">侧边栏</button><div id="native-sections"></div></nav>
@@ -9,20 +9,23 @@ body{margin:0;font:16px system-ui}nav{position:fixed;inset:0 auto 0 0;width:220p
 <script>
 localStorage.setItem('_account',JSON.stringify('regression-workspace'));
 window.currentDomFixture=new URLSearchParams(location.search).has('current-dom');
+window.originalSidebarFixture=new URLSearchParams(location.search).has('original-sidebar');
+if(window.originalSidebarFixture)document.documentElement.classList.add('original-sidebar');
 document.getElementById('native-sidebar-toggle').addEventListener('click',event=>{const open=event.currentTarget.getAttribute('aria-expanded')==='true';event.currentTarget.setAttribute('aria-expanded',String(!open));event.currentTarget.setAttribute('aria-label',open?'打开侧边栏':'关闭侧边栏');});
 for(const [legacyName,key] of [['置顶','favorites'],['项目','projects'],['聊天','chats']]){
   const name=window.currentDomFixture&&key==='chats'?'最近':legacyName;
-  const section=document.createElement(window.currentDomFixture?'div':'section');section.dataset.nativeSection=key;if(window.currentDomFixture)section.className='group/nav-section flex flex-col';
+  const section=document.createElement(window.currentDomFixture?'div':window.originalSidebarFixture?'div':'section');section.dataset.nativeSection=key;if(window.currentDomFixture)section.className='group/nav-section flex flex-col';else if(window.originalSidebarFixture)section.className='group/sidebar-expando-section mb-[var(--sidebar-collapsed-section-margin-bottom)]';
   const outer=window.currentDomFixture?document.createElement('section'):section;if(window.currentDomFixture)outer.className='relative px-row-x group/nav-section';
   const button=document.createElement('button');button.dataset.section=key;
   if(window.currentDomFixture){button.className='group/section-toggle flex min-w-0 flex-1 items-center gap-1';button.innerHTML='<span class="min-w-0 truncate">'+name+'</span>';}
+  else if(window.originalSidebarFixture){button.className='text-token-text-tertiary flex w-full items-center justify-start gap-0.5 px-4 py-1.5';button.innerHTML='<h2 class="__menu-label font-medium">'+name+'</h2><svg width="16" height="16" viewBox="0 0 16 16"><use href="/cdn/assets/sprites-shell-test.svg#chevron-right-sm"></use></svg>';}
   else button.innerHTML='<h2>'+name+'</h2>';
   const body=document.createElement('div');body.dataset.sectionBody=key;body.style.minHeight=key==='projects'?'96px':'56px';if(key!=='projects')body.textContent='原生分区内容';
   let prefs={sectionStates:{}};try{prefs=JSON.parse(decodeURIComponent(document.cookie.split('; ').find(c=>c.startsWith('oai-sidebar-sections='))?.split('=')[1]||''));}catch{}
   button.setAttribute('aria-expanded',String(prefs.sectionStates[key]!==false));
   body.hidden=button.getAttribute('aria-expanded')!=='true';
   button.addEventListener('click',()=>{const expanded=button.getAttribute('aria-expanded')!=='true';button.setAttribute('aria-expanded',String(expanded));body.hidden=!expanded;if(key==='projects'&&expanded)window.renderNativeProjects?.();prefs.sectionStates[key]=expanded;document.cookie='oai-sidebar-sections='+encodeURIComponent(JSON.stringify(prefs))+'; Path=/; SameSite=Lax';});
-  section.append(button,body);if(window.currentDomFixture)outer.append(section);document.getElementById('native-sections').append(outer);
+  if(window.originalSidebarFixture){const header=document.createElement('div');header.className='group/sidebar-expando-section-header flex items-center justify-between pe-1.5';header.append(button);section.append(header,body);}else section.append(button,body);if(window.currentDomFixture)outer.append(section);document.getElementById('native-sections').append(outer);
 }
 window.renderNativeProjects=()=>{
   const body=document.querySelector('[data-section-body="projects"]');if(!body)return;

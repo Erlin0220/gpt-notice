@@ -89,6 +89,39 @@ test("shortcut list starts with a new-chat link that opens in a new tab", async 
   await newPage.close();
 });
 
+test("original sidebar skin keeps the shortcut header flat and matches the native title element", async ({page}) => {
+  await page.goto("https://chatgpt.com/c/sidebar-original?original-sidebar=1");
+  await expect(page.locator(`${shortcut} [data-project-id]`)).toHaveCount(3);
+  const shape = await page.evaluate(() => {
+    const native = document.querySelector('[data-section="projects"]');
+    const head = document.querySelector('#gpt-notice-project-shortcuts .gn-head');
+    const wrap = document.querySelector('#gpt-notice-project-shortcuts .gn-title-wrap');
+    const flex = document.querySelector('#gpt-notice-project-shortcuts .gn-title-flex');
+    const header = document.querySelector('#gpt-notice-project-shortcuts .gn-header');
+    const hostNode = document.getElementById('gpt-notice-project-shortcuts');
+    const firstRow = hostNode?.querySelector('[data-project-id]');
+    const firstIcon = firstRow?.querySelector('[data-testid="project-folder-icon"] svg');
+    return {
+      hostTag: hostNode?.tagName || "",
+      mode: hostNode?.dataset.gnSidebarMode || "",
+      wrapDisplay: wrap ? getComputedStyle(wrap).display : "",
+      flexDisplay: flex ? getComputedStyle(flex).display : "",
+      nestedSection: Boolean(wrap?.classList.contains("group/sidebar-expando-section")),
+      nestedHeader: Boolean(flex?.classList.contains("group/sidebar-expando-section-header")),
+      copiesButtonSkin: Boolean(native && head && [...native.classList].every(name => head.classList.contains(name))),
+      copiesHeaderSkin: Boolean(header?.classList.contains("group/sidebar-expando-section-header")),
+      nativeTitleTag: native?.querySelector("h2, span")?.tagName || "",
+      shortcutTitleTag: head?.querySelector(".gn-title")?.tagName || "",
+      legacyRow: Boolean(firstRow?.classList.contains("__menu-item")),
+      iconWidth: firstIcon?.getAttribute("width") || "",
+      nativeHeight: native?.getBoundingClientRect().height || 0,
+      shortcutHeight: head?.getBoundingClientRect().height || 0
+    };
+  });
+  expect(shape).toMatchObject({ hostTag: "DIV", mode: "legacy", nestedSection: false, nestedHeader: false, copiesButtonSkin: true, copiesHeaderSkin: true, nativeTitleTag: "H2", shortcutTitleTag: "H2", legacyRow: true, iconWidth: "20" });
+  expect(Math.abs(shape.shortcutHeight - shape.nativeHeight)).toBeLessThanOrEqual(1);
+});
+
 test("shortcut section defaults to eight rows, popup can change the limit, and native mechanics stay intact", async ({page,persistentContext,extensionId}) => {
   await page.goto("https://chatgpt.com/c/sidebar-native-shape");
   const extra = ["d","e","f","1","2","3","4","5"].map((c,i)=>({id:`g-p-${c.repeat(32)}`,short_url:`g-p-${c.repeat(32)}-extra-${i}`,display:{name:i===7?"怪物火车":`extra-${i}`,...(i===7?{}:{emoji:"terminal",theme:"#3A83F7"})}}));
