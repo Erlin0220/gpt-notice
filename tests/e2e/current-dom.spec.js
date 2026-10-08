@@ -66,6 +66,21 @@ test("current sidebar sections collapse and shortcut projects mount before Recen
   })).toEqual({ next: "chats", tag: "SECTION", parentContainsRecent: true, rowUsesCurrentSidebarSkin: true });
 });
 
+test("shortcut projects ignore a stale hidden sidebar tree and mount in the visible current sidebar", async ({ page }) => {
+  await page.goto("https://chatgpt.com/c/current-dom-duplicate-sidebar?current-dom=1&duplicate-sidebar=1");
+  const shortcut = page.locator("#gpt-notice-project-shortcuts");
+  await expect(shortcut).toBeVisible();
+  await expect(shortcut.locator("[data-project-id]")).toHaveCount(1);
+  expect(await page.evaluate(() => {
+    const hostNode = document.getElementById("gpt-notice-project-shortcuts");
+    const next = hostNode?.nextElementSibling;
+    const visibleRecent = next?.matches?.('[data-native-section="chats"]')
+      ? next
+      : next?.querySelector?.('[data-native-section="chats"]');
+    return Boolean(hostNode && visibleRecent && hostNode.getClientRects().length > 0 && next.getClientRects().length > 0);
+  })).toBe(true);
+});
+
 test("native sidebar sections default collapsed on conversation routes", async ({ page }) => {
   await page.goto("https://chatgpt.com/c/current-dom-default-collapse?current-dom=1");
   for (const section of ["favorites", "projects", "chats"]) {

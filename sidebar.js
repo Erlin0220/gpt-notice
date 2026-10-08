@@ -99,12 +99,13 @@
   }
 
   function sectionButtons() {
-    const found = new Map();
+    const found = new Map(), rendered = new Map();
     for (const button of document.querySelectorAll('nav button[aria-expanded]')) {
       const key = LABELS.get((button.textContent || "").trim());
       if (key && !found.has(key)) found.set(key, button);
+      if (key && !rendered.has(key) && button.getClientRects().length > 0 && getComputedStyle(button).visibility !== "hidden") rendered.set(key, button);
     }
-    return found;
+    return rendered.size ? rendered : found;
   }
 
   function sectionRoot(button) {

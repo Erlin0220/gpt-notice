@@ -10,6 +10,7 @@ body{margin:0;font:16px system-ui}nav{position:fixed;inset:0 auto 0 0;width:220p
 localStorage.setItem('_account',JSON.stringify('regression-workspace'));
 window.currentDomFixture=new URLSearchParams(location.search).has('current-dom');
 window.originalSidebarFixture=new URLSearchParams(location.search).has('original-sidebar');
+window.duplicateSidebarFixture=new URLSearchParams(location.search).has('duplicate-sidebar');
 if(window.originalSidebarFixture)document.documentElement.classList.add('original-sidebar');
 document.getElementById('native-sidebar-toggle').addEventListener('click',event=>{const open=event.currentTarget.getAttribute('aria-expanded')==='true';event.currentTarget.setAttribute('aria-expanded',String(!open));event.currentTarget.setAttribute('aria-label',open?'打开侧边栏':'关闭侧边栏');});
 for(const [legacyName,key] of [['置顶','favorites'],['项目','projects'],['聊天','chats']]){
@@ -41,6 +42,9 @@ window.renderNativeProjects=()=>{
   body.replaceChildren(list);
 };
 window.renderNativeProjects();
+if(window.currentDomFixture&&window.duplicateSidebarFixture){
+  const live=document.getElementById('native-sections'),stale=live.cloneNode(true);stale.id='stale-native-sections';stale.style.display='none';live.before(stale);
+}
 if(new URLSearchParams(location.search).has('history-poc'))sessionStorage.setItem('history-poc','1');
 if(sessionStorage.getItem('history-poc')==='1'){
   window.historyListResults=[];
